@@ -16,7 +16,7 @@ pub fn render_value(value: &spar::ConfigValue) -> String {
         ),
         spar::ConfigValue::Section(fields) => {
             let mut fields = fields.iter().collect::<Vec<_>>();
-            fields.sort_by(|(left, _), (right, _)| left.cmp(right));
+            fields.sort_by_key(|(name, _)| *name);
             let body = fields
                 .into_iter()
                 .map(|(name, value)| format!("{name}: {};", render_value(value)))
