@@ -1,3 +1,7 @@
+pub mod value;
+
+pub use value::render_value;
+
 pub const PRODUCT_NAME: &str = "sparsh";
 
 #[cfg(test)]
