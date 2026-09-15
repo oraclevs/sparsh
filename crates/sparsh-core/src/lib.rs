@@ -1,4 +1,5 @@
 pub mod builtin;
+mod dispatch;
 pub mod value;
 
 pub use builtin::{BuiltinError, BuiltinMetadata, BuiltinOutput, BuiltinRegistry};
