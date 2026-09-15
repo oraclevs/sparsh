@@ -1,0 +1,14 @@
+[package]
+name = "sparsh-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+spar = { path = "../../../spar" }
+spar-command = { path = "../../../spar-command" }
+spar-process = { path = "../../../spar-process" }
+
+[dev-dependencies]
+tempfile = "3"

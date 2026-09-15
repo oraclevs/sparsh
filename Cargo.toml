@@ -1,0 +1,20 @@
+[workspace]
+members = [".", "crates/sparsh-core", "crates/sparsh-ui"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[package]
+name = "sparsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sparsh-core = { path = "crates/sparsh-core" }
+sparsh-ui = { path = "crates/sparsh-ui" }
