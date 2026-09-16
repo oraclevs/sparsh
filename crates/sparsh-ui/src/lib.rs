@@ -2,9 +2,11 @@ use std::io::{self, BufRead, Write};
 
 use sparsh_core::{render_value, ShellError, ShellResult, ShellSession};
 
+mod git;
 mod prompt;
 mod theme;
 
+pub use git::GitProbe;
 pub use prompt::{GitState, PromptData, PromptState, SparshPrompt};
 pub use theme::{SemanticRole, Theme};
 
