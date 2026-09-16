@@ -3,6 +3,7 @@ use std::fmt;
 use crate::builtin::{BuiltinError, BuiltinOutput, BuiltinRegistry};
 use crate::dispatch::{classify, Dispatch};
 use crate::execute::execute_plan;
+use crate::services::ShellServices;
 
 #[derive(Debug)]
 pub enum ShellResult {
@@ -53,18 +54,25 @@ impl std::error::Error for ShellError {}
 pub struct ShellSession {
     spar: spar::Session,
     builtins: BuiltinRegistry,
+    services: ShellServices,
     should_exit: bool,
     last_status: i32,
 }
 
 impl ShellSession {
     pub fn new() -> Self {
-        Self {
+        Self::try_new().expect("failed to initialize Sparsh session services")
+    }
+
+    pub fn try_new() -> Result<Self, ShellError> {
+        Ok(Self {
             spar: spar::Engine::default().session(),
             builtins: BuiltinRegistry::new(),
+            services: ShellServices::from_process()
+                .map_err(|message| ShellError::Process { message, status: 1 })?,
             should_exit: false,
             last_status: 0,
-        }
+        })
     }
 
     pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
@@ -96,7 +104,9 @@ impl ShellSession {
             )),
             Dispatch::Command(command) => spar::parse_shell_plan(command)
                 .map_err(|error| ShellError::Spar(vec![error]))
-                .and_then(|plan| execute_plan(&plan, &self.builtins, self.last_status)),
+                .and_then(|plan| {
+                    execute_plan(&plan, &self.builtins, &mut self.services, self.last_status)
+                }),
         };
 
         match result {
@@ -136,6 +146,7 @@ impl Default for ShellSession {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     use spar::ConfigValue;
@@ -247,17 +258,18 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_name_inside_a_pipeline_is_not_run_as_a_parent_builtin() {
+    fn a_builtin_name_inside_a_pipeline_is_rejected_before_spawning() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("pwd.txt");
         let mut session = ShellSession::new();
 
-        let result = session
+        let error = session
             .submit(&format!("pwd | cat > {}", output.display()))
-            .unwrap();
+            .unwrap_err();
 
-        assert!(matches!(result, ShellResult::Process(_)));
-        assert!(!std::fs::read_to_string(output).unwrap().trim().is_empty());
+        assert_eq!(error.status(), 1);
+        assert!(error.to_string().contains("builtins in pipelines"));
+        assert!(!output.exists());
     }
 
     #[test]
@@ -269,5 +281,135 @@ mod tests {
 
         assert!(matches!(error, ShellError::Process { status: 127, .. }));
         assert_eq!(session.last_status(), 127);
+    }
+
+    fn builtin_stdout(result: ShellResult) -> String {
+        let ShellResult::Builtin(output) = result else {
+            panic!("expected builtin output")
+        };
+        output.stdout.unwrap_or_default()
+    }
+
+    #[test]
+    fn service_mutation_affects_later_step_in_same_plan() {
+        let tools = tempfile::tempdir().unwrap();
+        symlink("/bin/true", tools.path().join("session-tool")).unwrap();
+        let mut session = ShellSession::new();
+
+        let result = session
+            .submit(&format!(
+                "path prepend {}; session-tool",
+                tools.path().display()
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            ShellResult::Process(spar::ShellPlanOutcome { success: true, .. })
+        ));
+    }
+
+    #[test]
+    fn temporary_environment_does_not_mutate_session_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let child_environment = directory.path().join("environment");
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!(
+                "TEMP_ONLY=yes env > {}",
+                child_environment.display()
+            ))
+            .unwrap();
+
+        let output = builtin_stdout(session.submit("export").unwrap());
+
+        assert!(std::fs::read_to_string(child_environment)
+            .unwrap()
+            .contains("TEMP_ONLY=yes"));
+        assert!(!output.contains("TEMP_ONLY="));
+    }
+
+    #[test]
+    fn logical_joins_skip_or_run_the_next_step() {
+        let mut session = ShellSession::new();
+
+        let first = session.submit("false && sparsh-must-not-run").unwrap();
+        assert!(matches!(
+            first,
+            ShellResult::Process(spar::ShellPlanOutcome { exit_code: 1, .. })
+        ));
+        let second = session.submit("false || true").unwrap();
+        assert!(matches!(
+            second,
+            ShellResult::Process(spar::ShellPlanOutcome { exit_code: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn aliases_expand_in_pipelines() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
+        let mut session = ShellSession::new();
+
+        let result = session
+            .submit(&format!(
+                "alias c = cat; printf x | c > {}",
+                output.display()
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            ShellResult::Process(spar::ShellPlanOutcome { success: true, .. })
+        ));
+        assert_eq!(std::fs::read(output).unwrap(), b"x");
+    }
+
+    #[test]
+    fn wrappers_control_alias_and_builtin_resolution() {
+        let mut session = ShellSession::new();
+        session.submit("alias true = false").unwrap();
+
+        let aliased = session.submit("true").unwrap();
+        assert!(matches!(
+            aliased,
+            ShellResult::Process(spar::ShellPlanOutcome { exit_code: 1, .. })
+        ));
+        let bypassed = session.submit("command true").unwrap();
+        assert!(matches!(
+            bypassed,
+            ShellResult::Process(spar::ShellPlanOutcome { success: true, .. })
+        ));
+        let error = session.submit("builtin true").unwrap_err();
+        assert_eq!(error.status(), 1);
+        assert_eq!(error.to_string(), "true: not a Sparsh builtin");
+    }
+
+    #[test]
+    fn builtin_redirect_failure_precedes_environment_mutation() {
+        let mut session = ShellSession::new();
+        session.submit("export KEEP_VALUE=old").unwrap();
+
+        assert!(session
+            .submit("export KEEP_VALUE=new > /sparsh-missing-parent/output")
+            .is_err());
+
+        let output = builtin_stdout(session.submit("export").unwrap());
+        assert!(output.contains("KEEP_VALUE='old'"), "{output}");
+    }
+
+    #[test]
+    fn input_redirect_reaches_external_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        std::fs::write(&input, b"payload").unwrap();
+        let mut session = ShellSession::new();
+
+        session
+            .submit(&format!("cat < {} > {}", input.display(), output.display()))
+            .unwrap();
+
+        assert_eq!(std::fs::read(output).unwrap(), b"payload");
     }
 }

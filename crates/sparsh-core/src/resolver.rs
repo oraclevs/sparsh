@@ -12,6 +12,7 @@ pub(crate) enum ResolutionMode {
     ExternalOnly,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandResolution {
     Builtin { name: String },

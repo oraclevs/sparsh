@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::environment::EnvironmentService;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DirectorySnapshot {
     pub current: PathBuf,
@@ -29,10 +30,12 @@ impl DirectoryService {
         &self.current
     }
 
+    #[cfg(test)]
     pub(crate) fn stack(&self) -> &[PathBuf] {
         &self.stack
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> DirectorySnapshot {
         DirectorySnapshot {
             current: self.current.clone(),

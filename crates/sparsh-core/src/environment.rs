@@ -13,6 +13,7 @@ impl EnvironmentService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_pairs<I, K, V>(pairs: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,

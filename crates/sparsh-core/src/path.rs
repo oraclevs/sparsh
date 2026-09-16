@@ -19,6 +19,7 @@ impl PathService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_directories<I, P>(directories: I) -> Self
     where
         I: IntoIterator<Item = P>,
@@ -81,6 +82,7 @@ impl PathService {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn replace<I, P>(&mut self, directories: I)
     where
         I: IntoIterator<Item = P>,
