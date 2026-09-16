@@ -1,5 +1,6 @@
 mod alias;
 pub mod builtin;
+mod directory;
 mod dispatch;
 mod environment;
 mod execute;
