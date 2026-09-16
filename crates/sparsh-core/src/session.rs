@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::builtin::{BuiltinError, BuiltinOutput, BuiltinRegistry};
 use crate::dispatch::{classify, Dispatch};
@@ -117,6 +119,26 @@ impl ShellSession {
         })
     }
 
+    pub fn try_new_interactive() -> Result<Self, ShellError> {
+        let mut session = Self::try_new()?;
+        let cwd = session.services.directories.current().to_path_buf();
+        let executable = session
+            .services
+            .resolver
+            .external("ls", &session.services.path, &cwd)
+            .ok();
+        if let Some(executable) = executable {
+            let environment = session.services.environment.snapshot();
+            install_color_ls_alias(
+                &mut session.services.aliases,
+                &executable,
+                &cwd,
+                &environment,
+            );
+        }
+        Ok(session)
+    }
+
     pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
         let dispatch = classify(input, &self.spar);
         if matches!(dispatch, Dispatch::Empty) {
@@ -196,14 +218,38 @@ impl Default for ShellSession {
     }
 }
 
+fn install_color_ls_alias(
+    aliases: &mut crate::alias::AliasService,
+    executable: &Path,
+    cwd: &Path,
+    environment: &[(OsString, OsString)],
+) {
+    let supported = Command::new(executable)
+        .args(["--color=auto", "-d", "."])
+        .current_dir(cwd)
+        .env_clear()
+        .envs(environment.iter().cloned())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if supported {
+        aliases
+            .define("ls", vec!["ls".into(), "--color=auto".into()])
+            .expect("the built-in ls alias is valid");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use spar::ConfigValue;
 
-    use super::{CommandKind, ShellError, ShellResult, ShellSession};
+    use super::{install_color_ls_alias, CommandKind, ShellError, ShellResult, ShellSession};
+    use crate::alias::AliasService;
     use crate::PROCESS_STATE;
 
     struct CwdGuard(PathBuf);
@@ -499,5 +545,43 @@ mod tests {
             snapshot.classify_command("missing-snapshot-tool"),
             CommandKind::Unknown
         );
+    }
+
+    fn color_ls_fixture(exit_status: i32) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("ls");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in --color=auto) exit {exit_status};; *) exit 9;; esac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (directory, executable)
+    }
+
+    #[test]
+    fn supported_color_ls_is_seeded_as_an_ordinary_alias() {
+        let (_directory, executable) = color_ls_fixture(0);
+        let mut aliases = AliasService::new();
+
+        install_color_ls_alias(&mut aliases, &executable, Path::new("/"), &[]);
+
+        assert_eq!(aliases.get("ls").unwrap(), ["ls", "--color=auto"]);
+        aliases.define("ls", vec!["custom-ls".into()]).unwrap();
+        assert_eq!(aliases.get("ls").unwrap(), ["custom-ls"]);
+        aliases.remove_many(&["ls".into()]).unwrap();
+        assert!(aliases.get("ls").is_none());
+    }
+
+    #[test]
+    fn unsupported_color_ls_does_not_create_an_alias() {
+        let (_directory, executable) = color_ls_fixture(2);
+        let mut aliases = AliasService::new();
+
+        install_color_ls_alias(&mut aliases, &executable, Path::new("/"), &[]);
+
+        assert!(aliases.get("ls").is_none());
     }
 }
