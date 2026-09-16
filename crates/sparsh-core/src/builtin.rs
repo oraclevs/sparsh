@@ -163,11 +163,9 @@ fn usage_error(usage: &str) -> BuiltinError {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use super::{BuiltinContext, BuiltinRegistry};
-
-    static PROCESS_STATE: Mutex<()> = Mutex::new(());
+    use crate::PROCESS_STATE;
 
     struct CwdGuard(PathBuf);
 
@@ -208,6 +206,7 @@ mod tests {
 
     #[test]
     fn pwd_rejects_arguments_and_returns_current_directory() {
+        let _lock = PROCESS_STATE.lock().unwrap();
         let registry = BuiltinRegistry::new();
         let mut context = context(0);
 

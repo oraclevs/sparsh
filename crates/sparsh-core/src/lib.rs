@@ -11,6 +11,9 @@ pub use value::render_value;
 pub const PRODUCT_NAME: &str = "sparsh";
 
 #[cfg(test)]
+pub(crate) static PROCESS_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn identifies_the_core_product() {

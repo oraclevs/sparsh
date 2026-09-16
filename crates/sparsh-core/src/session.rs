@@ -137,13 +137,11 @@ impl Default for ShellSession {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use spar::ConfigValue;
 
     use super::{ShellError, ShellResult, ShellSession};
-
-    static CWD: Mutex<()> = Mutex::new(());
+    use crate::PROCESS_STATE;
 
     struct CwdGuard(PathBuf);
 
@@ -193,7 +191,7 @@ mod tests {
 
     #[test]
     fn pwd_and_cd_run_in_the_parent_session() {
-        let _lock = CWD.lock().unwrap();
+        let _lock = PROCESS_STATE.lock().unwrap();
         let _cwd = CwdGuard::capture();
         let target = tempfile::tempdir().unwrap();
         let mut session = ShellSession::new();
