@@ -6,4 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nu-ansi-term = "0.50"
+reedline = { version = "0.49", default-features = false }
 sparsh-core = { path = "../sparsh-core" }

@@ -2,6 +2,12 @@ use std::io::{self, BufRead, Write};
 
 use sparsh_core::{render_value, ShellError, ShellResult, ShellSession};
 
+mod prompt;
+mod theme;
+
+pub use prompt::{GitState, PromptData, PromptState, SparshPrompt};
+pub use theme::{SemanticRole, Theme};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorPolicy {
     Auto,
