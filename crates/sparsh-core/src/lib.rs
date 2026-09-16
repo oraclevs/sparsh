@@ -11,7 +11,7 @@ mod session;
 pub mod value;
 
 pub use builtin::{BuiltinError, BuiltinMetadata, BuiltinOutput, BuiltinRegistry};
-pub use session::{ShellError, ShellResult, ShellSession};
+pub use session::{CommandKind, ShellError, ShellResult, ShellSession, ShellUiSnapshot};
 pub use value::render_value;
 
 pub const PRODUCT_NAME: &str = "sparsh";

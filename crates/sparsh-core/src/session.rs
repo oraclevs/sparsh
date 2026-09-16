@@ -1,9 +1,51 @@
+use std::collections::BTreeSet;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use crate::builtin::{BuiltinError, BuiltinOutput, BuiltinRegistry};
 use crate::dispatch::{classify, Dispatch};
 use crate::execute::execute_plan;
+use crate::resolver::find_external;
 use crate::services::ShellServices;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandKind {
+    Builtin,
+    Alias,
+    External,
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShellUiSnapshot {
+    cwd: PathBuf,
+    home: Option<PathBuf>,
+    path: Vec<PathBuf>,
+    builtins: BTreeSet<String>,
+    aliases: BTreeSet<String>,
+}
+
+impl ShellUiSnapshot {
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
+    pub fn classify_command(&self, program: &str) -> CommandKind {
+        if self.aliases.contains(program) {
+            CommandKind::Alias
+        } else if self.builtins.contains(program) {
+            CommandKind::Builtin
+        } else if find_external(program, &self.path, &self.cwd).is_some() {
+            CommandKind::External
+        } else {
+            CommandKind::Unknown
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ShellResult {
@@ -136,6 +178,16 @@ impl ShellSession {
     pub fn should_exit(&self) -> bool {
         self.should_exit
     }
+
+    pub fn ui_snapshot(&self) -> ShellUiSnapshot {
+        ShellUiSnapshot {
+            cwd: self.services.directories.current().to_path_buf(),
+            home: self.services.environment.get("HOME").map(PathBuf::from),
+            path: self.services.path.directories().to_vec(),
+            builtins: self.builtins.names().into_iter().collect(),
+            aliases: self.services.aliases.names().map(str::to_string).collect(),
+        }
+    }
 }
 
 impl Default for ShellSession {
@@ -146,12 +198,12 @@ impl Default for ShellSession {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::PathBuf;
 
     use spar::ConfigValue;
 
-    use super::{ShellError, ShellResult, ShellSession};
+    use super::{CommandKind, ShellError, ShellResult, ShellSession};
     use crate::PROCESS_STATE;
 
     struct CwdGuard(PathBuf);
@@ -411,5 +463,41 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(output).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn ui_snapshot_reports_cwd_home_builtins_aliases_and_external_commands() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::env::set_current_dir(root.path()).unwrap();
+        let tool = bin.join("snapshot-tool");
+        std::fs::write(&tool, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("export HOME={}", root.path().display()))
+            .unwrap();
+        session
+            .submit(&format!("path prepend {}", bin.display()))
+            .unwrap();
+        session.submit("alias snap = snapshot-tool").unwrap();
+        let snapshot = session.ui_snapshot();
+
+        assert_eq!(snapshot.cwd(), root.path());
+        assert_eq!(snapshot.home(), Some(root.path()));
+        assert_eq!(snapshot.classify_command("cd"), CommandKind::Builtin);
+        assert_eq!(snapshot.classify_command("snap"), CommandKind::Alias);
+        assert_eq!(
+            snapshot.classify_command("snapshot-tool"),
+            CommandKind::External
+        );
+        assert_eq!(
+            snapshot.classify_command("missing-snapshot-tool"),
+            CommandKind::Unknown
+        );
     }
 }

@@ -43,7 +43,7 @@ impl CommandResolver {
         cwd: &Path,
     ) -> Result<PathBuf, String> {
         if program.contains('/') {
-            return explicit_path(program, cwd);
+            return resolve_external(program, path.directories(), cwd);
         }
         if let Some(entry) = self.cache.get(program) {
             if entry.generation == path.generation() && is_executable(&entry.path) {
@@ -51,7 +51,7 @@ impl CommandResolver {
             }
         }
         self.cache.remove(program);
-        let resolved = search(program, path.directories(), cwd)?;
+        let resolved = resolve_external(program, path.directories(), cwd)?;
         self.cache.insert(
             program.to_string(),
             CacheEntry {
@@ -68,11 +68,7 @@ impl CommandResolver {
         directories: &[PathBuf],
         cwd: &Path,
     ) -> Result<PathBuf, String> {
-        if program.contains('/') {
-            explicit_path(program, cwd)
-        } else {
-            search(program, directories, cwd)
-        }
+        resolve_external(program, directories, cwd)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -120,6 +116,18 @@ impl CommandResolver {
             .collect::<Vec<_>>();
         matches.sort();
         matches.into_iter().take(5).map(|(_, name)| name).collect()
+    }
+}
+
+pub(crate) fn find_external(program: &str, directories: &[PathBuf], cwd: &Path) -> Option<PathBuf> {
+    resolve_external(program, directories, cwd).ok()
+}
+
+fn resolve_external(program: &str, directories: &[PathBuf], cwd: &Path) -> Result<PathBuf, String> {
+    if program.contains('/') {
+        explicit_path(program, cwd)
+    } else {
+        search(program, directories, cwd)
     }
 }
 
