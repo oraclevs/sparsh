@@ -62,7 +62,14 @@ pub enum ShellResult {
 pub enum ShellError {
     Spar(Vec<spar::SparError>),
     Builtin(BuiltinError),
-    Process { message: String, status: i32 },
+    CommandNotFound {
+        program: String,
+        suggestions: Vec<String>,
+    },
+    Process {
+        message: String,
+        status: i32,
+    },
 }
 
 impl ShellError {
@@ -70,6 +77,7 @@ impl ShellError {
         match self {
             Self::Spar(_) => 1,
             Self::Builtin(error) => error.status,
+            Self::CommandNotFound { .. } => 127,
             Self::Process { status, .. } => *status,
         }
     }
@@ -88,6 +96,16 @@ impl fmt::Display for ShellError {
                 Ok(())
             }
             Self::Builtin(error) => formatter.write_str(&error.message),
+            Self::CommandNotFound {
+                program,
+                suggestions,
+            } => {
+                write!(formatter, "command not found: `{program}`")?;
+                if !suggestions.is_empty() {
+                    write!(formatter, "\ndid you mean: {}", suggestions.join(", "))?;
+                }
+                Ok(())
+            }
             Self::Process { message, .. } => formatter.write_str(message),
         }
     }
@@ -377,8 +395,25 @@ mod tests {
             .submit("sparsh-command-that-does-not-exist")
             .unwrap_err();
 
-        assert!(matches!(error, ShellError::Process { status: 127, .. }));
+        assert!(matches!(error, ShellError::CommandNotFound { .. }));
         assert_eq!(session.last_status(), 127);
+    }
+
+    #[test]
+    fn command_not_found_preserves_program_and_suggestions() {
+        let mut session = ShellSession::new();
+
+        let error = session.submit("pwdd").unwrap_err();
+
+        let ShellError::CommandNotFound {
+            program,
+            suggestions,
+        } = error
+        else {
+            panic!("expected structured command-not-found error");
+        };
+        assert_eq!(program, "pwdd");
+        assert!(suggestions.iter().any(|name| name == "pwd"));
     }
 
     fn builtin_stdout(result: ShellResult) -> String {

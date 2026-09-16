@@ -277,18 +277,19 @@ fn resolution_error(
     registry: &BuiltinRegistry,
     services: &ShellServices,
 ) -> ShellError {
+    if message != format!("command not found: `{missing}`") {
+        return ShellError::Process {
+            message,
+            status: 127,
+        };
+    }
     let mut additional = registry.names();
     additional.extend(services.aliases.names().map(str::to_string));
     let suggestions = services
         .resolver
         .suggestions(missing, &services.path, &additional);
-    let message = if suggestions.is_empty() {
-        message
-    } else {
-        format!("{message}\ndid you mean: {}", suggestions.join(", "))
-    };
-    ShellError::Process {
-        message,
-        status: 127,
+    ShellError::CommandNotFound {
+        program: missing.to_string(),
+        suggestions,
     }
 }

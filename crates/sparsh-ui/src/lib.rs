@@ -1,12 +1,14 @@
 use std::io::{self, BufRead, Write};
 
-use sparsh_core::{render_value, ShellError, ShellResult, ShellSession};
+use sparsh_core::{render_value, ShellResult, ShellSession};
 
+mod diagnostic;
 mod git;
 mod highlight;
 mod prompt;
 mod theme;
 
+pub use diagnostic::{render_error, render_error_text};
 pub use git::GitProbe;
 pub use highlight::SparshHighlighter;
 pub use prompt::{GitState, PromptData, PromptState, SparshPrompt};
@@ -26,23 +28,35 @@ impl ColorPolicy {
             Self::Never
         }
     }
+
+    pub fn theme(self) -> Theme {
+        match self {
+            Self::Auto => Theme::colored(),
+            Self::Never => Theme::plain(),
+        }
+    }
 }
 
-pub fn render_result<W: Write>(result: &ShellResult, out: &mut W) -> io::Result<()> {
+pub fn render_result<W: Write>(
+    result: &ShellResult,
+    theme: &Theme,
+    interactive: bool,
+    out: &mut W,
+) -> io::Result<()> {
     match result {
         ShellResult::Value(value) => writeln!(out, "{}", render_value(value)),
         ShellResult::Builtin(output) => {
             if let Some(text) = &output.stdout {
-                out.write_all(text.as_bytes())?;
+                if interactive && theme.enabled() {
+                    out.write_all(theme.paint(SemanticRole::Builtin, text).as_bytes())?;
+                } else {
+                    out.write_all(text.as_bytes())?;
+                }
             }
             Ok(())
         }
         ShellResult::Empty | ShellResult::Process(_) | ShellResult::Exit(_) => Ok(()),
     }
-}
-
-pub fn render_error<W: Write>(error: &ShellError, err: &mut W) -> io::Result<()> {
-    writeln!(err, "{error}")
 }
 
 pub fn run_loop<R, W, E>(
@@ -51,7 +65,7 @@ pub fn run_loop<R, W, E>(
     out: &mut W,
     err: &mut E,
     interactive: bool,
-    _color: ColorPolicy,
+    color: ColorPolicy,
 ) -> io::Result<i32>
 where
     R: BufRead,
@@ -59,6 +73,7 @@ where
     E: Write,
 {
     let mut line = String::new();
+    let theme = color.theme();
     loop {
         if interactive {
             err.write_all("❯ ".as_bytes())?;
@@ -75,12 +90,12 @@ where
                     ShellResult::Exit(status) => Some(status),
                     _ => None,
                 };
-                render_result(&result, out)?;
+                render_result(&result, &theme, interactive, out)?;
                 if let Some(status) = exit_status {
                     return Ok(status);
                 }
             }
-            Err(error) => render_error(&error, err)?,
+            Err(error) => render_error(&error, Some(submitted), &theme, err)?,
         }
     }
 }
@@ -91,7 +106,7 @@ mod tests {
 
     use sparsh_core::{BuiltinOutput, ShellResult, ShellSession};
 
-    use super::{render_result, run_loop, ColorPolicy};
+    use super::{render_result, run_loop, ColorPolicy, Theme};
 
     #[test]
     fn noninteractive_loop_keeps_one_session_and_renders_a_value() {
@@ -143,15 +158,35 @@ mod tests {
                 stdout: Some("/tmp\n".into()),
                 status: 0,
             }),
+            &Theme::plain(),
+            false,
             &mut output,
         )
         .unwrap();
         let mut session = ShellSession::new();
         let process = session.submit("true").unwrap();
         assert!(matches!(process, ShellResult::Process(_)));
-        render_result(&process, &mut output).unwrap();
+        render_result(&process, &Theme::plain(), false, &mut output).unwrap();
 
         assert_eq!(String::from_utf8(output).unwrap(), "/tmp\n");
+    }
+
+    #[test]
+    fn interactive_builtin_output_uses_shell_owned_style() {
+        let mut output = Vec::new();
+
+        render_result(
+            &ShellResult::Builtin(BuiltinOutput {
+                stdout: Some("/tmp\n".into()),
+                status: 0,
+            }),
+            &Theme::colored(),
+            true,
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(String::from_utf8(output).unwrap().contains("\x1b["));
     }
 
     #[test]

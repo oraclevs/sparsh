@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 
 use sparsh_core::{ShellResult, ShellSession};
-use sparsh_ui::{render_error, render_result, run_loop, ColorPolicy};
+use sparsh_ui::{render_error, render_result, run_loop, ColorPolicy, Theme};
 
 const HELP: &str = "\
 Sparsh — the Spar shell
@@ -45,7 +45,7 @@ fn run_command(input: &str) -> i32 {
                 ShellResult::Process(outcome) => outcome.exit_code,
                 ShellResult::Exit(status) => *status,
             };
-            if let Err(error) = render_result(&result, &mut out) {
+            if let Err(error) = render_result(&result, &Theme::plain(), false, &mut out) {
                 let _ = writeln!(err, "sparsh: {error}");
                 return 1;
             }
@@ -53,7 +53,7 @@ fn run_command(input: &str) -> i32 {
         }
         Err(error) => {
             let status = error.status();
-            if render_error(&error, &mut err).is_err() {
+            if render_error(&error, Some(input), &Theme::plain(), &mut err).is_err() {
                 return 1;
             }
             status
