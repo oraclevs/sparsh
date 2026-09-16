@@ -1,8 +1,10 @@
+mod alias;
 pub mod builtin;
 mod dispatch;
 mod environment;
 mod execute;
 mod path;
+mod resolver;
 mod services;
 mod session;
 pub mod value;
