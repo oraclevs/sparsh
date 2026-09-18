@@ -3,12 +3,14 @@ use std::io::{self, BufRead, Write};
 use sparsh_core::{render_value, ShellResult, ShellSession};
 
 mod diagnostic;
+mod editor;
 mod git;
 mod highlight;
 mod prompt;
 mod theme;
 
 pub use diagnostic::{render_error, render_error_text};
+pub use editor::run_interactive;
 pub use git::GitProbe;
 pub use highlight::SparshHighlighter;
 pub use prompt::{GitState, PromptData, PromptState, SparshPrompt};
@@ -59,13 +61,11 @@ pub fn render_result<W: Write>(
     }
 }
 
-pub fn run_loop<R, W, E>(
+pub fn run_noninteractive_loop<R, W, E>(
     session: &mut ShellSession,
     mut input: R,
     out: &mut W,
     err: &mut E,
-    interactive: bool,
-    color: ColorPolicy,
 ) -> io::Result<i32>
 where
     R: BufRead,
@@ -73,12 +73,8 @@ where
     E: Write,
 {
     let mut line = String::new();
-    let theme = color.theme();
+    let theme = Theme::plain();
     loop {
-        if interactive {
-            err.write_all("❯ ".as_bytes())?;
-            err.flush()?;
-        }
         line.clear();
         if input.read_line(&mut line)? == 0 {
             return Ok(session.last_status());
@@ -90,7 +86,7 @@ where
                     ShellResult::Exit(status) => Some(status),
                     _ => None,
                 };
-                render_result(&result, &theme, interactive, out)?;
+                render_result(&result, &theme, false, out)?;
                 if let Some(status) = exit_status {
                     return Ok(status);
                 }
@@ -106,7 +102,7 @@ mod tests {
 
     use sparsh_core::{BuiltinOutput, ShellResult, ShellSession};
 
-    use super::{render_result, run_loop, ColorPolicy, Theme};
+    use super::{render_result, run_noninteractive_loop, ColorPolicy, Theme};
 
     #[test]
     fn noninteractive_loop_keeps_one_session_and_renders_a_value() {
@@ -115,39 +111,12 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        let status = run_loop(
-            &mut session,
-            input,
-            &mut output,
-            &mut errors,
-            false,
-            ColorPolicy::Never,
-        )
-        .unwrap();
+        let status =
+            run_noninteractive_loop(&mut session, input, &mut output, &mut errors).unwrap();
 
         assert_eq!(status, 0);
         assert_eq!(String::from_utf8(output).unwrap(), "\"spar\"\n");
         assert!(errors.is_empty());
-    }
-
-    #[test]
-    fn interactive_loop_prints_a_prompt_to_stderr_only() {
-        let mut session = ShellSession::new();
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        run_loop(
-            &mut session,
-            Cursor::new(Vec::<u8>::new()),
-            &mut output,
-            &mut errors,
-            true,
-            ColorPolicy::Auto,
-        )
-        .unwrap();
-
-        assert!(output.is_empty());
-        assert_eq!(String::from_utf8(errors).unwrap(), "❯ ");
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use std::io::{self, IsTerminal, Write};
 
 use sparsh_core::{ShellResult, ShellSession};
-use sparsh_ui::{render_error, render_result, run_loop, ColorPolicy, Theme};
+use sparsh_ui::{
+    render_error, render_result, run_interactive, run_noninteractive_loop, ColorPolicy, Theme,
+};
 
 const HELP: &str = "\
 Sparsh — the Spar shell
@@ -61,26 +63,41 @@ fn run_command(input: &str) -> i32 {
     }
 }
 
-fn run_interactive() -> i32 {
+fn run_stdin() -> i32 {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
     let interactive = stdin.is_terminal() && stderr.is_terminal();
-    let color = ColorPolicy::for_environment(interactive, std::env::var_os("NO_COLOR").is_some());
-    let mut session = ShellSession::new();
-    let mut out = stdout.lock();
-    let mut err = stderr.lock();
-    match run_loop(
-        &mut session,
-        stdin.lock(),
-        &mut out,
-        &mut err,
-        interactive,
-        color,
-    ) {
+    let color = ColorPolicy::for_environment(
+        interactive && stdout.is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+    );
+    let mut session = if interactive {
+        match ShellSession::try_new_interactive() {
+            Ok(session) => session,
+            Err(error) => {
+                let mut err = stderr.lock();
+                let _ = render_error(&error, None, &Theme::plain(), &mut err);
+                return error.status();
+            }
+        }
+    } else {
+        ShellSession::new()
+    };
+    let result = if interactive {
+        run_interactive(&mut session, color)
+    } else {
+        run_noninteractive_loop(
+            &mut session,
+            stdin.lock(),
+            &mut stdout.lock(),
+            &mut stderr.lock(),
+        )
+    };
+    match result {
         Ok(status) => status,
         Err(error) => {
-            let _ = writeln!(err, "sparsh: {error}");
+            let _ = writeln!(stderr.lock(), "sparsh: {error}");
             1
         }
     }
@@ -88,7 +105,7 @@ fn run_interactive() -> i32 {
 
 fn run() -> i32 {
     match parse_args(std::env::args().skip(1)) {
-        Ok(Mode::Interactive) => run_interactive(),
+        Ok(Mode::Interactive) => run_stdin(),
         Ok(Mode::Command(input)) => run_command(&input),
         Ok(Mode::Help) => {
             print!("{HELP}");

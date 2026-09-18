@@ -58,7 +58,7 @@ impl PromptState {
 
     pub fn prompt(&self, data: &PromptData, theme: &Theme) -> SparshPrompt {
         SparshPrompt {
-            left: self.render_left(data, theme),
+            left: format!("{}  ", self.render_left(data, theme)),
             indicator: theme.paint(SemanticRole::PromptMarker, "❯ "),
         }
     }
@@ -180,7 +180,7 @@ mod tests {
 
         let prompt = state.prompt(&data, &Theme::plain());
 
-        assert_eq!(prompt.render_prompt_left(), "/work");
+        assert_eq!(prompt.render_prompt_left(), "/work  ");
         assert_eq!(prompt.render_prompt_indicator(PromptEditMode::Emacs), "❯ ");
     }
 }
