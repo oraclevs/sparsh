@@ -1,9 +1,14 @@
 mod alias;
 pub mod builtin;
+mod completion;
+mod config;
 mod directory;
 mod dispatch;
 mod environment;
 mod execute;
+mod function_pipeline;
+mod history;
+mod job;
 mod path;
 mod resolver;
 mod services;
@@ -11,10 +16,25 @@ mod session;
 pub mod value;
 
 pub use builtin::{BuiltinError, BuiltinMetadata, BuiltinOutput, BuiltinRegistry};
-pub use session::{CommandKind, ShellError, ShellResult, ShellSession, ShellUiSnapshot};
+pub use completion::{complete, CompletionContext, CompletionItem, CompletionRequest, CompletionSnapshot};
+pub use config::{
+    CompletionConfig, ConfigLoadError, EnvironmentVariableConfig, HistoryConfig, PromptConfig,
+    PromptGitConfig, PromptPathConfig, PromptTimeConfig, SparshConfig,
+};
+pub use history::{HistoryAccess, HistorySettings};
+pub use spar::InputCompleteness;
+pub use job::{JobId, JobState, ShellJob};
+pub use session::{
+    CommandDiagnostic, CommandKind, EditorMode, SessionMode, ShellError, ShellResult, ShellSession,
+    ShellUiSnapshot, StartupMode,
+};
 pub use value::render_value;
 
 pub const PRODUCT_NAME: &str = "sparsh";
+
+pub fn input_completeness(source: &str) -> InputCompleteness {
+    spar::input_completeness(source)
+}
 
 #[cfg(test)]
 pub(crate) static PROCESS_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());

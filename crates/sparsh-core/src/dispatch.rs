@@ -31,11 +31,16 @@ fn is_explicit_spar_construct(input: &str) -> bool {
         "var",
         "function",
         "functionGroup",
+        "struct",
         "type",
         "enum",
         "import",
+        "dynamic",
+        "async",
         "if",
         "for",
+        "shell",
+        "exec",
     ];
     if KEYWORDS
         .iter()
@@ -43,6 +48,19 @@ fn is_explicit_spar_construct(input: &str) -> bool {
     {
         return true;
     }
+    if let Some(rest) = input.strip_prefix("private") {
+        if rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim_start();
+            if ["function", "functionGroup", "struct"]
+                .iter()
+                .any(|keyword| begins_with_word(rest, keyword))
+                || rest.starts_with('[')
+            {
+                return true;
+            }
+        }
+    }
+
     let Some(rest) = input.strip_prefix("export") else {
         return false;
     };
@@ -62,7 +80,7 @@ fn begins_with_word(input: &str, word: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
-fn is_explicit_call(input: &str) -> bool {
+pub(crate) fn is_explicit_call(input: &str) -> bool {
     let input = input.strip_suffix(';').unwrap_or(input).trim_end();
     let Some(open) = input.find('(') else {
         return false;
@@ -106,13 +124,17 @@ mod tests {
         for input in [
             "var project: str = \"spar\";",
             "function build() -> int { return 0; };",
+            "private function hidden() -> int { return 0; };",
             "functionGroup Rust {}",
+            "struct Human { name: str = \"OCC\"; };",
             "type Human = { name: str; };",
             "enum Mode { Fast; }",
             "import \"tools.spar\" as tools;",
             "export var public: int = 1;",
             "build()",
             "Rust::build();",
+            "shell { echo hello; }",
+            "exec { printf hello; }",
         ] {
             assert_eq!(classify(input, &session), Dispatch::SparFragment(input));
         }

@@ -1,38 +1,237 @@
 use std::io::{self, Write};
+use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use reedline::{Reedline, Signal};
-use sparsh_core::{ShellResult, ShellSession};
-
-use crate::{
-    render_error, render_result, ColorPolicy, GitProbe, PromptData, PromptState, SparshHighlighter,
+use nu_ansi_term::{Color, Style};
+use reedline::{
+    default_emacs_keybindings, ColumnarMenu, DefaultHinter, Emacs, FileBackedHistory, KeyCode,
+    KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle, OutputMode, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal,
 };
+use sparsh_core::{CompletionSnapshot, EditorMode, ShellResult, ShellSession, ShellUiSnapshot};
+
+use crate::history::{SharedHistory, SparshHistory};
+use crate::{
+    active_python_environment, detect_projects, is_multiline_paste_candidate, multiline_submissions,
+    render_command_diagnostic, render_error, render_result, review_multiline_paste, ColorPolicy,
+    GitProbe, PromptData, PromptState, SparshCompleter,
+    SparshHighlighter, SparshValidator, Theme,
+};
+
+fn sparsh_emacs_keybindings() -> Keybindings {
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::ALT,
+        KeyCode::Char('e'),
+        ReedlineEvent::OpenEditor,
+    );
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings
+}
+
+fn completion_menu_text_style() -> MenuTextStyle {
+    let selected = Style::new()
+        .fg(Color::Black)
+        .on(Color::LightCyan)
+        .bold();
+    MenuTextStyle {
+        text_style: Style::new().fg(Color::White),
+        selected_text_style: selected,
+        description_style: Style::new().fg(Color::LightBlue),
+        match_style: Style::new().fg(Color::LightYellow).bold(),
+        selected_match_style: selected,
+    }
+}
+
+fn completion_menu() -> ColumnarMenu {
+    let styles = completion_menu_text_style();
+    ColumnarMenu::default()
+        .with_name("completion_menu")
+        .with_text_style(styles.text_style)
+        .with_selected_text_style(styles.selected_text_style)
+        .with_description_text_style(styles.description_style)
+        .with_match_text_style(styles.match_style)
+        .with_selected_match_text_style(styles.selected_match_style)
+}
+
+fn build_editor(
+    session: &mut ShellSession,
+    color: ColorPolicy,
+    theme: &Theme,
+    snapshot: Arc<RwLock<ShellUiSnapshot>>,
+    completion_snapshot: Arc<RwLock<CompletionSnapshot>>,
+    editor_mode: Arc<RwLock<EditorMode>>,
+) -> io::Result<Reedline> {
+    let history_settings = session.history_settings();
+    if let Some(parent) = history_settings.path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let history = FileBackedHistory::with_file(
+        history_settings.max_entries,
+        history_settings.path.clone(),
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
+    let history = SharedHistory::new(SparshHistory::new(
+        history,
+        history_settings.ignore_consecutive_duplicates,
+    ));
+    session.set_history_access(Arc::new(history.clone()));
+
+    let highlighter = SparshHighlighter::new(snapshot, theme.clone());
+    let completer = SparshCompleter::new(completion_snapshot);
+    let mut buffer_editor = Command::new(std::env::current_exe()?);
+    buffer_editor.arg("--edit-buffer");
+    let buffer_file = std::env::temp_dir().join(format!(
+        "sparsh-buffer-{}.spar",
+        std::process::id()
+    ));
+    Ok(Reedline::create()
+        .with_history(Box::new(history))
+        .with_history_exclusion_prefix(Some(" ".into()))
+        .with_completer(Box::new(completer))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+            completion_menu(),
+        )))
+        .with_menu(ReedlineMenu::HistoryMenu(Box::new(
+            ListMenu::default()
+                .with_name("history_menu")
+                .with_output_mode(OutputMode::FullBuffer),
+        )))
+        .with_hinter(Box::new(DefaultHinter::default()))
+        .with_quick_completions(true)
+        .with_partial_completions(true)
+        .with_edit_mode(Box::new(Emacs::new(sparsh_emacs_keybindings())))
+        .with_buffer_editor(buffer_editor, buffer_file)
+        .use_bracketed_paste(true)
+        .with_validator(Box::new(SparshValidator::new(editor_mode)))
+        .with_ansi_colors(color == ColorPolicy::Auto)
+        .with_highlighter(Box::new(highlighter)))
+}
+
+fn run_interactive_startup(
+    session: &mut ShellSession,
+    theme: &Theme,
+) -> io::Result<Option<i32>> {
+    match session.run_startup_hook() {
+        Ok(result) => {
+            let exit_status = match &result {
+                ShellResult::Exit(status) => Some(*status),
+                _ => None,
+            };
+            render_result(&result, theme, true, &mut io::stdout().lock())?;
+            if let Some(status) = exit_status {
+                return Ok(Some(status));
+            }
+        }
+        Err(error) => {
+            render_error(
+                &error,
+                Some("startup()"),
+                theme,
+                &mut io::stderr().lock(),
+            )?;
+        }
+    }
+
+    Ok(None)
+}
+
+fn terminal_width() -> usize {
+    #[cfg(unix)]
+    {
+        for fd in [libc::STDERR_FILENO, libc::STDOUT_FILENO, libc::STDIN_FILENO] {
+            let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+            if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0 && size.ws_col > 0 {
+                return usize::from(size.ws_col);
+            }
+        }
+    }
+    std::env::var("COLUMNS").ok().and_then(|value| value.parse().ok()).filter(|width| *width > 0).unwrap_or(80)
+}
 
 pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Result<i32> {
     let theme = color.theme();
     let snapshot = Arc::new(RwLock::new(session.ui_snapshot()));
-    let highlighter = SparshHighlighter::new(Arc::clone(&snapshot), theme.clone());
-    let mut editor = Reedline::create()
-        .with_ansi_colors(color == ColorPolicy::Auto)
-        .with_highlighter(Box::new(highlighter));
-    let prompt_state = PromptState::new(Duration::from_secs(2));
+    let completion_snapshot = Arc::new(RwLock::new(session.completion_snapshot()));
+    let editor_mode = Arc::new(RwLock::new(EditorMode::Normal));
+    let mut editor = build_editor(
+        session,
+        color,
+        &theme,
+        Arc::clone(&snapshot),
+        Arc::clone(&completion_snapshot),
+        Arc::clone(&editor_mode),
+    )?;
+    let mut active_config_generation = session.config_generation();
     let mut git = GitProbe::new();
     let mut previous_duration = None;
 
+    // Initialize the interactive editor/terminal first, then invoke the single
+    // canonical Spar startup() hook before the first prompt. Terminal-aware
+    // commands returned from startup() therefore run against a ready TTY.
+    if let Some(status) = run_interactive_startup(session, &theme)? {
+        return Ok(status);
+    }
+
     loop {
+        if active_config_generation != session.config_generation() {
+            editor = build_editor(
+                session,
+                color,
+                &theme,
+                Arc::clone(&snapshot),
+                Arc::clone(&completion_snapshot),
+                Arc::clone(&editor_mode),
+            )?;
+            active_config_generation = session.config_generation();
+        }
+
+        if let Err(error) = session.refresh_jobs() {
+            let stderr = io::stderr();
+            render_error(&error, None, &theme, &mut stderr.lock())?;
+        }
+        let notifications = session.take_job_notifications();
+        if !notifications.is_empty() {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            for notification in notifications {
+                writeln!(stderr, "{notification}")?;
+            }
+        }
         let current = session.ui_snapshot();
         if let Ok(mut shared) = snapshot.write() {
             *shared = current.clone();
         }
+        if let Ok(mut shared) = completion_snapshot.write() {
+            *shared = session.completion_snapshot();
+        }
+        let prompt_config = session.prompt_config();
+        let prompt_state = PromptState::new(Duration::from_millis(prompt_config.duration_threshold_ms));
         let prompt = prompt_state.prompt(
             &PromptData {
                 cwd: current.cwd().to_path_buf(),
                 home: current.home().map(ToOwned::to_owned),
-                git: git.state(current.cwd()),
+                git: prompt_config.git.enabled.then(|| git.state(current.cwd())).flatten(),
+                projects: detect_projects(current.cwd()),
+                python_environment: active_python_environment(&current),
                 previous_status: session.last_status(),
                 previous_duration,
+                terminal_width: terminal_width(),
+                current_time: prompt_config
+                    .time
+                    .enabled
+                    .then(|| crate::time::format_local_time(&prompt_config.time.format).ok())
+                    .flatten(),
             },
+            prompt_config,
             &theme,
         );
 
@@ -41,32 +240,151 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
             .map_err(|error| io::Error::other(error.to_string()))?;
         match signal {
             Signal::Success(source) => {
+                let mode = editor_mode
+                    .read()
+                    .map(|mode| *mode)
+                    .unwrap_or(EditorMode::Normal);
+                let reviewed_paste =
+                    mode == EditorMode::Normal && is_multiline_paste_candidate(&source);
+                let source = if reviewed_paste {
+                    match review_multiline_paste(&source, &current)? {
+                        Some(source) => source,
+                        None => continue,
+                    }
+                } else {
+                    source
+                };
+                let submissions = if reviewed_paste {
+                    multiline_submissions(&source)
+                } else {
+                    vec![source]
+                };
+
                 let started = Instant::now();
-                let result = session.submit(&source);
-                previous_duration = Some(started.elapsed());
-                match result {
-                    Ok(result) => {
-                        let exit_status = match result {
-                            ShellResult::Exit(status) => Some(status),
-                            _ => None,
-                        };
-                        let stdout = io::stdout();
-                        render_result(&result, &theme, true, &mut stdout.lock())?;
-                        if let Some(status) = exit_status {
-                            return Ok(status);
+                let mut editor_mode_changed = false;
+                for submission in submissions {
+                    let result = if mode == EditorMode::Repl {
+                        session.submit_spar(&submission)
+                    } else {
+                        session.submit(&submission)
+                    };
+                    match result {
+                        Ok(result) => {
+                            let exit_status = match &result {
+                                ShellResult::Exit(status) => Some(*status),
+                                _ => None,
+                            };
+                            if let ShellResult::EditorMode(requested) = &result {
+                                if let Ok(mut mode) = editor_mode.write() {
+                                    *mode = *requested;
+                                }
+                                if *requested == EditorMode::Repl {
+                                    writeln!(
+                                        io::stderr().lock(),
+                                        "Spar REPL mode: use an empty line to submit a block; Ctrl-D returns to command mode."
+                                    )?;
+                                }
+                                editor_mode_changed = true;
+                                break;
+                            }
+                            let stdout = io::stdout();
+                            render_result(&result, &theme, true, &mut stdout.lock())?;
+                            if let ShellResult::CommandStatus {
+                                diagnostic: Some(diagnostic),
+                                ..
+                            } = &result
+                            {
+                                let stderr = io::stderr();
+                                render_command_diagnostic(
+                                    diagnostic,
+                                    Some(&submission),
+                                    &theme,
+                                    &mut stderr.lock(),
+                                )?;
+                            }
+                            if let Some(status) = exit_status {
+                                return Ok(status);
+                            }
+                        }
+                        Err(error) => {
+                            let stderr = io::stderr();
+                            render_error(
+                                &error,
+                                Some(&submission),
+                                &theme,
+                                &mut stderr.lock(),
+                            )?;
                         }
                     }
-                    Err(error) => {
-                        let stderr = io::stderr();
-                        render_error(&error, Some(&source), &theme, &mut stderr.lock())?;
-                    }
+                }
+                previous_duration = Some(started.elapsed());
+                if editor_mode_changed {
+                    continue;
                 }
             }
             Signal::CtrlC | Signal::ExternalBreak(_) | Signal::HostCommand(_) => {
                 io::stderr().flush()?;
             }
-            Signal::CtrlD => return Ok(session.last_status()),
+            Signal::CtrlD => {
+                let mode = editor_mode
+                    .read()
+                    .map(|mode| *mode)
+                    .unwrap_or(EditorMode::Normal);
+                if mode == EditorMode::Repl {
+                    if let Ok(mut mode) = editor_mode.write() {
+                        *mode = EditorMode::Normal;
+                    }
+                    writeln!(io::stderr().lock(), "returned to Sparsh command mode")?;
+                    continue;
+                }
+                return Ok(session.last_status());
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nu_ansi_term::{Color, Style};
+    use reedline::{KeyCode, KeyModifiers, ReedlineEvent};
+    use super::{completion_menu_text_style, sparsh_emacs_keybindings};
+
+    #[test]
+    fn alt_e_opens_the_sparsh_owned_buffer_editor() {
+        let keybindings = sparsh_emacs_keybindings();
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('e')),
+            Some(ReedlineEvent::OpenEditor)
+        );
+    }
+
+    #[test]
+    fn tab_opens_and_advances_completion_menu() {
+        let keybindings = sparsh_emacs_keybindings();
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Tab),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu("completion_menu".to_string()),
+                ReedlineEvent::MenuNext,
+            ]))
+        );
+    }
+
+
+    #[test]
+    fn completion_menu_uses_high_contrast_option_styles() {
+        let styles = completion_menu_text_style();
+
+        assert_eq!(styles.text_style, Style::new().fg(Color::White));
+        assert_eq!(styles.description_style, Style::new().fg(Color::LightBlue));
+        assert_eq!(styles.match_style, Style::new().fg(Color::LightYellow).bold());
+        assert_eq!(
+            styles.selected_text_style,
+            Style::new().fg(Color::Black).on(Color::LightCyan).bold()
+        );
+        assert_eq!(styles.selected_match_style, styles.selected_text_style);
     }
 }

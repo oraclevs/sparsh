@@ -1,0 +1,60 @@
+export type SparshAlias {
+    name: str;
+    command: List<str>;
+};
+
+export type SparshEnvironmentVariable {
+    name: str;
+    value?: str;
+    prepend?: List<str>;
+    append?: List<str>;
+};
+
+export type SparshPromptPath {
+    enabled?: bool;
+    parentLength?: int;
+    maxLastLength?: int;
+    maxWidth?: int;
+};
+
+export type SparshPromptGit {
+    enabled?: bool;
+    showBranch?: bool;
+    showAheadBehind?: bool;
+    showStaged?: bool;
+    showModified?: bool;
+    showUntracked?: bool;
+    showConflicts?: bool;
+};
+
+export type SparshPromptTime {
+    enabled?: bool;
+    format?: str;
+};
+
+export type SparshPrompt {
+    showStatus?: bool;
+    showDuration?: bool;
+    durationThresholdMs?: int;
+    path?: SparshPromptPath;
+    git?: SparshPromptGit;
+    time?: SparshPromptTime;
+};
+
+export type SparshHistory {
+    path?: str;
+    maxEntries?: int;
+    dedupeConsecutive?: bool;
+};
+
+export type SparshCompletion {
+    enabled?: bool;
+};
+
+export type SparshConfig {
+    aliases?: List<SparshAlias>;
+    environment?: List<SparshEnvironmentVariable>;
+    prompt?: SparshPrompt;
+    history?: SparshHistory;
+    completion?: SparshCompletion;
+};

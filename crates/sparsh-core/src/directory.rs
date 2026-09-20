@@ -30,6 +30,16 @@ impl DirectoryService {
         &self.current
     }
 
+    pub(crate) fn set_current_path(
+        &mut self,
+        target: &Path,
+        environment: &mut EnvironmentService,
+    ) -> Result<(), String> {
+        let target = std::fs::canonicalize(target)
+            .map_err(|error| format!("cd: {}: {error}", target.display()))?;
+        self.commit_change(target, environment)
+    }
+
     #[cfg(test)]
     pub(crate) fn stack(&self) -> &[PathBuf] {
         &self.stack
@@ -146,8 +156,9 @@ impl DirectoryService {
         target: PathBuf,
         environment: &mut EnvironmentService,
     ) -> Result<(), String> {
-        std::env::set_current_dir(&target)
-            .map_err(|error| format!("cd: {}: {error}", target.display()))?;
+        if !target.is_dir() {
+            return Err(format!("cd: {}: not a directory", target.display()));
+        }
         let old = std::mem::replace(&mut self.current, target);
         self.previous = Some(old.clone());
         environment.set_os("OLDPWD", old.into_os_string());

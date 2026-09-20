@@ -25,6 +25,11 @@ pub fn render_value(value: &spar::ConfigValue) -> String {
             format!("{{ {body} }}")
         }
         spar::ConfigValue::Shell(plan) => render_shell_plan(plan),
+        spar::ConfigValue::ShellProgram(_) => "<shell-program>".into(),
+        spar::ConfigValue::Promise(_) => "<promise>".into(),
+        spar::ConfigValue::Error { message, kind, code, .. } => {
+            format!("error(kind: {}, code: {}, message: {})", quote(kind), code, quote(message))
+        }
     }
 }
 
@@ -75,6 +80,15 @@ fn render_command(command: &CommandPlan) -> String {
     }
     if let Some(redirect) = &command.stderr {
         parts.push(render_redirect(2, redirect));
+    }
+    parts.extend(
+        command
+            .redirections
+            .iter()
+            .map(|redirect| render_redirect(redirect.fd, &redirect.target)),
+    );
+    if command.background {
+        parts.push("&".into());
     }
     parts.join(" ")
 }
@@ -184,6 +198,8 @@ mod tests {
                         mode: RedirectMode::Append,
                     }),
                     stderr: Some(Redirection::DuplicateFd(1)),
+                    redirections: vec![],
+                    background: false,
                 }),
             )],
         });

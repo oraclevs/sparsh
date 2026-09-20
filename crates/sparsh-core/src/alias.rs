@@ -65,9 +65,19 @@ impl AliasService {
                 chain.push(name);
                 return Err(format!("alias cycle: {}", chain.join(" -> ")));
             }
-            chain.push(name);
+            chain.push(name.clone());
             let mut expanded = expansion.clone();
             expanded.extend(words.into_iter().skip(1));
+
+            // Shell aliases commonly wrap the real executable with the same
+            // command name, e.g. `ls -> ls --color=auto`. Once an alias
+            // expands to itself as the first word, that first word denotes
+            // the underlying command and must not be expanded again. True
+            // multi-alias cycles still revisit a previously expanded name on
+            // a later iteration and are rejected by `visited` above.
+            if expanded.first().is_some_and(|word| word == &name) {
+                return Ok(expanded);
+            }
             words = expanded;
         }
 
@@ -137,6 +147,18 @@ mod tests {
         let expanded = aliases.expand("gs", &["--short".into()]).unwrap();
 
         assert_eq!(expanded, ["git", "status", "--short"]);
+    }
+
+    #[test]
+    fn self_prefixing_alias_wraps_real_command_without_cycle() {
+        let mut aliases = AliasService::new();
+        aliases
+            .define("ls", vec!["ls".into(), "--color=auto".into()])
+            .unwrap();
+
+        let expanded = aliases.expand("ls", &["src".into()]).unwrap();
+
+        assert_eq!(expanded, ["ls", "--color=auto", "src"]);
     }
 
     #[test]

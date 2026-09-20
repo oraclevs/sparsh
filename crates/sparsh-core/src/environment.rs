@@ -7,6 +7,12 @@ pub(crate) struct EnvironmentService {
 }
 
 impl EnvironmentService {
+    pub(crate) fn from_pairs_for_validation() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
     pub(crate) fn from_current() -> Self {
         Self {
             entries: std::env::vars_os().collect(),
@@ -67,6 +73,10 @@ impl EnvironmentService {
             .collect()
     }
 
+    pub(crate) fn replace_snapshot(&mut self, entries: Vec<(OsString, OsString)>) {
+        self.entries = entries.into_iter().collect();
+    }
+
     pub(crate) fn render(&self) -> String {
         let mut output = String::new();
         for (key, value) in &self.entries {
@@ -88,7 +98,7 @@ fn validate_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), St
     Ok(())
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
         return false;

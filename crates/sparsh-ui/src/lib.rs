@@ -1,20 +1,35 @@
 use std::io::{self, BufRead, Write};
 
-use sparsh_core::{render_value, ShellResult, ShellSession};
+use sparsh_core::{render_value, CommandDiagnostic, ShellResult, ShellSession};
 
+mod command_editor;
+mod completion;
 mod diagnostic;
 mod editor;
 mod git;
 mod highlight;
+mod history;
+mod paste;
+mod project;
 mod prompt;
 mod theme;
+mod time;
+mod validator;
+mod width;
 
+pub use command_editor::edit_buffer_file;
+pub use completion::SparshCompleter;
 pub use diagnostic::{render_error, render_error_text};
 pub use editor::run_interactive;
 pub use git::GitProbe;
 pub use highlight::SparshHighlighter;
+pub use paste::{
+    is_multiline_paste_candidate, multiline_submissions, review_multiline_paste, PasteDecision,
+};
+pub use project::{active_python_environment, detect_projects, ProjectKind};
 pub use prompt::{GitState, PromptData, PromptState, SparshPrompt};
 pub use theme::{SemanticRole, Theme};
+pub use validator::SparshValidator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorPolicy {
@@ -48,16 +63,42 @@ pub fn render_result<W: Write>(
     match result {
         ShellResult::Value(value) => writeln!(out, "{}", render_value(value)),
         ShellResult::Builtin(output) => {
-            if let Some(text) = &output.stdout {
-                if interactive && theme.enabled() {
-                    out.write_all(theme.paint(SemanticRole::Builtin, text).as_bytes())?;
-                } else {
-                    out.write_all(text.as_bytes())?;
-                }
-            }
+            let _ = (theme, interactive);
+            // Builtin command output is command output, not Sparsh UI. Preserve
+            // bytes exactly just like external commands (important for printf,
+            // redirected data, and ANSI-aware user tooling).
+            out.write_all(&output.stdout)?;
             Ok(())
         }
-        ShellResult::Empty | ShellResult::Process(_) | ShellResult::Exit(_) => Ok(()),
+        ShellResult::BackgroundJob { id, pgid } => writeln!(out, "[{id}] {pgid}"),
+        ShellResult::Empty
+        | ShellResult::EditorMode(_)
+        | ShellResult::ReloadConfig
+        | ShellResult::ExecRequest { .. }
+        | ShellResult::SourceRequest(_)
+        | ShellResult::Process(_)
+        | ShellResult::CommandStatus { .. }
+        | ShellResult::Exit(_) => Ok(()),
+    }
+}
+
+pub fn render_command_diagnostic<W: Write>(
+    diagnostic: &CommandDiagnostic,
+    source: Option<&str>,
+    theme: &Theme,
+    err: &mut W,
+) -> io::Result<()> {
+    match diagnostic {
+        CommandDiagnostic::NotFound {
+            program,
+            suggestions,
+        } => {
+            let error = sparsh_core::ShellError::CommandNotFound {
+                program: program.clone(),
+                suggestions: suggestions.clone(),
+            };
+            render_error(&error, source, theme, err)
+        }
     }
 }
 
@@ -82,11 +123,18 @@ where
         let submitted = line.trim_end_matches(['\r', '\n']);
         match session.submit(submitted) {
             Ok(result) => {
-                let exit_status = match result {
-                    ShellResult::Exit(status) => Some(status),
+                let exit_status = match &result {
+                    ShellResult::Exit(status) => Some(*status),
                     _ => None,
                 };
                 render_result(&result, &theme, false, out)?;
+                if let ShellResult::CommandStatus {
+                    diagnostic: Some(diagnostic),
+                    ..
+                } = &result
+                {
+                    render_command_diagnostic(diagnostic, Some(submitted), &theme, err)?;
+                }
                 if let Some(status) = exit_status {
                     return Ok(status);
                 }
@@ -124,7 +172,8 @@ mod tests {
         let mut output = Vec::new();
         render_result(
             &ShellResult::Builtin(BuiltinOutput {
-                stdout: Some("/tmp\n".into()),
+                stdout: b"/tmp\n".to_vec(),
+                stderr: Vec::new(),
                 status: 0,
             }),
             &Theme::plain(),
@@ -134,19 +183,20 @@ mod tests {
         .unwrap();
         let mut session = ShellSession::new();
         let process = session.submit("true").unwrap();
-        assert!(matches!(process, ShellResult::Process(_)));
+        assert!(matches!(&process, ShellResult::Process(_)));
         render_result(&process, &Theme::plain(), false, &mut output).unwrap();
 
         assert_eq!(String::from_utf8(output).unwrap(), "/tmp\n");
     }
 
     #[test]
-    fn interactive_builtin_output_uses_shell_owned_style() {
+    fn interactive_builtin_command_output_is_not_recolored() {
         let mut output = Vec::new();
 
         render_result(
             &ShellResult::Builtin(BuiltinOutput {
-                stdout: Some("/tmp\n".into()),
+                stdout: b"/tmp\n".to_vec(),
+                stderr: Vec::new(),
                 status: 0,
             }),
             &Theme::colored(),
@@ -155,7 +205,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(String::from_utf8(output).unwrap().contains("\x1b["));
+        assert_eq!(output.as_slice(), b"/tmp\n");
     }
 
     #[test]

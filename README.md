@@ -1,89 +1,420 @@
 # Sparsh
 
-Sparsh is the standalone Unix shell for the Spar ecosystem. The products stay
-separate:
+Sparsh is the interactive Unix shell for the Spar ecosystem.
 
-- `spar` is the Spar compiler, runtime, task runner, and package manager.
-- `sparsh` is the interactive shell and persistent Spar environment.
+- `spar` is the language/compiler/runtime.
+- `spar-command` is the neutral command-plan representation.
+- `spar-process` owns Unix process execution primitives.
+- `sparsh` is the interactive shell and persistent Spar session.
 
-This repository currently contains the first core milestone. It is useful for
-testing command execution and persistent Spar state, but it is not yet a
-daily-driver shell.
+Spar never depends on Sparsh. Sparsh uses Spar, `spar-command`, and
+`spar-process` as libraries; native Spar shell syntax is never silently
+translated to Bash/Zsh/Fish.
 
-## Install
+> Verification note: this source tree was assembled in an environment without
+> `cargo`/`rustc`. Run the repository-root `VERIFY.md` checks before installing
+> Sparsh as a login shell.
 
-The sibling `spar`, `spar-command`, and `spar-process` repositories must be
-present beside this repository while path dependencies are in use.
+## Build
 
-```text
-cargo install --path .
-sparsh --version
-```
-
-## Commands
-
-Sparsh parses commands with Spar's native structural command grammar and runs
-them through the shared `spar-process` runtime. It does not invoke `/bin/sh`
-or Bash.
+Keep the sibling repositories together because the workspaces use path
+dependencies:
 
 ```text
-sparsh -c 'pwd'
-sparsh -c 'printf hello | grep hello'
-sparsh -c 'cargo test > test.log'
+project/
+  spar/
+  spar-command/
+  spar-process/
+  sparsh/
 ```
 
-The current grammar supports ordinary external commands, quoted arguments,
-sequences, pipelines, stdout truncation and append redirection, and stderr
-redirection. Child stdout and stderr are inherited unchanged.
+Then:
 
-The initial builtin registry contains:
+```sh
+cd sparsh
+cargo build --release
+./target/release/sparsh --version
+```
 
-- `cd [directory]`
-- `pwd`
-- `exit [status]`
+## Command-first interactive model
 
-Standalone builtins run in the real shell session, so `cd` affects later
-commands. A builtin name inside a pipeline is treated as an external command
-in this milestone.
-
-## Persistent Spar state
-
-Start `sparsh` and enter one-line Spar declarations or mutations:
+Bare words are shell commands. Explicit call syntax is Spar:
 
 ```text
-❯ var project: str = "spar";
-❯ project
-"spar"
+git status       # external command / builtin / alias resolution
+build()          # Spar function call
+build            # command named "build", never an implicit function call
 ```
 
-Dispatch is deterministic:
+A direct Spar expression returning `shell` auto-executes. Assignment stores the
+shell value without executing it:
 
-- A bare unknown word such as `build` uses Unix command resolution.
-- A single bare identifier renders a Spar value only when that variable
-  already exists in the current session.
-- Explicit call syntax such as `build()` is Spar.
-- Assignments are Spar when their left-hand variable already exists.
+```spar
+function build(profile: str) -> shell {
+    return shell { cargo build --profile "${profile}"; };
+};
 
-Strings and stored `shell` plans are data. Rendering either one never executes
-its contents.
+build(profile: "release")
+var plan: shell = build(profile: "release");
+```
 
-## Current milestone limitations
+Spar variables and environment variables remain different namespaces:
 
-The following required Sparsh systems are not implemented yet:
+```spar
+var name: str = "OCC";
+echo "${name}";       // Spar expression interpolation
+```
 
-- Unix job control, process groups, terminal handoff, `&`, Ctrl+C/Ctrl+Z job
-  routing, `jobs`, `fg`, and `bg`;
-- aliases, environment and structured PATH services, executable caching, and
-  the directory stack;
-- transactional Spar configuration, safe mode, diagnostics, and rollback;
-- persistent history, completion, autosuggestions, and semantic highlighting;
-- `NormalEditor`, `ReplEditor`, `PasteReview`, bracketed paste, and the rich
-  prompt;
-- automatic execution of a `shell` value returned directly by an interactive
-  Spar function call;
-- typed command interpolation, explicit list expansion, input redirection,
-  logical `&&`/`||`, and background `&` syntax.
+```text
+export NAME=OCC
+echo "$NAME"         # shell environment shorthand
+```
 
-Until job control and PTY tests are complete, do not configure Sparsh as a
-login shell or expect full-screen interactive programs to behave like they do
-under Bash or Zsh.
+## Native Sparsh builtins
+
+The practical stateful/interactive builtin set is owned by Sparsh itself:
+
+```text
+cd pwd dirs pushd popd
+alias unalias
+export unset path hash
+type which command builtin
+jobs fg bg wait disown kill
+history
+echo printf read
+umask ulimit
+source . deactivate reload
+exec logout
+help repl exit
+```
+
+Utilities such as `chmod`, `mkdir`, `touch`, `cp`, `mv`, `rm`, `cat`, `grep`,
+`head`, `tail`, `find`, `eza`, `git`, and `cargo` stay external programs and are
+resolved through PATH.
+
+Examples:
+
+```text
+cd ~/Projects
+export EDITOR=nvim
+alias gs = git status
+printf "one\ntwo\n" | grep two
+sleep 30 &
+jobs
+fg %1
+history 20
+help source
+```
+
+Stateful builtins used as pipeline stages operate on isolated shell-service
+state, so `cd /tmp | cat` or `export FOO=x | cat` cannot mutate the parent
+interactive session.
+
+## Functions in native pipelines
+
+An explicit Spar function call may be a native pipeline stage when it returns
+`shell`:
+
+```spar
+function readLog(file: str) -> shell {
+    return shell { cat "${file}"; };
+};
+```
+
+```text
+readLog(file: "server.log") | grep error | head -n 10
+```
+
+A non-shell Spar value is rejected as a pipeline stage; Sparsh never silently
+stringifies arbitrary values into commands.
+
+## Configuration: `~/.sparsh/sparsh.spar`
+
+Sparsh has one automatically loaded rc entry point:
+
+```text
+~/.sparsh/
+  sparsh.spar
+  sparsh-types.spar
+  functions.spar
+```
+
+`~/.sparsh/sparsh.spar` is the only file loaded automatically. The other files
+are ordinary Spar modules imported by it. Sparsh does not inject a hidden
+configuration type package. Public configuration types are normal Spar source;
+a complete starter model is in `examples/sparsh-types.spar` and is generated by
+`../setup-sparsh-config.sh`.
+
+Canonical Spar syntax uses generic list types such as `List<str>`:
+
+```spar
+import type {
+    SparshAlias,
+    SparshEnvironmentVariable,
+    SparshPrompt,
+    SparshHistory,
+    SparshCompletion,
+    SparshConfig
+} from "./sparsh-types";
+
+struct Config: SparshConfig {
+    aliases = [
+        { name: "gs"; command: ["git", "status"]; },
+        { name: "ll"; command: ["eza", "-la", "--icons", "--git"]; }
+    ];
+
+    environment = [
+        { name: "EDITOR"; value: "nvim"; },
+        {
+            name: "PATH";
+            prepend: [
+                "/opt/android-sdk/platform-tools",
+                "$HOME/DevTools/flutter/bin",
+                "$HOME/.cargo/bin",
+                "$HOME/.local/bin"
+            ];
+            append: ["$HOME/.pub-cache/bin"];
+        }
+    ];
+
+    prompt = {
+        showStatus: true;
+        showDuration: true;
+        path: { enabled: true; };
+        git: {
+            enabled: true;
+            showBranch: true;
+            showAheadBehind: true;
+            showStaged: true;
+            showModified: true;
+            showUntracked: true;
+            showConflicts: true;
+        };
+        time: { enabled: true; format: "HH:mm:ss"; };
+    };
+
+    history = { maxEntries: 10000; dedupeConsecutive: true; };
+    completion = { enabled: true; };
+};
+
+function startup() -> shell {
+    return shell {
+        path append $(npm prefix -g)/bin;
+        nitch;
+    };
+};
+```
+
+Spar validates the declared types first. Sparsh then independently validates the
+evaluated `Config` section, including rejecting fields that Sparsh does not
+implement. Editing `sparsh-types.spar` therefore cannot silently enable a fake
+setting.
+
+The rc file is ordinary Spar. Normal functions can live in `functions.spar` and
+be selectively imported. `reload` builds a candidate session/configuration and
+only swaps it into the live shell when parsing, resolving, type checking,
+evaluation, and Sparsh validation all succeed.
+
+Sparsh has one startup mechanism: an optional normal Spar function named
+`startup`. It runs once for interactive/login shells after the interactive
+editor is initialized and before the first prompt. If it returns `shell`, that
+shell plan executes in the same persistent `ShellSession` as commands entered
+later. For example:
+
+```spar
+function startup() -> shell {
+    return shell {
+        nitch;
+    };
+};
+```
+
+There is intentionally no `startup.commands` config field. Static environment
+configuration belongs in `environment`; imperative or dynamically computed
+startup work belongs in `startup()`. The startup hook is not run for `sparsh -c`, remote commands, or piped
+noninteractive stdin.
+
+`environment` entries use `value` for fixed variables. `PATH` additionally
+supports `prepend` and `append`, which preserve the inherited PATH, expand
+`$NAME` references from the current environment, and avoid duplicate path
+entries. (`${...}` is Spar's own string-interpolation syntax, so `$HOME` is the
+recommended form inside environment strings.) `value` cannot be combined with
+`prepend`/`append`. Environment config does not execute command substitution;
+dynamic paths such as `$(npm prefix -g)/bin` should be added from `startup()`
+with the native `path` builtin.
+
+The default prompt leaves path widths unspecified. It renders the complete cwd
+while it fits the actual terminal and only abbreviates components when width is
+constrained. Explicit `parentLength`, `maxLastLength`, and `maxWidth` settings
+override that default behavior.
+
+Run the root bootstrap script to create a safe starter configuration:
+
+```sh
+./setup-sparsh-config.sh
+# or back up and replace existing generated files:
+./setup-sparsh-config.sh --force
+```
+
+A copyable pair also lives at `examples/config.spar` and
+`examples/sparsh-types.spar`.
+
+## Prompt v2
+
+The default two-line prompt is width-aware. It keeps the shape of a long path by
+abbreviating parent components rather than replacing the whole prefix with an
+opaque ellipsis:
+
+```text
+~/Projects/Rust/occ_lang/sparsh/crates/sparsh-core
+~/Pr/Ru/oc/sp/cr/sparsh-core
+```
+
+As the terminal narrows, parent components shrink further and the final
+component receives the largest share of the width budget. The prompt can also
+show:
+
+```text
+ main +2 ~3 ?1 !1 ↑2 ↓1
+```
+
+for branch, staged, modified, untracked, conflicts, commits ahead, and commits
+behind. Previous failure status, slow-command duration, and current time are
+right-aligned when space allows. Optional information degrades before the cwd
+becomes unreadable.
+
+`NO_COLOR` disables Sparsh UI colors. External program output is never
+recolored or stripped, so `eza --icons`, `bat`, `rg`, `git`, and other ANSI/
+Nerd-Font-aware tools pass through unchanged.
+
+## History and completion
+
+Interactive editing uses Reedline with file-backed history, hints, completion,
+syntax highlighting, parser-aware multiline validation, and bracketed-paste
+review.
+
+Default history location:
+
+```text
+$XDG_STATE_HOME/sparsh/history
+```
+
+or:
+
+```text
+$HOME/.local/state/sparsh/history
+```
+
+Completion combines builtins, aliases, cached PATH executables, filesystem
+paths, and identifiers from the persistent Spar session. Filesystem completion
+works in ordinary command arguments (`ls Pro<Tab>`), `cd`, after pipelines, and
+for `~/...` paths. Quoted/spaced directory completion remains open so deeper
+components can continue completing.
+
+Use `hash -r` after installing a new executable into an already scanned PATH
+directory.
+
+## `source` and `.`
+
+For Spar files:
+
+```text
+source ~/.sparsh/functions.spar
+. ~/.sparsh/functions.spar
+```
+
+The file is evaluated into the current persistent Spar session. Variables and
+functions remain available afterwards, and relative imports resolve from the
+sourced file's directory.
+
+For a foreign shell activation script:
+
+```text
+source .venv/bin/activate
+source --shell bash ./script
+source --shell zsh ./script
+```
+
+Sparsh runs the foreign source operation in a child shell and atomically imports
+only the resulting environment and working directory. This supports Python
+virtual-environment activation without pretending Bash aliases/functions/traps
+are Spar constructs.
+
+When `source` activates a Python environment by setting `VIRTUAL_ENV`, Sparsh
+records the environment changes made by that activation. Use the native builtin:
+
+```text
+deactivate
+```
+
+to restore those activation-owned environment entries (including `PATH`) while
+preserving unrelated environment changes made later in the session. The
+standard spelling is `deactivate`; a mistyped `deactive` is offered
+`deactivate` by command suggestions.
+
+## Executable `.spar` programs
+
+Inside Sparsh, an executable `.spar` file without a foreign shebang is routed to
+the Spar runtime rather than `/bin/sh`:
+
+```sh
+chmod +x main.spar
+./main.spar
+```
+
+A Spar shebang is also supported:
+
+```spar
+#!/usr/bin/env spar
+function main() -> int { return 0; };
+```
+
+An explicit foreign shebang such as `#!/bin/sh` is respected. The executable
+bit is still required for `./file.spar`. Executable Spar programs may
+participate in redirects and pipelines.
+
+## Job control
+
+On Unix, foreground/background external commands and pipelines use process
+groups. Interactive Sparsh transfers the controlling terminal to the foreground
+process group and restores it afterwards.
+
+```text
+sleep 30 &
+jobs
+fg %1
+bg %1
+wait %1
+kill -TERM %1
+disown %1
+```
+
+The implementation is Linux-first. Use the PTY/manual checks in `VERIFY.md`
+before selecting Sparsh as a login shell.
+
+## Multiline Spar
+
+Normal command mode submits complete input immediately and keeps structurally
+incomplete Spar open for more lines. `repl` enters an explicit multiline Spar
+editor; Ctrl-D returns to command mode. Bracketed multiline paste gets an
+execute/edit/cancel review step. In normal command mode, executing a reviewed
+paste runs complete command lines sequentially in the same persistent session,
+while structurally incomplete Spar constructs stay grouped until complete.
+
+## Startup modes
+
+```sh
+sparsh
+sparsh -c 'git status'
+printf 'pwd\n' | sparsh
+sparsh --login
+sparsh --remote-command 'pwd'
+```
+
+`--help` and `--version` do not initialize a shell session.
+
+## Verification status
+
+The current assembly environment cannot run Rust. Before treating a generated
+patch as verified, run the exact compiler/test/build/PTy checklist in the
+project-root `VERIFY.md` on a machine with the pinned Rust toolchain.

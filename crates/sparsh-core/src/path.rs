@@ -1,10 +1,20 @@
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+
+#[derive(Debug, Clone)]
+struct ExecutableNameCache {
+    generation: u64,
+    cwd: PathBuf,
+    names: BTreeSet<String>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PathService {
     directories: Vec<PathBuf>,
     generation: u64,
+    executable_names: RefCell<Option<ExecutableNameCache>>,
 }
 
 impl PathService {
@@ -16,6 +26,7 @@ impl PathService {
                 .flatten()
                 .collect(),
             generation: 0,
+            executable_names: RefCell::new(None),
         }
     }
 
@@ -28,6 +39,7 @@ impl PathService {
         Self {
             directories: directories.into_iter().map(Into::into).collect(),
             generation: 0,
+            executable_names: RefCell::new(None),
         }
     }
 
@@ -99,6 +111,46 @@ impl PathService {
         std::env::join_paths(&self.directories).map_err(|error| format!("invalid PATH: {error}"))
     }
 
+    pub(crate) fn executable_names(&self, cwd: &Path) -> BTreeSet<String> {
+        if let Some(cached) = self.executable_names.borrow().as_ref() {
+            if cached.generation == self.generation && cached.cwd == cwd {
+                return cached.names.clone();
+            }
+        }
+
+        let mut names = BTreeSet::new();
+        for directory in &self.directories {
+            let directory = if directory.as_os_str().is_empty() {
+                cwd.to_path_buf()
+            } else if directory.is_absolute() {
+                directory.clone()
+            } else {
+                cwd.join(directory)
+            };
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if crate::resolver::is_executable(&entry.path()) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        *self.executable_names.borrow_mut() = Some(ExecutableNameCache {
+            generation: self.generation,
+            cwd: cwd.to_path_buf(),
+            names: names.clone(),
+        });
+        names
+    }
+
+    pub(crate) fn invalidate_executable_cache(&mut self) {
+        *self.executable_names.borrow_mut() = None;
+        self.bump_generation();
+    }
+
     pub(crate) fn render(&self) -> String {
         let mut output = self
             .directories
@@ -114,6 +166,7 @@ impl PathService {
 
     fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        *self.executable_names.borrow_mut() = None;
     }
 }
 
@@ -216,6 +269,27 @@ mod tests {
 
         assert_eq!(path.directories(), [Path::new(""), Path::new("/bin")]);
         assert_eq!(path.to_environment().unwrap(), OsStr::new(":/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_names_are_cached_until_explicit_invalidation() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut path = PathService::from_directories([temp.path()]);
+        assert!(path.executable_names(Path::new("/")).is_empty());
+
+        let executable = temp.path().join("new-command");
+        fs::write(&executable, "#!/bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        assert!(!path.executable_names(Path::new("/")).contains("new-command"));
+        path.invalidate_executable_cache();
+        assert!(path.executable_names(Path::new("/")).contains("new-command"));
     }
 
     #[test]

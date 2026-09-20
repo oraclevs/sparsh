@@ -26,7 +26,7 @@ struct CacheEntry {
     generation: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct CommandResolver {
     cache: BTreeMap<String, CacheEntry>,
 }
@@ -164,7 +164,7 @@ fn search(program: &str, directories: &[PathBuf], cwd: &Path) -> Result<PathBuf,
     Err(format!("command not found: `{program}`"))
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }

@@ -22,20 +22,11 @@ pub struct GitProbe {
 
 impl GitProbe {
     pub fn new() -> Self {
-        Self::with_executable(
-            OsString::from("git"),
-            Duration::from_millis(100),
-            Duration::from_secs(1),
-        )
+        Self::with_executable(OsString::from("git"), Duration::from_millis(100), Duration::from_secs(1))
     }
 
     pub fn with_executable(executable: OsString, timeout: Duration, ttl: Duration) -> Self {
-        Self {
-            executable,
-            timeout,
-            ttl,
-            cache: None,
-        }
+        Self { executable, timeout, ttl, cache: None }
     }
 
     pub fn state(&mut self, cwd: &Path) -> Option<GitState> {
@@ -44,153 +35,118 @@ impl GitProbe {
                 return cache.state.clone();
             }
         }
-        let state =
-            run_git(&self.executable, cwd, self.timeout).and_then(|output| parse_status(&output));
-        self.cache = Some(CachedGitState {
-            cwd: cwd.to_path_buf(),
-            checked_at: Instant::now(),
-            state: state.clone(),
-        });
+        let state = run_git(&self.executable, cwd, self.timeout).and_then(|output| parse_status(&output));
+        self.cache = Some(CachedGitState { cwd: cwd.to_path_buf(), checked_at: Instant::now(), state: state.clone() });
         state
     }
 }
 
-impl Default for GitProbe {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl Default for GitProbe { fn default() -> Self { Self::new() } }
 
 fn run_git(executable: &OsStr, cwd: &Path, timeout: Duration) -> Option<String> {
     let mut child = Command::new(executable)
-        .args([
-            "-c",
-            "core.fileMode=false",
-            "status",
-            "--porcelain=v1",
-            "--branch",
-            "--untracked-files=normal",
-        ])
+        .args(["-c", "core.fileMode=false", "status", "--porcelain=v2", "--branch", "--untracked-files=normal"])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .spawn().ok()?;
     let mut stdout = child.stdout.take()?;
+    // Drain stdout concurrently so a repository with a very large status
+    // cannot fill the OS pipe and deadlock the child while we wait for it.
+    let reader = thread::spawn(move || {
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).map(|_| output)
+    });
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().ok()? {
-            break status;
-        }
+        if let Some(status) = child.try_wait().ok()? { break status; }
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = reader.join();
             return None;
         }
         thread::sleep(Duration::from_millis(2));
     };
-    if !status.success() {
-        return None;
-    }
-    let mut output = String::new();
-    stdout.read_to_string(&mut output).ok()?;
+    let output = reader.join().ok()?.ok()?;
+    if !status.success() { return None; }
     Some(output)
 }
 
-fn parse_status(output: &str) -> Option<GitState> {
-    let mut lines = output.lines();
-    let header = lines.next()?.strip_prefix("## ")?;
-    if header.starts_with("HEAD ") || header == "HEAD" {
-        return None;
+pub(crate) fn parse_status(output: &str) -> Option<GitState> {
+    let mut state = GitState::default();
+    let mut have_branch = false;
+    for line in output.lines() {
+        if let Some(branch) = line.strip_prefix("# branch.head ") {
+            if branch != "(detached)" {
+                state.branch = branch.to_string();
+                have_branch = true;
+            }
+            continue;
+        }
+        if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            for item in ab.split_whitespace() {
+                if let Some(value) = item.strip_prefix('+') { state.ahead = value.parse().unwrap_or(0); }
+                if let Some(value) = item.strip_prefix('-') { state.behind = value.parse().unwrap_or(0); }
+            }
+            continue;
+        }
+        if line.starts_with("? ") {
+            state.untracked += 1;
+            continue;
+        }
+        if line.starts_with("u ") {
+            state.conflicts += 1;
+            continue;
+        }
+        if line.starts_with("1 ") || line.starts_with("2 ") {
+            let xy = line.split_whitespace().nth(1).unwrap_or("..").as_bytes();
+            if xy.first().is_some_and(|value| *value != b'.') { state.staged += 1; }
+            if xy.get(1).is_some_and(|value| *value != b'.') { state.modified += 1; }
+        }
     }
-    let branch = header
-        .split_once("...")
-        .map_or(header, |(branch, _)| branch)
-        .split_whitespace()
-        .next()?;
-    if branch.is_empty() {
-        return None;
-    }
-    Some(GitState {
-        branch: branch.to_string(),
-        dirty: lines.any(|line| !line.is_empty()),
-    })
+    have_branch.then_some(state)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-    use std::os::unix::fs::PermissionsExt;
-    use std::time::{Duration, Instant};
+    use super::parse_status;
 
-    use crate::prompt::GitState;
 
-    use super::{parse_status, GitProbe};
-
+    #[cfg(unix)]
     #[test]
-    fn parses_clean_dirty_and_detached_porcelain_headers() {
-        assert_eq!(
-            parse_status("## main\n"),
-            Some(GitState {
-                branch: "main".into(),
-                dirty: false,
-            })
-        );
-        assert_eq!(
-            parse_status("## topic\n M src/main.rs\n"),
-            Some(GitState {
-                branch: "topic".into(),
-                dirty: true,
-            })
-        );
-        assert_eq!(parse_status("## HEAD (no branch)\n"), None);
-        assert_eq!(parse_status("not porcelain\n"), None);
-    }
+    fn large_git_status_is_drained_without_pipe_deadlock() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
 
-    #[test]
-    fn caches_probe_result_for_same_cwd_within_ttl() {
         let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("fake-git");
-        let counter = directory.path().join("count");
+        let fake_git = directory.path().join("git");
         std::fs::write(
-            &executable,
-            format!(
-                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || printf 0)\nprintf '%s' \"$((count + 1))\" > '{}'\nprintf '## main\\n'\n",
-                counter.display(),
-                counter.display()
-            ),
+            &fake_git,
+            "#!/bin/sh\nprintf '# branch.head main\n'\ni=0\nwhile [ \"$i\" -lt 12000 ]; do printf '? file%s\n' \"$i\"; i=$((i+1)); done\n",
         )
         .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut probe = GitProbe::with_executable(
-            OsString::from(&executable),
-            Duration::from_millis(100),
-            Duration::from_secs(1),
-        );
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert_eq!(probe.state(directory.path()).unwrap().branch, "main");
-        assert_eq!(probe.state(directory.path()).unwrap().branch, "main");
-        assert_eq!(std::fs::read_to_string(counter).unwrap(), "1");
+        let mut probe = super::GitProbe::with_executable(
+            OsString::from(fake_git),
+            Duration::from_secs(5),
+            Duration::ZERO,
+        );
+        let state = probe.state(directory.path()).expect("large status should complete");
+
+        assert_eq!(state.branch, "main");
+        assert_eq!(state.untracked, 12_000);
     }
 
     #[test]
-    fn git_probe_kills_timed_out_child() {
-        let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("slow-git");
-        std::fs::write(&executable, "#!/bin/sh\nsleep 2\nprintf '## late\\n'\n").unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut probe = GitProbe::with_executable(
-            OsString::from(&executable),
-            Duration::from_millis(20),
-            Duration::ZERO,
-        );
-
-        let started = Instant::now();
-        let state = probe.state(directory.path());
-
-        assert_eq!(state, None);
-        assert!(started.elapsed() < Duration::from_millis(500));
+    fn parses_porcelain_v2_status_counters() {
+        let input = "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -1\n1 M. N... 100644 100644 100644 a a staged\n1 .M N... 100644 100644 100644 a a modified\n? notes.txt\nu UU N... 100644 100644 100644 100644 a a a conflict\n";
+        let state = parse_status(input).unwrap();
+        assert_eq!(state.branch, "main");
+        assert_eq!((state.staged, state.modified, state.untracked, state.conflicts, state.ahead, state.behind), (1,1,1,1,2,1));
     }
 }

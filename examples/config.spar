@@ -1,0 +1,45 @@
+// Copy as ~/.sparsh/sparsh.spar and place sparsh-types.spar beside it.
+import type {
+    SparshAlias,
+    SparshEnvironmentVariable,
+    SparshPrompt,
+    SparshHistory,
+    SparshCompletion,
+    SparshConfig
+} from "./sparsh-types";
+
+struct Config: SparshConfig {
+    aliases = [
+        { name: "gs"; command: ["git", "status"]; },
+        { name: "ll"; command: ["eza", "-la", "--icons", "--git"]; }
+    ];
+    environment = [
+        { name: "EDITOR"; value: "nvim"; },
+        {
+            name: "PATH";
+            prepend: [
+                "/opt/android-sdk/platform-tools",
+                "$HOME/DevTools/flutter/bin",
+                "$HOME/.cargo/bin",
+                "$HOME/.local/bin"
+            ];
+            append: ["$HOME/.pub-cache/bin"];
+        }
+    ];
+    prompt = {
+        showStatus: true;
+        showDuration: true;
+        path: { enabled: true; };
+        git: { enabled: true; showBranch: true; showAheadBehind: true; };
+        time: { enabled: true; format: "HH:mm:ss"; };
+    };
+    history = { maxEntries: 10000; dedupeConsecutive: true; };
+    completion = { enabled: true; };
+};
+
+function startup() -> shell {
+    return shell {
+        path append $(npm prefix -g)/bin;
+        nitch;
+    };
+};

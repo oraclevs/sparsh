@@ -17,6 +17,8 @@ pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut index = 0;
     let mut command_position = true;
+    let mut active_command: Option<String> = None;
+    let mut paren_depth = 0usize;
 
     while index < line.len() {
         let character = line[index..]
@@ -27,51 +29,116 @@ pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
             index += character.len_utf8();
             continue;
         }
+
         if matches!(character, '\'' | '"') {
             let end = quoted_end(line, index, character);
-            spans.push(HighlightSpan {
-                range: index..end,
-                role: SemanticRole::QuotedString,
-            });
+            let role = if active_command.as_deref().is_some_and(command_takes_path) {
+                SemanticRole::Path
+            } else {
+                SemanticRole::QuotedString
+            };
+            spans.push(HighlightSpan { range: index..end, role });
             command_position = false;
             index = end;
             continue;
         }
+
         if let Some((length, starts_command)) = operator_at(line, index) {
             spans.push(HighlightSpan {
                 range: index..index + length,
                 role: SemanticRole::Operator,
             });
-            command_position = starts_command;
+            if starts_command {
+                command_position = true;
+                active_command = None;
+            }
             index += length;
+            continue;
+        }
+
+        if matches!(character, '(' | ')' | ',' | ':') {
+            spans.push(HighlightSpan {
+                range: index..index + character.len_utf8(),
+                role: SemanticRole::Operator,
+            });
+            match character {
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                _ => {}
+            }
+            index += character.len_utf8();
             continue;
         }
 
         let end = word_end(line, index);
         let word = &line[index..end];
-        let role = if command_position && is_spar_keyword(word) {
+        let next = next_non_whitespace_char(line, end);
+        let function_call = next == Some('(') && snapshot.has_function(word);
+        let named_parameter = paren_depth > 0 && next == Some(':');
+
+        let role = if function_call {
+            SemanticRole::Function
+        } else if named_parameter {
+            SemanticRole::Parameter
+        } else if command_position && is_spar_keyword(word) {
             SemanticRole::SparSyntax
         } else if command_position {
-            match snapshot.classify_command(word) {
+            let kind = snapshot.classify_command(word);
+            active_command = Some(word.to_string());
+            match kind {
                 CommandKind::Builtin => SemanticRole::Builtin,
                 CommandKind::Alias => SemanticRole::Alias,
                 CommandKind::External => SemanticRole::ExternalCommand,
                 CommandKind::Unknown => SemanticRole::UnknownCommand,
             }
+        } else if active_command.as_deref().is_some_and(command_takes_path)
+            && !word.starts_with('-')
+        {
+            SemanticRole::Path
         } else if word.starts_with('-') {
             SemanticRole::Option
         } else {
             SemanticRole::Argument
         };
-        spans.push(HighlightSpan {
-            range: index..end,
-            role,
-        });
+
+        spans.push(HighlightSpan { range: index..end, role });
         command_position = false;
         index = end;
     }
 
     spans
+}
+
+pub(crate) fn paint_range(
+    line: &str,
+    range: Range<usize>,
+    snapshot: &ShellUiSnapshot,
+    theme: &Theme,
+) -> String {
+    let start = range.start.min(line.len());
+    let end = range.end.min(line.len());
+    if start >= end || !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+        return String::new();
+    }
+
+    let mut rendered = String::new();
+    let mut cursor = start;
+    for span in scan(line, snapshot) {
+        let span_start = span.range.start.max(start);
+        let span_end = span.range.end.min(end);
+        if span_start >= span_end {
+            continue;
+        }
+        if cursor < span_start {
+            rendered.push_str(&line[cursor..span_start]);
+        }
+        rendered.push_str(&theme.paint(span.role, &line[span_start..span_end]));
+        cursor = span_end;
+    }
+    if cursor < end {
+        rendered.push_str(&line[cursor..end]);
+    }
+    rendered
 }
 
 fn quoted_end(line: &str, start: usize, quote: char) -> usize {
@@ -115,7 +182,7 @@ fn word_end(line: &str, start: usize) -> usize {
         let index = start + offset;
         if index > start
             && (character.is_whitespace()
-                || matches!(character, '\'' | '"')
+                || matches!(character, '\'' | '"' | '(' | ')' | ',' | ':')
                 || operator_at(line, index).is_some())
         {
             return index;
@@ -124,10 +191,34 @@ fn word_end(line: &str, start: usize) -> usize {
     line.len()
 }
 
+fn next_non_whitespace_char(line: &str, start: usize) -> Option<char> {
+    line[start..].chars().find(|character| !character.is_whitespace())
+}
+
+fn command_takes_path(command: &str) -> bool {
+    matches!(command, "cd" | "pushd" | "source" | ".")
+}
+
 fn is_spar_keyword(word: &str) -> bool {
     matches!(
         word,
-        "var" | "let" | "export" | "fn" | "type" | "private" | "import"
+        "var"
+            | "mut"
+            | "export"
+            | "function"
+            | "functionGroup"
+            | "type"
+            | "struct"
+            | "enum"
+            | "private"
+            | "import"
+            | "if"
+            | "else"
+            | "for"
+            | "return"
+            | "shell"
+            | "command"
+            | "exec"
     )
 }
 
@@ -170,7 +261,7 @@ mod tests {
 
     use crate::theme::{SemanticRole, Theme};
 
-    use super::{scan, HighlightSpan, SparshHighlighter};
+    use super::{paint_range, scan, HighlightSpan, SparshHighlighter};
 
     fn roles(spans: &[HighlightSpan]) -> Vec<(Range<usize>, SemanticRole)> {
         spans
@@ -216,6 +307,44 @@ mod tests {
         assert!(spans
             .iter()
             .any(|span| span.role == SemanticRole::QuotedString));
+    }
+
+    #[test]
+    fn cd_path_uses_a_visible_path_role_instead_of_generic_argument_gray() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let spans = scan("cd ~/Projects/Spar", &snapshot);
+
+        assert_eq!(spans[0].role, SemanticRole::Builtin);
+        assert_eq!(spans[1].role, SemanticRole::Path);
+    }
+
+    #[test]
+    fn painted_range_can_be_reused_by_the_full_screen_editor() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let source = "cd ~/Projects/Spar";
+
+        assert_eq!(
+            paint_range(source, 3..source.len(), &snapshot, &Theme::plain()),
+            "~/Projects/Spar"
+        );
+        let colored = paint_range(source, 0..source.len(), &snapshot, &Theme::colored());
+        assert!(colored.contains("\x1b["));
+        assert!(colored.contains("cd"));
+        assert!(colored.contains("~/Projects/Spar"));
+    }
+
+    #[test]
+    fn valid_spar_function_call_and_named_parameter_have_semantic_roles() {
+        let mut session = ShellSession::new();
+        session
+            .submit("function create(name: str) -> str { return name; };")
+            .unwrap();
+        let snapshot = session.ui_snapshot();
+        let spans = scan("create(name: \"OCC\")", &snapshot);
+
+        assert_eq!(spans[0].role, SemanticRole::Function);
+        assert!(spans.iter().any(|span| span.role == SemanticRole::Parameter));
+        assert!(spans.iter().all(|span| span.role != SemanticRole::UnknownCommand));
     }
 
     #[test]

@@ -1,0 +1,64 @@
+// Legacy compatibility copy of the public Sparsh config model.
+// New configurations should keep these normal Spar types in
+// ~/.sparsh/sparsh-types.spar rather than importing a native package.
+
+export type AliasConfig {
+    name: str;
+    command: List<str>;
+};
+
+export type EnvironmentConfig {
+    name: str;
+    value?: str;
+    prepend?: List<str>;
+    append?: List<str>;
+};
+
+export type PromptPathConfig {
+    enabled?: bool;
+    parentLength?: int;
+    maxLastLength?: int;
+    maxWidth?: int;
+};
+
+export type PromptGitConfig {
+    enabled?: bool;
+    showBranch?: bool;
+    showAheadBehind?: bool;
+    showStaged?: bool;
+    showModified?: bool;
+    showUntracked?: bool;
+    showConflicts?: bool;
+};
+
+export type PromptTimeConfig {
+    enabled?: bool;
+    format?: str;
+};
+
+export type PromptConfig {
+    showStatus?: bool;
+    showDuration?: bool;
+    durationThresholdMs?: int;
+    path?: PromptPathConfig;
+    git?: PromptGitConfig;
+    time?: PromptTimeConfig;
+};
+
+export type HistoryConfig {
+    path?: str;
+    maxEntries?: int;
+    dedupeConsecutive?: bool;
+};
+
+export type CompletionConfig {
+    enabled?: bool;
+};
+
+export type SparshConfig {
+    aliases?: List<AliasConfig>;
+    environment?: List<EnvironmentConfig>;
+    prompt?: PromptConfig;
+    history?: HistoryConfig;
+    completion?: CompletionConfig;
+};
