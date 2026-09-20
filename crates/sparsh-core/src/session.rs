@@ -598,6 +598,12 @@ impl ShellSession {
         &self.config.prompt
     }
 
+    /// Problems found in the `prompt` section of the loaded config (empty when
+    /// it is fine). They never stop the shell; the UI reports them.
+    pub fn prompt_issues(&self) -> &[crate::PromptIssue] {
+        &self.config.prompt_issues
+    }
+
     pub fn config_generation(&self) -> u64 {
         self.config_generation
     }
@@ -997,6 +1003,42 @@ mod tests {
             result,
             ShellResult::CommandStatus { status: 127, .. }
         ));
+    }
+
+    #[test]
+    fn reload_with_a_broken_prompt_slot_succeeds_and_reports_issues() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".sparsh")).unwrap();
+        std::fs::write(
+            home.path().join(".sparsh/sparsh.spar"),
+            format!(
+                "{}\nstruct Config: SparshConfig {{\n    aliases = [{{ name: \"gs\"; command: [\"git\", \"status\"]; }}];\n    prompt = {{ right: {{ slot1: {{ text: \"{{cpu}}\"; }}; slot2: {{ text: \"{{cpuu}}\"; }}; }}; }};\n}};\n",
+                include_str!("../../../examples/sparsh-types.spar")
+            ),
+        )
+        .unwrap();
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("export HOME={}", home.path().display()))
+            .unwrap();
+        let before = session.config_generation();
+
+        session.reload_config().expect("prompt problems must not fail the reload");
+
+        assert_ne!(session.config_generation(), before, "the config was applied");
+        assert_eq!(session.prompt_issues().len(), 1);
+        assert_eq!(session.prompt_issues()[0].slot, Some(2));
+        assert!(matches!(
+            session.prompt_config().right.slots[1],
+            Some(crate::SlotConfig::Broken { .. })
+        ));
+        assert_eq!(
+            session.ui_snapshot().classify_command("gs"),
+            CommandKind::Alias,
+            "the alias from the same file still applies"
+        );
     }
 
     #[test]

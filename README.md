@@ -280,8 +280,90 @@ show:
 
 for branch, staged, modified, untracked, conflicts, commits ahead, and commits
 behind. Previous failure status, slow-command duration, and current time are
-right-aligned when space allows. Optional information degrades before the cwd
+right-aligned when space allows (customizable, see below). Optional information degrades before the cwd
 becomes unreadable.
+
+### Right prompt
+
+The right side of the first line is `status`, then three slots you control.
+`status` (`✕ 7` after a failed command, nothing after success) is always first and
+is not configurable. Each slot is a template string with `{widget}` placeholders
+and an optional color:
+
+```spar
+prompt = {
+    right: {
+        slot1: { text: "{duration}"; color: "yellow"; };
+        // Nerd Font glyphs are pasted straight into the text; sparsh does not install fonts.
+        slot2: { text: " {cpu}%   {ram}%"; color: "cyan"; style: ["bold"]; };
+        slot3: { text: " {date:%a %d %b}   {time:%I:%M %p}"; };
+        separator: "  ";
+        glyphWidth: 1;
+        thresholds: {
+            cpu: { warn: 70; critical: 90; };
+            battery: { warn: 30; critical: 15; };
+        };
+    };
+};
+```
+
+Widgets (`{{` and `}}` write literal braces; `time`/`date` take a `strftime`
+format and keep commas, other widgets take comma-separated arguments):
+
+| Widget | Shows | Arguments |
+|---|---|---|
+| `{time}` | local time, default `%H:%M:%S` | `strftime` format, e.g. `{time:%I:%M %p}` |
+| `{date}` | local date, default `%Y-%m-%d` | `strftime` format, e.g. `{date:%a %d %b}` |
+| `{duration}` | last command's run time; hidden below `durationThresholdMs` | none |
+| `{cpu}` | busy % since the previous prompt | `free` (idle %) |
+| `{ram}` | used % | `free`, or a size: `used`, `avail`, `total` |
+| `{disk}` | used % of the current directory's filesystem | `free`, a size (`used`, `avail`, `total`), or a path such as `/home` |
+| `{battery}` | charge %; hidden with no battery | `icon` (Nerd Font glyph), `state` |
+| `{load}` | 1-minute load average | `5` or `15` |
+| `{uptime}` | `3d 4h`, `4h 12m` | none |
+| `{user}`, `{host}` | login name, short hostname | `host:full` |
+| `{jobs}` | background job count; hidden at 0 | none |
+
+Percent widgets print the bare number, so write the `%` yourself. "Remaining
+disk percentage" is `{disk:free}`. A widget with nothing to show renders empty,
+and a slot whose placeholders are all empty disappears entirely (its text and
+separator too), so `"  {jobs}"` leaves no stray glyph at 0 jobs.
+
+Colors are a name (`cyan`, `lightred`, `gray`, ...), `#rrggbb` (downgraded to
+256 colors unless `COLORTERM` is `truecolor`/`24bit`), or `"0"`-`"255"`. Styles
+are any of `bold`, `dim`, `italic`, `underline`. `cpu`, `ram`, `disk`, `battery`
+and `load` turn warning/critical colored automatically; `thresholds` overrides
+the defaults (cpu 70/90, ram 80/90, disk 85/95, battery 30/15 where lower is
+worse, load = cores and 2x cores). CPU, RAM, disk, battery, load and uptime are
+read from `/proc` and `/sys`, so they are Linux-only for now and simply hidden
+elsewhere.
+
+When the terminal is narrow, whole slots are dropped from the right (slot3, then
+slot2, slot1, and status last) before git and the path shrink. If your terminal
+draws Nerd Font glyphs two cells wide, set `glyphWidth: 2`.
+
+Without a `right` section the prompt looks exactly as before (duration and a
+clock), and the older `showDuration` and `time` keys keep working; setting both
+`right` and those keys makes `right` win.
+
+**A configuration mistake never breaks the shell.** Every problem in the
+`prompt` section (including the older keys) is soft: the shell starts, the rest of
+your config (aliases, environment, history) still applies, and:
+
+- a slot with a bad template, color or style is drawn as a red `✕ slotN` in its
+  place while the other slots keep working;
+- any other bad value falls back to its default;
+- the problems are printed above the prompt once each time the config loads
+  (startup and `reload`), for example:
+
+```text
+sparsh: 2 prompt config problems (the shell is unaffected)
+  ✕ config.prompt.right.slot2.text: unknown widget 'cpuu'; did you mean 'cpu'?
+  ✕ config.prompt.right.glyphWidth: must be between 1 and 2, got 9 (using default)
+```
+
+Errors outside the `prompt` section (Spar syntax errors, invalid aliases or
+environment entries) still reject the config as before.
 
 `NO_COLOR` disables Sparsh UI colors. External program output is never
 recolored or stripped, so `eza --icons`, `bat`, `rg`, `git`, and other ANSI/

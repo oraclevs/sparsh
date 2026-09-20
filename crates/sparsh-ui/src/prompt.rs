@@ -3,11 +3,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch};
-use sparsh_core::PromptConfig;
+use sparsh_core::{PromptConfig, SlotConfig, SlotSpec, TextStyle, WidgetKind};
 
 use crate::project::ProjectKind;
+use crate::sampler::SystemSnapshot;
 use crate::theme::{SemanticRole, Theme};
-use crate::width::{display_width, fold_path};
+use crate::width::{display_width, display_width_with_glyphs, fold_path};
+use crate::widgets::{render_slot, Level, LocalTime, RenderedSlot, WidgetInputs};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitState {
@@ -29,7 +31,12 @@ pub struct PromptData {
     pub previous_status: i32,
     pub previous_duration: Option<Duration>,
     pub terminal_width: usize,
-    pub current_time: Option<String>,
+    /// The current local time, for `{time}` and `{date}` widgets.
+    pub now: Option<LocalTime>,
+    /// Number of background jobs, for `{jobs}`.
+    pub jobs: usize,
+    /// Machine readings for the widgets the config uses.
+    pub system: SystemSnapshot,
 }
 
 pub struct PromptState {
@@ -58,7 +65,7 @@ impl PromptState {
         let prefix = "╭─ ";
         let separator = "  ";
 
-        let mut right_segments = self.right_segments(data, config);
+        let mut right = self.right_blocks(data, config, theme);
         let mut git_mode = if config.git.enabled && data.git.is_some() {
             GitMode::Full
         } else {
@@ -68,30 +75,32 @@ impl PromptState {
         // First preserve full Git information and shed right-side optional
         // information (time, then duration, then status) until the first line
         // has a useful cwd budget.
-        while !right_segments.is_empty()
-            && minimum_first_line_width(prefix, separator, data, config, git_mode, &right_segments)
-                > width
+        while !right.is_empty()
+            && minimum_first_line_width(
+                prefix,
+                separator,
+                data,
+                config,
+                git_mode,
+                right_width(&right, config),
+            ) > width
         {
-            right_segments.pop();
+            right.pop();
         }
 
         // If the repository segment is still too wide, degrade predictably:
         // full counters -> branch only -> hidden.  Unlike the previous prompt,
         // this mode is shared by width calculation and colored rendering.
-        if minimum_first_line_width(prefix, separator, data, config, git_mode, &right_segments)
-            > width
-        {
+        let right_cells = right_width(&right, config);
+        if minimum_first_line_width(prefix, separator, data, config, git_mode, right_cells) > width {
             git_mode = GitMode::BranchOnly;
         }
-        if minimum_first_line_width(prefix, separator, data, config, git_mode, &right_segments)
-            > width
-        {
+        if minimum_first_line_width(prefix, separator, data, config, git_mode, right_cells) > width {
             git_mode = GitMode::Hidden;
         }
 
         let context_segments = context_segments(data, config, git_mode);
         let context_plain = join_plain(&context_segments, " ");
-        let right_plain = join_plain(&right_segments, separator);
 
         let reserved = display_width(prefix)
             + if context_plain.is_empty() {
@@ -99,10 +108,10 @@ impl PromptState {
             } else {
                 display_width(separator) + display_width(&context_plain)
             }
-            + if right_plain.is_empty() {
+            + if right.is_empty() {
                 0
             } else {
-                display_width(separator) + display_width(&right_plain)
+                display_width(separator) + right_cells
             };
         let path_budget = width
             .saturating_sub(reserved)
@@ -122,7 +131,11 @@ impl PromptState {
 
         let path_colored = theme.paint(SemanticRole::Cwd, &path);
         let context_colored = paint_segments(&context_segments, " ", theme);
-        let right_colored = paint_segments(&right_segments, separator, theme);
+        let right_colored = right
+            .iter()
+            .map(|block| block.colored.as_str())
+            .collect::<Vec<_>>()
+            .join(&config.right.separator);
 
         let left_plain_width = display_width(prefix)
             + display_width(&path)
@@ -139,7 +152,7 @@ impl PromptState {
         }
         if !right_colored.is_empty() {
             let spaces = width
-                .saturating_sub(left_plain_width + display_width(&right_plain))
+                .saturating_sub(left_plain_width + right_cells)
                 .max(1);
             first_line.push_str(&" ".repeat(spaces));
             first_line.push_str(&right_colored);
@@ -164,29 +177,105 @@ impl PromptState {
         }
     }
 
-    fn right_segments(
-        &self,
-        data: &PromptData,
-        config: &PromptConfig,
-    ) -> Vec<(SemanticRole, String)> {
-        let mut segments = Vec::new();
+    /// The right block, in display order: the fixed status marker, then the
+    /// three user slots. Hidden slots are skipped; a broken slot shows a red
+    /// marker so the user can see which one needs fixing.
+    fn right_blocks(&self, data: &PromptData, config: &PromptConfig, theme: &Theme) -> Vec<RightBlock> {
+        let mut blocks = Vec::new();
         if config.show_status && data.previous_status != 0 {
-            segments.push((SemanticRole::Failure, format!("✕ {}", data.previous_status)));
+            let plain = format!("✕ {}", data.previous_status);
+            blocks.push(RightBlock {
+                colored: theme.paint(SemanticRole::Failure, &plain),
+                plain,
+            });
         }
-        if config.show_duration {
-            if let Some(duration) = data
-                .previous_duration
-                .filter(|duration| *duration >= self.slow_threshold)
-            {
-                segments.push((SemanticRole::Duration, format_duration(duration)));
+        let inputs = WidgetInputs {
+            now: data.now,
+            last_duration: data.previous_duration,
+            duration_threshold: self.slow_threshold,
+            jobs: data.jobs,
+            system: &data.system,
+        };
+        for (index, slot) in config.right.slots.iter().enumerate() {
+            match slot {
+                None => {}
+                Some(SlotConfig::Broken { .. }) => {
+                    let plain = format!("✕ slot{}", index + 1);
+                    blocks.push(RightBlock {
+                        colored: theme.paint(SemanticRole::Failure, &plain),
+                        plain,
+                    });
+                }
+                Some(SlotConfig::Ok(spec)) => {
+                    if let Some(rendered) = render_slot(&spec.template, &inputs, &config.right.thresholds) {
+                        blocks.push(paint_slot(spec, &rendered, theme));
+                    }
+                }
             }
         }
-        if config.time.enabled {
-            if let Some(time) = &data.current_time {
-                segments.push((SemanticRole::Time, time.clone()));
-            }
+        blocks
+    }
+}
+
+/// One piece of the right side of the first line, in plain and painted form.
+struct RightBlock {
+    plain: String,
+    colored: String,
+}
+
+fn right_width(blocks: &[RightBlock], config: &PromptConfig) -> usize {
+    if blocks.is_empty() {
+        return 0;
+    }
+    let glyph = config.right.glyph_width;
+    blocks
+        .iter()
+        .map(|block| display_width_with_glyphs(&block.plain, glyph))
+        .sum::<usize>()
+        + display_width_with_glyphs(&config.right.separator, glyph) * (blocks.len() - 1)
+}
+
+/// The theme role a widget uses when the slot sets no color.
+fn widget_role(kind: WidgetKind) -> SemanticRole {
+    match kind {
+        WidgetKind::Time | WidgetKind::Date => SemanticRole::Time,
+        WidgetKind::Duration => SemanticRole::Duration,
+        _ => SemanticRole::Secondary,
+    }
+}
+
+/// Paints a rendered slot. Precedence per piece: threshold level, then the
+/// slot's own color/style, then the widget's default theme role.
+fn paint_slot(spec: &SlotSpec, rendered: &RenderedSlot, theme: &Theme) -> RightBlock {
+    let slot_role = rendered
+        .pieces
+        .iter()
+        .find_map(|piece| piece.kind)
+        .map_or(SemanticRole::Secondary, widget_role);
+    let mut colored = String::new();
+    for piece in &rendered.pieces {
+        if piece.text.is_empty() {
+            continue;
         }
-        segments
+        colored.push_str(&match piece.level {
+            Level::Critical => theme.paint(SemanticRole::Failure, &piece.text),
+            Level::Warn => theme.paint(SemanticRole::Warning, &piece.text),
+            Level::Normal if spec.color.is_some() => {
+                theme.paint_spec(spec.color, spec.style, &piece.text)
+            }
+            Level::Normal => {
+                let role = piece.kind.map_or(slot_role, widget_role);
+                if spec.style == TextStyle::default() {
+                    theme.paint(role, &piece.text)
+                } else {
+                    theme.paint_role_styled(role, spec.style, &piece.text)
+                }
+            }
+        });
+    }
+    RightBlock {
+        plain: rendered.plain(),
+        colored,
     }
 }
 
@@ -196,10 +285,9 @@ fn minimum_first_line_width(
     data: &PromptData,
     config: &PromptConfig,
     git_mode: GitMode,
-    right: &[(SemanticRole, String)],
+    right_width: usize,
 ) -> usize {
     let context = join_plain(&context_segments(data, config, git_mode), " ");
-    let right = join_plain(right, separator);
     // Reserve at least one display column for cwd so the prompt never lets
     // metadata consume the entire input line.
     display_width(prefix)
@@ -209,10 +297,10 @@ fn minimum_first_line_width(
         } else {
             display_width(separator) + display_width(&context)
         }
-        + if right.is_empty() {
+        + if right_width == 0 {
             0
         } else {
-            display_width(separator) + display_width(&right)
+            display_width(separator) + right_width
         }
 }
 
@@ -337,15 +425,6 @@ fn strip_ansi_for_width(value: &str) -> String {
     out
 }
 
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs_f64();
-    if seconds.fract() < 0.05 {
-        format!("{}s", seconds.round() as u64)
-    } else {
-        format!("{seconds:.1}s")
-    }
-}
-
 pub struct SparshPrompt {
     left: String,
     right: String,
@@ -382,12 +461,38 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use sparsh_core::PromptConfig;
+    use sparsh_core::{
+        PromptConfig, RightPromptConfig, SlotConfig, SlotSpec, Template, TextStyle,
+    };
 
     use super::{GitState, PromptData, PromptState};
     use crate::project::ProjectKind;
-    use crate::theme::Theme;
+    use crate::sampler::SystemSnapshot;
+    use crate::theme::{SemanticRole, Theme};
     use crate::width::display_width;
+    use crate::widgets::LocalTime;
+
+    fn slot(template: &str) -> Option<SlotConfig> {
+        Some(SlotConfig::Ok(SlotSpec {
+            template: Template::parse(template).unwrap(),
+            color: None,
+            style: TextStyle::default(),
+        }))
+    }
+
+    fn config_with(slots: [Option<SlotConfig>; 3], separator: &str) -> PromptConfig {
+        let mut config = PromptConfig::default();
+        config.right = RightPromptConfig {
+            slots,
+            separator: separator.into(),
+            ..config.right
+        };
+        config
+    }
+
+    fn first_line(prompt: &super::SparshPrompt) -> &str {
+        prompt.left.lines().next().unwrap()
+    }
 
     fn data(width: usize) -> PromptData {
         PromptData {
@@ -409,7 +514,9 @@ mod tests {
             previous_status: 7,
             previous_duration: Some(Duration::from_secs(3)),
             terminal_width: width,
-            current_time: Some("05:31:46".into()),
+            now: Some(LocalTime::from_utc_parts(2026, 9, 20, 5, 31, 46)),
+            jobs: 0,
+            system: SystemSnapshot::default(),
         }
     }
 
@@ -463,5 +570,152 @@ mod tests {
         assert!(display_width(first) <= width, "{first:?} is too wide");
         assert!(!first.contains("+1"), "full git counters should be compacted: {first}");
         assert!(first.contains("~/") || first.contains("~"), "path shape disappeared: {first}");
+    }
+
+    #[test]
+    fn default_config_output_is_unchanged_from_the_legacy_layout() {
+        // Captured from the renderer before right-prompt slots existed.
+        let prompt = PromptState::new(Duration::from_secs(2)).prompt(
+            &data(160),
+            &PromptConfig::default(),
+            &Theme::plain(),
+        );
+        let first = first_line(&prompt);
+        assert!(
+            first.starts_with(
+                "╭─ ~/Projects/Rust/occ_lang/sparsh/crates/sparsh-core  \u{e7a8} \u{e0a0} main +1 ~2 ?3 !1 ↑4 ↓5"
+            ),
+            "{first:?}"
+        );
+        assert!(first.ends_with("✕ 7  3s  05:31:46"), "{first:?}");
+        assert_eq!(display_width(first), 160, "{first:?}");
+
+        let narrow = PromptState::new(Duration::from_secs(2)).prompt(
+            &data(28),
+            &PromptConfig::default(),
+            &Theme::plain(),
+        );
+        assert_eq!(first_line(&narrow), "╭─ ~/…/…/…/sparsh…  \u{e7a8} \u{e0a0} main");
+    }
+
+    #[test]
+    fn custom_slots_render_in_order_after_the_status() {
+        let mut d = data(160);
+        d.system.host = Some("arch.local".into());
+        let config = config_with(
+            [slot("{host}"), slot("mid"), slot("{date:%d %b}")],
+            " | ",
+        );
+        let prompt = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::plain());
+        let first = first_line(&prompt);
+        assert!(first.ends_with("✕ 7 | arch | mid | 20 Sep"), "{first:?}");
+    }
+
+    #[test]
+    fn hidden_slots_leave_no_separator_gaps_or_stray_glyphs() {
+        let config = config_with([slot("  {jobs}"), slot("mid"), None], " | ");
+        let mut d = data(160);
+        d.previous_status = 0;
+        let prompt = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::plain());
+        let first = first_line(&prompt);
+        assert!(first.ends_with("  mid"), "{first:?}");
+        assert!(!first.contains(" | "), "{first:?}");
+        assert!(!first.contains("\u{f303}"), "{first:?}");
+    }
+
+    #[test]
+    fn broken_slot_renders_a_red_marker_in_place_and_others_render() {
+        let config = config_with(
+            [
+                slot("one"),
+                Some(SlotConfig::Broken { message: "unknown widget 'cpuu'".into() }),
+                slot("three"),
+            ],
+            " ",
+        );
+        let mut d = data(160);
+        d.previous_status = 0;
+        let plain = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::plain());
+        assert!(first_line(&plain).ends_with("one ✕ slot2 three"), "{:?}", first_line(&plain));
+        assert!(!plain.left.contains('\u{1b}'), "plain theme must not emit escapes");
+
+        let colored = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::colored());
+        let marker = Theme::colored().paint(SemanticRole::Failure, "✕ slot2");
+        assert!(colored.left.contains(&marker), "{:?}", colored.left);
+    }
+
+    #[test]
+    fn width_pressure_sheds_slot3_then_slot2_then_slot1_then_status_and_never_overflows() {
+        let config = config_with([slot("AAAA"), slot("BBBB"), slot("CCCC")], "  ");
+        for width in [120usize, 60, 30, 12] {
+            let prompt = PromptState::new(Duration::from_secs(2)).prompt(&data(width), &config, &Theme::plain());
+            assert!(display_width(first_line(&prompt)) <= width, "width {width}: {:?}", first_line(&prompt));
+        }
+        // Shrink one column at a time: whatever survives is always a prefix of
+        // the full right block (status, slot1, slot2, slot3), never a suffix.
+        let full = "✕ 7  AAAA  BBBB  CCCC";
+        for width in 12..=120 {
+            let prompt = PromptState::new(Duration::from_secs(2)).prompt(&data(width), &config, &Theme::plain());
+            let first = first_line(&prompt);
+            let survivors: Vec<&str> = ["✕ 7", "AAAA", "BBBB", "CCCC"]
+                .into_iter()
+                .filter(|token| first.contains(token))
+                .collect();
+            let expected: Vec<&str> = ["✕ 7", "AAAA", "BBBB", "CCCC"].into_iter().take(survivors.len()).collect();
+            assert_eq!(survivors, expected, "width {width}: {first:?} (full block {full:?})");
+        }
+    }
+
+    #[test]
+    fn glyph_width_two_reserves_an_extra_cell_per_glyph() {
+        let mut one = config_with([slot("\u{f303}"), None, None], "  ");
+        one.right.glyph_width = 1;
+        let mut two = one.clone();
+        two.right.glyph_width = 2;
+        let mut d = data(160);
+        d.previous_status = 0;
+        let p1 = PromptState::new(Duration::from_secs(2)).prompt(&d, &one, &Theme::plain());
+        let p2 = PromptState::new(Duration::from_secs(2)).prompt(&d, &two, &Theme::plain());
+        // Same terminal width; a wide glyph needs one fewer padding space so the
+        // line still ends at the terminal edge.
+        let (a, b) = (first_line(&p1).to_string(), first_line(&p2).to_string());
+        let pad = |line: &str| line.matches(' ').count();
+        assert_eq!(pad(&a), pad(&b) + 1, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn slot_color_and_thresholds_take_precedence_over_role_colors() {
+        use sparsh_core::ColorSpec;
+        let config = config_with(
+            [
+                Some(SlotConfig::Ok(SlotSpec {
+                    template: Template::parse("{cpu}%").unwrap(),
+                    color: Some(ColorSpec::Indexed(6)),
+                    style: TextStyle::default(),
+                })),
+                None,
+                None,
+            ],
+            "  ",
+        );
+        let mut calm = data(160);
+        calm.previous_status = 0;
+        calm.system.cpu_busy = Some(10.0);
+        let mut hot = data(160);
+        hot.previous_status = 0;
+        hot.system.cpu_busy = Some(95.0);
+        let t = Theme::colored();
+        let calm_line = PromptState::new(Duration::from_secs(2)).prompt(&calm, &config, &t);
+        let hot_line = PromptState::new(Duration::from_secs(2)).prompt(&hot, &config, &t);
+        assert!(
+            calm_line.left.contains(&t.paint_spec(Some(ColorSpec::Indexed(6)), TextStyle::default(), "10")),
+            "{:?}",
+            calm_line.left
+        );
+        assert!(
+            hot_line.left.contains(&t.paint(SemanticRole::Failure, "95")),
+            "critical level overrides the slot color: {:?}",
+            hot_line.left
+        );
     }
 }

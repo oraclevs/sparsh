@@ -12,14 +12,15 @@ mod history;
 mod paste;
 mod project;
 mod prompt;
+mod sampler;
 mod theme;
-mod time;
 mod validator;
+mod widgets;
 mod width;
 
 pub use command_editor::edit_buffer_file;
 pub use completion::SparshCompleter;
-pub use diagnostic::{render_error, render_error_text};
+pub use diagnostic::{render_error, render_error_text, render_prompt_issues};
 pub use editor::run_interactive;
 pub use git::GitProbe;
 pub use highlight::SparshHighlighter;
@@ -28,8 +29,12 @@ pub use paste::{
 };
 pub use project::{active_python_environment, detect_projects, ProjectKind};
 pub use prompt::{GitState, PromptData, PromptState, SparshPrompt};
+pub use sampler::{
+    BatteryReading, BatteryState, DiskUsage, MemUsage, SystemSampler, SystemSnapshot,
+};
 pub use theme::{SemanticRole, Theme};
 pub use validator::SparshValidator;
+pub use widgets::{render_slot, Level, LocalTime, RenderedPiece, RenderedSlot, WidgetInputs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorPolicy {

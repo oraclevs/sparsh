@@ -32,6 +32,34 @@ export type SparshPromptTime {
     format?: str;
 };
 
+export type SparshPromptSlot {
+    text: str;
+    color?: str;
+    style?: List<str>;
+};
+
+export type SparshPromptThreshold {
+    warn?: int;
+    critical?: int;
+};
+
+export type SparshPromptThresholds {
+    cpu?: SparshPromptThreshold;
+    ram?: SparshPromptThreshold;
+    disk?: SparshPromptThreshold;
+    battery?: SparshPromptThreshold;
+    load?: SparshPromptThreshold;
+};
+
+export type SparshPromptRight {
+    slot1?: SparshPromptSlot;
+    slot2?: SparshPromptSlot;
+    slot3?: SparshPromptSlot;
+    separator?: str;
+    glyphWidth?: int;
+    thresholds?: SparshPromptThresholds;
+};
+
 export type SparshPrompt {
     showStatus?: bool;
     showDuration?: bool;
@@ -39,6 +67,7 @@ export type SparshPrompt {
     path?: SparshPromptPath;
     git?: SparshPromptGit;
     time?: SparshPromptTime;
+    right?: SparshPromptRight;
 };
 
 export type SparshHistory {

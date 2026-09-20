@@ -71,6 +71,9 @@ pub struct PromptConfig {
     pub path: PromptPathConfig,
     pub git: PromptGitConfig,
     pub time: PromptTimeConfig,
+    /// The right side of the first prompt line. Built from `prompt.right`, or
+    /// from the legacy `showDuration`/`time` keys when `right` is absent.
+    pub right: crate::prompt_config::RightPromptConfig,
 }
 
 impl Default for PromptConfig {
@@ -82,6 +85,7 @@ impl Default for PromptConfig {
             path: PromptPathConfig::default(),
             git: PromptGitConfig::default(),
             time: PromptTimeConfig::default(),
+            right: crate::prompt_config::RightPromptConfig::legacy_default(true, true, "%H:%M:%S"),
         }
     }
 }
@@ -140,6 +144,9 @@ pub struct SparshConfig {
     pub prompt: PromptConfig,
     pub history: HistoryConfig,
     pub completion: CompletionConfig,
+    /// Problems found in the `prompt` section. They never fail the load: bad
+    /// settings fall back to defaults and are reported to the user instead.
+    pub prompt_issues: Vec<crate::prompt_config::PromptIssue>,
 }
 
 impl Default for SparshConfig {
@@ -150,6 +157,7 @@ impl Default for SparshConfig {
             prompt: PromptConfig::default(),
             history: HistoryConfig::default(),
             completion: CompletionConfig::default(),
+            prompt_issues: Vec::new(),
         }
     }
 }
@@ -192,18 +200,6 @@ impl SparshConfig {
 
         if self.history.max_entries == 0 {
             return Err("history.maxEntries must be greater than zero".into());
-        }
-        if self.prompt.path.parent_length == 0 {
-            return Err("prompt.path.parentLength must be greater than zero".into());
-        }
-        if self.prompt.path.max_last_length == 0 || self.prompt.path.max_width < 8 {
-            return Err("prompt.path width limits are too small".into());
-        }
-        if self.prompt.duration_threshold_ms > 86_400_000 {
-            return Err("prompt.durationThresholdMs must be at most 86400000".into());
-        }
-        if !matches!(self.prompt.time.format.as_str(), "HH:mm" | "HH:mm:ss" | "hh:mm:ss a") {
-            return Err("prompt.time.format must be HH:mm, HH:mm:ss, or hh:mm:ss a".into());
         }
         Ok(())
     }
@@ -353,63 +349,12 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
     }
 
     if let Some(value) = root.get("prompt") {
-        let prompt = expect_section(value, "config.prompt")?;
-        ensure_allowed_fields(
-            prompt,
-            "config.prompt",
-            &["showStatus", "showDuration", "durationThresholdMs", "path", "git", "time"],
-        )?;
-        if let Some(value) = prompt.get("showStatus") {
-            config.prompt.show_status = expect_bool(value, "config.prompt.showStatus")?;
-        }
-        if let Some(value) = prompt.get("showDuration") {
-            config.prompt.show_duration = expect_bool(value, "config.prompt.showDuration")?;
-        }
-        if let Some(value) = prompt.get("durationThresholdMs") {
-            config.prompt.duration_threshold_ms = expect_u64(value, "config.prompt.durationThresholdMs")?;
-        }
-        if let Some(value) = prompt.get("path") {
-            let path = expect_section(value, "config.prompt.path")?;
-            ensure_allowed_fields(
-                path,
-                "config.prompt.path",
-                &["enabled", "parentLength", "maxLastLength", "maxWidth"],
-            )?;
-            if let Some(value) = path.get("enabled") { config.prompt.path.enabled = expect_bool(value, "config.prompt.path.enabled")?; }
-            if let Some(value) = path.get("parentLength") { config.prompt.path.parent_length = expect_usize(value, "config.prompt.path.parentLength")?; }
-            if let Some(value) = path.get("maxLastLength") { config.prompt.path.max_last_length = expect_usize(value, "config.prompt.path.maxLastLength")?; }
-            if let Some(value) = path.get("maxWidth") { config.prompt.path.max_width = expect_usize(value, "config.prompt.path.maxWidth")?; }
-        }
-        if let Some(value) = prompt.get("git") {
-            let git = expect_section(value, "config.prompt.git")?;
-            ensure_allowed_fields(
-                git,
-                "config.prompt.git",
-                &[
-                    "enabled",
-                    "showBranch",
-                    "showAheadBehind",
-                    "showStaged",
-                    "showModified",
-                    "showUntracked",
-                    "showConflicts",
-                ],
-            )?;
-            macro_rules! git_bool { ($field:literal, $target:ident) => { if let Some(value) = git.get($field) { config.prompt.git.$target = expect_bool(value, concat!("config.prompt.git.", $field))?; } }; }
-            git_bool!("enabled", enabled);
-            git_bool!("showBranch", show_branch);
-            git_bool!("showAheadBehind", show_ahead_behind);
-            git_bool!("showStaged", show_staged);
-            git_bool!("showModified", show_modified);
-            git_bool!("showUntracked", show_untracked);
-            git_bool!("showConflicts", show_conflicts);
-        }
-        if let Some(value) = prompt.get("time") {
-            let time = expect_section(value, "config.prompt.time")?;
-            ensure_allowed_fields(time, "config.prompt.time", &["enabled", "format"])?;
-            if let Some(value) = time.get("enabled") { config.prompt.time.enabled = expect_bool(value, "config.prompt.time.enabled")?; }
-            if let Some(value) = time.get("format") { config.prompt.time.format = expect_string(value, "config.prompt.time.format")?; }
-        }
+        // Prompt problems are soft: defaults are used for anything invalid and
+        // the issues are reported, so a prompt typo never discards the rest of
+        // the configuration.
+        let (prompt, issues) = crate::prompt_config::parse_prompt(value);
+        config.prompt = prompt;
+        config.prompt_issues = issues;
     }
 
     if let Some(value) = root.get("history") {
@@ -546,6 +491,59 @@ struct Config {{
 }};
 "#
         )
+    }
+
+    /// A config file in the current syntax: the shipped example types plus a
+    /// `struct Config: SparshConfig { ... }` body.
+    fn example_typed_config(body: &str) -> String {
+        format!(
+            "{}\nstruct Config: SparshConfig {{\n{body}\n}};\n",
+            include_str!("../../../examples/sparsh-types.spar")
+        )
+    }
+
+    #[test]
+    fn invalid_prompt_settings_do_not_discard_the_rest_of_the_config() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sparsh.spar");
+        fs::write(
+            &file,
+            example_typed_config(
+                r#"    aliases = [{ name: "gs"; command: ["git", "status"]; }];
+    prompt = {
+        path: { parentLength: 0; };
+        right: { slot2: { text: "{cpuu}"; }; };
+    };"#,
+            ),
+        )
+        .unwrap();
+        let config = load_candidate(&file).expect("prompt errors are soft");
+        assert_eq!(config.aliases.len(), 1, "aliases must survive a broken prompt");
+        assert_eq!(
+            config.prompt.path.parent_length,
+            PromptPathConfig::default().parent_length
+        );
+        assert!(matches!(
+            config.prompt.right.slots[1],
+            Some(crate::SlotConfig::Broken { .. })
+        ));
+        assert!(config.prompt_issues.iter().any(|i| i.slot == Some(2)));
+        assert!(config
+            .prompt_issues
+            .iter()
+            .any(|i| i.path == "config.prompt.path.parentLength"));
+    }
+
+    #[test]
+    fn non_prompt_config_errors_are_still_hard_errors() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sparsh.spar");
+        fs::write(
+            &file,
+            example_typed_config(r#"    history = { maxEntries: 0; };"#),
+        )
+        .unwrap();
+        assert!(load_candidate(&file).is_err());
     }
 
     #[test]

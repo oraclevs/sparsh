@@ -64,6 +64,30 @@ pub fn render_error_text(error: &ShellError, source: Option<&str>, theme: &Theme
     }
 }
 
+/// The banner shown above the prompt when the `prompt` section of the config
+/// had problems. Empty when there are none. The shell keeps working either
+/// way; this only tells the user what was ignored and why.
+pub fn render_prompt_issues(issues: &[sparsh_core::PromptIssue], theme: &Theme) -> String {
+    if issues.is_empty() {
+        return String::new();
+    }
+    let noun = if issues.len() == 1 { "problem" } else { "problems" };
+    let mut text = theme.paint(
+        SemanticRole::Failure,
+        &format!(
+            "sparsh: {} prompt config {noun} (the shell is unaffected)",
+            issues.len()
+        ),
+    );
+    text.push('\n');
+    for issue in issues {
+        let line = format!("  ✕ {}: {}", issue.path, issue.message);
+        text.push_str(&theme.paint(SemanticRole::Failure, &line));
+        text.push('\n');
+    }
+    text
+}
+
 pub fn render_error<W: Write>(
     error: &ShellError,
     source: Option<&str>,
@@ -79,7 +103,8 @@ mod tests {
 
     use crate::theme::Theme;
 
-    use super::render_error_text;
+    use super::{render_error_text, render_prompt_issues};
+    use sparsh_core::PromptIssue;
 
     #[test]
     fn plain_missing_command_diagnostic_locates_first_command() {
@@ -154,5 +179,30 @@ mod tests {
         let text = render_error_text(&error, Some("bad"), &Theme::plain());
 
         assert!(!text.contains("\x1b["));
+    }
+
+    #[test]
+    fn prompt_issue_banner_lists_every_issue_and_pluralises() {
+        let issues = vec![
+            PromptIssue {
+                path: "config.prompt.right.slot2.text".into(),
+                message: "unknown widget 'cpuu'; did you mean 'cpu'?".into(),
+                slot: Some(2),
+            },
+            PromptIssue {
+                path: "config.prompt.path.parentLength".into(),
+                message: "must be between 1 and 9223372036854775807, got 0 (using default)".into(),
+                slot: None,
+            },
+        ];
+        let text = render_prompt_issues(&issues, &Theme::plain());
+        assert_eq!(
+            text,
+            "sparsh: 2 prompt config problems (the shell is unaffected)\n  ✕ config.prompt.right.slot2.text: unknown widget 'cpuu'; did you mean 'cpu'?\n  ✕ config.prompt.path.parentLength: must be between 1 and 9223372036854775807, got 0 (using default)\n"
+        );
+        assert!(render_prompt_issues(&issues[..1], &Theme::plain())
+            .starts_with("sparsh: 1 prompt config problem (the"));
+        assert_eq!(render_prompt_issues(&[], &Theme::plain()), "");
+        assert!(render_prompt_issues(&issues, &Theme::colored()).contains("\x1b["));
     }
 }

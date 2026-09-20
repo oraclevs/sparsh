@@ -6,6 +6,25 @@ pub(crate) fn display_width(value: &str) -> usize {
     UnicodeWidthStr::width(value)
 }
 
+/// Like [`display_width`], but counts private-use-area characters (Nerd Font
+/// glyphs) as `glyph_width` cells, for fonts/terminals that draw them wide.
+pub(crate) fn display_width_with_glyphs(value: &str, glyph_width: usize) -> usize {
+    value
+        .chars()
+        .map(|ch| {
+            let code = ch as u32;
+            let private_use = (0xE000..=0xF8FF).contains(&code)
+                || (0xF0000..=0xFFFFD).contains(&code)
+                || (0x100000..=0x10FFFD).contains(&code);
+            if private_use {
+                glyph_width
+            } else {
+                UnicodeWidthChar::width(ch).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
 pub(crate) fn truncate_display(value: &str, max_width: usize) -> String {
     if display_width(value) <= max_width {
         return value.to_string();
@@ -138,6 +157,15 @@ fn render_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glyph_width_counts_private_use_characters() {
+        use super::display_width_with_glyphs;
+        assert_eq!(display_width_with_glyphs("a\u{f303}b", 1), 3);
+        assert_eq!(display_width_with_glyphs("a\u{f303}b", 2), 4);
+        assert_eq!(display_width_with_glyphs("a\u{f0079}b", 2), 4);
+        assert_eq!(display_width_with_glyphs("abc", 2), 3);
+    }
 
     #[test]
     fn keeps_path_shape_while_shortening_parents() {

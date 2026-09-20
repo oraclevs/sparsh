@@ -14,9 +14,10 @@ use sparsh_core::{CompletionSnapshot, EditorMode, ShellResult, ShellSession, She
 use crate::history::{SharedHistory, SparshHistory};
 use crate::{
     active_python_environment, detect_projects, is_multiline_paste_candidate, multiline_submissions,
-    render_command_diagnostic, render_error, render_result, review_multiline_paste, ColorPolicy,
-    GitProbe, PromptData, PromptState, SparshCompleter,
-    SparshHighlighter, SparshValidator, Theme,
+    render_command_diagnostic, render_error, render_prompt_issues, render_result,
+    review_multiline_paste, ColorPolicy,
+    GitProbe, LocalTime, PromptData, PromptState, SparshCompleter,
+    SparshHighlighter, SparshValidator, SystemSampler, Theme,
 };
 
 fn sparsh_emacs_keybindings() -> Keybindings {
@@ -172,6 +173,11 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
     )?;
     let mut active_config_generation = session.config_generation();
     let mut git = GitProbe::new();
+    // Lives across prompts: `cpu` needs the previous sample to compute a delta.
+    let mut sampler = SystemSampler::new();
+    // Prompt config problems are announced once per loaded config (startup and
+    // each `reload`); the red slot marker in the prompt is the persistent hint.
+    let mut reported_generation = None::<u64>;
     let mut previous_duration = None;
 
     // Initialize the interactive editor/terminal first, then invoke the single
@@ -192,6 +198,14 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 Arc::clone(&editor_mode),
             )?;
             active_config_generation = session.config_generation();
+        }
+
+        if reported_generation != Some(session.config_generation()) {
+            let banner = render_prompt_issues(session.prompt_issues(), &theme);
+            if !banner.is_empty() {
+                let _ = io::stderr().lock().write_all(banner.as_bytes());
+            }
+            reported_generation = Some(session.config_generation());
         }
 
         if let Err(error) = session.refresh_jobs() {
@@ -225,11 +239,9 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 previous_status: session.last_status(),
                 previous_duration,
                 terminal_width: terminal_width(),
-                current_time: prompt_config
-                    .time
-                    .enabled
-                    .then(|| crate::time::format_local_time(&prompt_config.time.format).ok())
-                    .flatten(),
+                now: LocalTime::now(),
+                jobs: session.jobs_snapshot().len(),
+                system: sampler.sample(&prompt_config.right.needed_widgets(), current.cwd()),
             },
             prompt_config,
             &theme,

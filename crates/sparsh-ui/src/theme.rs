@@ -1,4 +1,5 @@
 use nu_ansi_term::{Color, Style};
+use sparsh_core::{ColorSpec, TextStyle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticRole {
@@ -67,6 +68,32 @@ impl Theme {
         }
     }
 
+    /// Paints `text` with a user-configured color and text style. Nothing is
+    /// emitted when colors are disabled or when there is nothing to apply.
+    pub fn paint_spec(&self, color: Option<ColorSpec>, style: TextStyle, text: &str) -> String {
+        if !self.enabled || (color.is_none() && style == TextStyle::default()) {
+            return text.to_string();
+        }
+        let mut rendered = apply_text_style(Style::new(), style);
+        if let Some(color) = color {
+            rendered = rendered.fg(match color {
+                ColorSpec::Indexed(index) => Color::Fixed(index),
+                ColorSpec::Rgb(r, g, b) if truecolor_supported() => Color::Rgb(r, g, b),
+                ColorSpec::Rgb(r, g, b) => Color::Fixed(rgb_to_ansi256(r, g, b)),
+            });
+        }
+        rendered.paint(text).to_string()
+    }
+
+    /// A role's own color with extra text style flags on top (used when a slot
+    /// sets `style` but no `color`).
+    pub fn paint_role_styled(&self, role: SemanticRole, style: TextStyle, text: &str) -> String {
+        if !self.enabled {
+            return text.to_string();
+        }
+        apply_text_style(self.style(role), style).paint(text).to_string()
+    }
+
     pub(crate) fn style(&self, role: SemanticRole) -> Style {
         if !self.enabled {
             return Style::new();
@@ -110,9 +137,73 @@ impl Theme {
     }
 }
 
+fn apply_text_style(mut style: Style, spec: TextStyle) -> Style {
+    if spec.bold {
+        style = style.bold();
+    }
+    if spec.dim {
+        style = style.dimmed();
+    }
+    if spec.italic {
+        style = style.italic();
+    }
+    if spec.underline {
+        style = style.underline();
+    }
+    style
+}
+
+/// True when the terminal advertises 24-bit color.
+pub(crate) fn truecolor_supported() -> bool {
+    std::env::var("COLORTERM")
+        .map(|value| value.contains("truecolor") || value.contains("24bit"))
+        .unwrap_or(false)
+}
+
+/// The nearest xterm-256 color: the 6x6x6 cube, or the grayscale ramp for
+/// neutral colors.
+pub(crate) fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    if r == g && g == b {
+        return if r < 8 {
+            16
+        } else if r > 248 {
+            231
+        } else {
+            232 + ((u32::from(r) - 8 + 5) / 10).min(23) as u8
+        };
+    }
+    let level = |value: u8| (f64::from(value) / 51.0).round() as u8;
+    16 + 36 * level(r) + 6 * level(g) + level(b)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SemanticRole, Theme};
+    use sparsh_core::{ColorSpec, TextStyle};
+
+    use super::{rgb_to_ansi256, SemanticRole, Theme};
+
+    #[test]
+    fn paint_spec_applies_color_and_style_or_nothing_when_plain() {
+        let t = Theme::colored();
+        let bold = TextStyle { bold: true, ..Default::default() };
+        let bold_cyan = t.paint_spec(Some(ColorSpec::Indexed(6)), bold, "x");
+        assert!(bold_cyan.contains("\x1b[") && bold_cyan.contains('x'));
+        assert_ne!(
+            bold_cyan,
+            t.paint_spec(Some(ColorSpec::Indexed(6)), TextStyle::default(), "x")
+        );
+        assert_eq!(Theme::plain().paint_spec(Some(ColorSpec::Indexed(6)), bold, "x"), "x");
+        assert_eq!(t.paint_spec(None, TextStyle::default(), "x"), "x");
+        assert_ne!(t.paint_role_styled(SemanticRole::Duration, bold, "x"), t.paint(SemanticRole::Duration, "x"));
+        assert_eq!(Theme::plain().paint_role_styled(SemanticRole::Duration, bold, "x"), "x");
+    }
+
+    #[test]
+    fn rgb_downgrades_to_256_color_without_truecolor() {
+        assert_eq!(rgb_to_ansi256(255, 0, 0), 196);
+        assert_eq!(rgb_to_ansi256(0, 0, 0), 16);
+        assert_eq!(rgb_to_ansi256(128, 128, 128), 244);
+    }
 
     #[test]
     fn colored_theme_uses_distinct_semantic_roles() {

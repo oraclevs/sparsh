@@ -28,10 +28,20 @@ struct Config: SparshConfig {
     ];
     prompt = {
         showStatus: true;
-        showDuration: true;
         path: { enabled: true; };
         git: { enabled: true; showBranch: true; showAheadBehind: true; };
-        time: { enabled: true; format: "HH:mm:ss"; };
+        right: {
+            // status (✕ code) is always first and is not configurable.
+            slot1: { text: "{duration}"; color: "yellow"; };
+            // Nerd Font glyphs are pasted straight into the text.
+            slot2: { text: " {cpu}%   {ram}%"; color: "cyan"; };
+            slot3: { text: " {date:%a %d %b}   {time:%I:%M %p}"; };
+            separator: "  ";
+            thresholds: {
+                cpu: { warn: 70; critical: 90; };
+                battery: { warn: 30; critical: 15; };
+            };
+        };
     };
     history = { maxEntries: 10000; dedupeConsecutive: true; };
     completion = { enabled: true; };
