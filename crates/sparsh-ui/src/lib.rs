@@ -12,6 +12,7 @@ mod git;
 mod highlight;
 mod history;
 mod http_view;
+mod pager;
 mod paste;
 mod project;
 mod prompt;
@@ -29,6 +30,7 @@ pub use diagnostic::{render_error, render_error_text, render_prompt_issues};
 pub use editor::run_interactive;
 pub use git::GitProbe;
 pub use highlight::SparshHighlighter;
+pub use pager::run as page_lines;
 pub use paste::{
     is_multiline_paste_candidate, multiline_submissions, review_multiline_paste, PasteDecision,
 };

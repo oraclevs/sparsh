@@ -6,6 +6,7 @@ import type {
     SparshHistory,
     SparshCompletion,
     SparshKeybinding,
+    SparshPagerKeybinding,
     SparshConfig
 } from "./sparsh-types";
 
@@ -51,7 +52,14 @@ struct Config: SparshConfig {
         // Alt+Shift+Enter inserts a literal newline without submitting.
         // Bind `insertNewline` to another chord if your terminal cannot distinguish it.
         { key: "ctrl+r"; action: "historySearch"; },
-        { key: "alt+e"; action: "openEditor"; }
+        { key: "alt+e"; action: "openEditor"; },
+        // Opens the pager over the last table (same as typing `view`).
+        { key: "alt+v"; action: "pager"; }
+    ];
+    // Pager keys are added to the built-in set (j/k, space/b, g/G, /, q, ...).
+    pagerKeybindings: List<SparshPagerKeybinding> = [
+        { key: "ctrl+n"; action: "lineDown"; },
+        { key: "ctrl+p"; action: "lineUp"; }
     ];
 };
 

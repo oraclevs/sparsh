@@ -422,7 +422,25 @@ keybindings: List<SparshKeybinding> = [
 ];
 ```
 
-Supported modifiers are `ctrl`, `alt`, and `shift`. Supported actions are `completion`, `historyMenu`, `historySearch`, `openEditor`, `clearScreen`, `submit`, `cancel`, `eof`, `previousHistory`, `nextHistory`, `up`, `down`, `left`, `right`, `toStart`, and `toEnd`.
+Supported modifiers are `ctrl`, `alt`, and `shift`. Supported actions are `completion`, `historyMenu`, `historySearch`, `openEditor`, `clearScreen`, `submit`, `cancel`, `eof`, `previousHistory`, `nextHistory`, `up`, `down`, `left`, `right`, `toStart`, `toEnd`, and `pager`.
+
+### Structured `ls` and the pager
+
+In an interactive session a plain `ls [-a] [-l] [paths]` returns a table (`name`, `type`, `size`, `modified`; `-l` adds `mode`, `user`, `group`, `target`). Hidden files are always listed, directories come first, and `type` is one of `dir`, `file`, `exe`, `symlink`, `fifo`, `socket`, `block`, `char`. Anything more complex (pipes, globs, other flags) still runs the external `ls`, and `command ls` bypasses the table. The listing is an ordinary value, so `ls |> take(5)`, `ls |> to yaml` and `_ |> to json` work.
+
+Tables show 50 rows (`SPARSH_MAX_ROWS`) and encoded output 80 lines (`SPARSH_MAX_LINES`). The footer then says `type `view` to page through all of them`. `view`, or `alt+v` at the prompt, opens a full-screen pager over that result with no row, line or width limit. Table headers stay pinned and wide tables scroll sideways.
+
+Default pager keys: `j`/`down`/`enter` line down, `k`/`up` line up, `space`/`pagedown`/`ctrl+f` page down, `b`/`pageup`/`ctrl+b` page up, `d`/`ctrl+d` and `u`/`ctrl+u` half pages, `g`/`home` top, `G`/`end` bottom, `h`/`left` and `l`/`right` sideways, `/` search, `n`/`N` next/previous match, `q`/`esc`/`ctrl+c` quit. Add or replace keys with `pagerKeybindings`; a binding on an existing chord replaces the default:
+
+```spar
+pagerKeybindings: List<SparshPagerKeybinding> = [
+    { key: "ctrl+n"; action: "lineDown"; },
+    { key: "ctrl+p"; action: "lineUp"; },
+    { key: "space"; action: "halfPageDown"; }
+];
+```
+
+Pager actions: `lineDown`, `lineUp`, `pageDown`, `pageUp`, `halfPageDown`, `halfPageUp`, `top`, `bottom`, `left`, `right`, `search`, `searchNext`, `searchPrevious`, `quit`.
 
 
 Default history location:

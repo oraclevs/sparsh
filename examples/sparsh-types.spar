@@ -85,6 +85,11 @@ export type SparshKeybinding {
     action: str;
 };
 
+export type SparshPagerKeybinding {
+    key: str;
+    action: str;
+};
+
 export type SparshConfig {
     aliases?: List<SparshAlias>;
     environment?: List<SparshEnvironmentVariable>;
@@ -92,4 +97,5 @@ export type SparshConfig {
     history?: SparshHistory;
     completion?: SparshCompletion;
     keybindings?: List<SparshKeybinding>;
+    pagerKeybindings?: List<SparshPagerKeybinding>;
 };

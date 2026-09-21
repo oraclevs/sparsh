@@ -11,6 +11,7 @@ mod function_pipeline;
 mod history;
 mod job;
 mod keybinding;
+pub mod listing;
 mod path;
 mod prompt_config;
 mod resolver;
@@ -30,7 +31,9 @@ pub use config::{
 pub use history::{HistoryAccess, HistorySettings};
 pub use job::{JobId, JobState, ShellJob};
 pub use keybinding::{
-    KeyChord, KeybindingAction, KeybindingConfig, KeybindingKey, KEYBINDING_ACTION_NAMES,
+    default_pager_keybindings, merged_pager_keybindings, KeyChord, KeybindingAction,
+    KeybindingConfig, KeybindingKey, PagerAction, PagerKeybindingConfig, KEYBINDING_ACTION_NAMES,
+    PAGER_ACTION_NAMES,
 };
 pub use prompt_config::{
     legacy_time_format_to_strftime, parse_color, ColorSpec, NeededWidgets, PromptIssue,

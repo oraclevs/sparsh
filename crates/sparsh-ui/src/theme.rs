@@ -51,6 +51,14 @@ pub enum SemanticRole {
     TableHeader,
     TableIndex,
     TableBorder,
+    /// Directory names in a structured `ls` listing.
+    FileDirectory,
+    /// Executable files in a structured `ls` listing.
+    FileExecutable,
+    /// Symbolic links in a structured `ls` listing.
+    FileSymlink,
+    /// Sockets, pipes and devices in a structured `ls` listing.
+    FileSpecial,
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +166,10 @@ impl Theme {
             SemanticRole::DataPunct | SemanticRole::TableBorder => Style::new().fg(Color::DarkGray),
             SemanticRole::TableHeader => Style::new().fg(Color::LightGreen).bold(),
             SemanticRole::TableIndex => Style::new().fg(Color::Green).bold(),
+            SemanticRole::FileDirectory => Style::new().fg(Color::LightBlue).bold(),
+            SemanticRole::FileExecutable => Style::new().fg(Color::LightRed).bold(),
+            SemanticRole::FileSymlink => Style::new().fg(Color::LightCyan),
+            SemanticRole::FileSpecial => Style::new().fg(Color::Yellow),
         }
     }
 }

@@ -82,7 +82,7 @@ pub(crate) fn render_encoded(
         output.push_str(&theme.paint(
             SemanticRole::Secondary,
             &format!(
-                "… {} more lines ({} total), full value in `_`",
+                "… {} more lines ({} total), type `view` to page through all of them",
                 total - lines.len(),
                 total
             ),
@@ -558,7 +558,7 @@ mod tests {
         let output = render_encoded("json", &value, &Theme::plain(), &options);
 
         assert!(output.contains("more lines"), "{output}");
-        assert!(output.contains("full value in `_`"), "{output}");
+        assert!(output.contains("type `view` to page"), "{output}");
         assert!(output.lines().count() <= options.max_lines + 1, "{output}");
     }
 
@@ -580,7 +580,7 @@ mod tests {
             },
         );
         assert!(output.contains("more lines"), "{output}");
-        assert!(output.contains("full value in `_`"), "{output}");
+        assert!(output.contains("type `view` to page"), "{output}");
         assert!(output.lines().count() <= 21, "{output}");
     }
 }

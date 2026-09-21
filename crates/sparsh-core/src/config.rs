@@ -150,6 +150,7 @@ pub struct SparshConfig {
     pub history: HistoryConfig,
     pub completion: CompletionConfig,
     pub keybindings: Vec<crate::KeybindingConfig>,
+    pub pager_keybindings: Vec<crate::PagerKeybindingConfig>,
     /// Problems found in the `prompt` section. They never fail the load: bad
     /// settings fall back to defaults and are reported to the user instead.
     pub prompt_issues: Vec<crate::prompt_config::PromptIssue>,
@@ -195,6 +196,7 @@ impl SparshConfig {
             return Err("history.maxEntries must be greater than zero".into());
         }
         crate::keybinding::validate_keybindings(&self.keybindings)?;
+        crate::keybinding::validate_pager_keybindings(&self.pager_keybindings)?;
         Ok(())
     }
 }
@@ -293,6 +295,7 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
             "history",
             "completion",
             "keybindings",
+            "pagerKeybindings",
         ],
     )?;
     let mut config = SparshConfig::default();
@@ -406,6 +409,28 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         crate::keybinding::validate_keybindings(&config.keybindings)?;
+    }
+
+    if let Some(value) = root.get("pagerKeybindings") {
+        config.pager_keybindings = expect_list(value, "config.pagerKeybindings")?
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let path = format!("config.pagerKeybindings[{index}]");
+                let binding = expect_section(value, &path)?;
+                ensure_allowed_fields(binding, &path, &["key", "action"])?;
+                let key = expect_string(required(binding, "key", &path)?, &format!("{path}.key"))?;
+                let action = expect_string(
+                    required(binding, "action", &path)?,
+                    &format!("{path}.action"),
+                )?;
+                Ok(crate::PagerKeybindingConfig {
+                    chord: crate::KeyChord::parse(&key)?,
+                    action: crate::PagerAction::parse(&action)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        crate::keybinding::validate_pager_keybindings(&config.pager_keybindings)?;
     }
 
     Ok(config)
@@ -899,6 +924,57 @@ struct Config: SparshConfig {
         let environment = EnvironmentService::from_pairs([("HOME", "/home/test")]);
         assert_eq!(environment.get("HOME"), Some(OsStr::new("/home/test")));
     }
+    #[test]
+    fn pager_keybindings_load_and_reject_unknown_actions_and_duplicates() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sparsh.spar");
+
+        fs::write(
+            &path,
+            wrapped_config(
+                r#"    keybindings: List<SparshKeybinding> = [{ key: "alt+v"; action: "pager"; }];
+    pagerKeybindings: List<SparshKeybinding> = [
+        { key: "ctrl+n"; action: "lineDown"; },
+        { key: "j"; action: "pageDown"; }
+    ];"#,
+            ),
+        )
+        .unwrap();
+        let config = load_candidate(&path).unwrap();
+        assert_eq!(config.keybindings[0].action, crate::KeybindingAction::Pager);
+        assert_eq!(config.pager_keybindings.len(), 2);
+        assert_eq!(
+            config.pager_keybindings[1].action,
+            crate::PagerAction::PageDown
+        );
+
+        fs::write(
+            &path,
+            wrapped_config(
+                r#"    pagerKeybindings: List<SparshKeybinding> = [{ key: "x"; action: "explode"; }];"#,
+            ),
+        )
+        .unwrap();
+        let error = load_candidate(&path).unwrap_err().to_string();
+        assert!(error.contains("unknown pager action"), "{error}");
+
+        fs::write(
+            &path,
+            wrapped_config(
+                r#"    pagerKeybindings: List<SparshKeybinding> = [
+        { key: "x"; action: "quit"; },
+        { key: "x"; action: "top"; }
+    ];"#,
+            ),
+        )
+        .unwrap();
+        let error = load_candidate(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("duplicate pager keybinding chord"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn keybinding_config_rejects_unknown_actions_invalid_keys_and_duplicates() {
         let dir = tempdir().unwrap();

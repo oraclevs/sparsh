@@ -73,6 +73,8 @@ fn should_review_multiline_submission(
     mode == EditorMode::Normal && multiline_paste_seen && is_multiline_paste_candidate(source)
 }
 
+const VIEW_COMMAND: &str = "view";
+
 fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
     let mut keybindings = default_emacs_keybindings();
     keybindings.add_binding(
@@ -81,6 +83,7 @@ fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
         ReedlineEvent::OpenEditor,
     );
     keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, completion_event());
+    keybindings.add_binding(KeyModifiers::ALT, KeyCode::Char('v'), pager_event());
     keybindings.add_binding(
         KeyModifiers::ALT | KeyModifiers::SHIFT,
         KeyCode::Enter,
@@ -92,6 +95,11 @@ fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
         keybindings.add_binding(modifiers, key, reedline_action(binding.action));
     }
     keybindings
+}
+
+/// Submits `view`, which the run loop turns into the pager.
+fn pager_event() -> ReedlineEvent {
+    ReedlineEvent::ExecuteHostCommand(VIEW_COMMAND.to_string())
 }
 
 fn completion_event() -> ReedlineEvent {
@@ -155,6 +163,7 @@ fn reedline_action(action: KeybindingAction) -> ReedlineEvent {
         KeybindingAction::Right => ReedlineEvent::Right,
         KeybindingAction::ToStart => ReedlineEvent::ToStart,
         KeybindingAction::ToEnd => ReedlineEvent::ToEnd,
+        KeybindingAction::Pager => pager_event(),
     }
 }
 
@@ -252,6 +261,27 @@ fn run_interactive_startup(session: &mut ShellSession, theme: &Theme) -> io::Res
     Ok(None)
 }
 
+/// `view`: the last structured result, unbounded, in the pager.
+fn open_pager(
+    last: Option<&spar::InteractiveRuntimeValue>,
+    session: &ShellSession,
+    theme: &Theme,
+) -> io::Result<()> {
+    let Some(value) = last else {
+        return writeln!(
+            io::stderr().lock(),
+            "view: nothing to view yet; run a command that prints a table first"
+        );
+    };
+    let text = crate::structured::render_structured_value(
+        value,
+        theme,
+        &crate::data_view::RenderOptions::unbounded(),
+    );
+    let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+    crate::pager::run(&lines, &session.pager_keybindings())
+}
+
 pub(crate) fn terminal_width() -> usize {
     #[cfg(unix)]
     {
@@ -292,6 +322,8 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
     // each `reload`); the red slot marker in the prompt is the persistent hint.
     let mut reported_generation = None::<u64>;
     let mut previous_duration = None;
+    // The last structured result, so `view` can page through all of it.
+    let mut last_view: Option<spar::InteractiveRuntimeValue> = None;
 
     // Initialize the interactive editor/terminal first, then invoke the single
     // canonical Spar startup() hook before the first prompt. Terminal-aware
@@ -395,6 +427,10 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 let started = Instant::now();
                 let mut editor_mode_changed = false;
                 for submission in submissions {
+                    if mode == EditorMode::Normal && submission.trim() == VIEW_COMMAND {
+                        open_pager(last_view.as_ref(), session, &theme)?;
+                        continue;
+                    }
                     let result = if mode == EditorMode::Repl {
                         session.submit_spar(&submission)
                     } else {
@@ -421,6 +457,9 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                             }
                             let stdout = io::stdout();
                             render_result(&result, &theme, true, &mut stdout.lock())?;
+                            if let ShellResult::Structured(value) = &result {
+                                last_view = Some(value.clone());
+                            }
                             if let ShellResult::CommandStatus {
                                 diagnostic: Some(diagnostic),
                                 ..
@@ -449,7 +488,13 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                     continue;
                 }
             }
-            Signal::CtrlC | Signal::ExternalBreak(_) | Signal::HostCommand(_) => {
+            Signal::HostCommand(command) => {
+                // Key bindings such as `alt+v` arrive here, not as a submission.
+                if command == VIEW_COMMAND {
+                    open_pager(last_view.as_ref(), session, &theme)?;
+                }
+            }
+            Signal::CtrlC | Signal::ExternalBreak(_) => {
                 io::stderr().flush()?;
             }
             Signal::CtrlD => {

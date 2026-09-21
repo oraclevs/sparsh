@@ -60,6 +60,11 @@ export type KeybindingConfig {
     action: str;
 };
 
+export type PagerKeybindingConfig {
+    key: str;
+    action: str;
+};
+
 export type SparshConfig {
     aliases?: List<AliasConfig>;
     environment?: List<EnvironmentConfig>;
@@ -67,4 +72,5 @@ export type SparshConfig {
     history?: HistoryConfig;
     completion?: CompletionConfig;
     keybindings?: List<KeybindingConfig>;
+    pagerKeybindings?: List<PagerKeybindingConfig>;
 };

@@ -103,6 +103,14 @@ impl StartupMode {
     }
 }
 
+fn listing_error(message: String) -> ShellResult {
+    ShellResult::Builtin(crate::BuiltinOutput {
+        stdout: Vec::new(),
+        stderr: format!("{message}\n").into_bytes(),
+        status: 2,
+    })
+}
+
 #[derive(Debug)]
 pub enum ShellResult {
     Empty,
@@ -341,6 +349,23 @@ impl ShellSession {
             }
             let result = self.submit_spar(input);
             return self.finish_submission(result);
+        }
+        if self.mode == SessionMode::InteractiveTty {
+            if let Some(result) = self.value_pipeline_from_structured_source(input, &cwd) {
+                return self.finish_submission(result);
+            }
+            if let Some(request) = crate::listing::parse_request(input) {
+                let result = match crate::listing::list(&request, &cwd) {
+                    Ok(value) => ShellResult::Structured(spar::InteractiveRuntimeValue {
+                        value,
+                        stream_preview: false,
+                        truncated: false,
+                        presentation: spar::InteractivePresentation::Pipeline,
+                    }),
+                    Err(message) => listing_error(message),
+                };
+                return self.finish_submission(Ok(result));
+            }
         }
         if let Some(plan) = crate::function_pipeline::compose_function_pipeline(
             input,
@@ -735,6 +760,46 @@ impl ShellSession {
         })
     }
 
+    /// `ls |> stages` and `_ |> to FORMAT`: a structured source feeding a value
+    /// pipeline. `to FORMAT` encodes the value for display; anything else runs
+    /// as `_ |> stages` on the fresh listing.
+    fn value_pipeline_from_structured_source(
+        &mut self,
+        input: &str,
+        cwd: &std::path::Path,
+    ) -> Option<Result<ShellResult, ShellError>> {
+        let (value, stages) =
+            if let Some((request, stages)) = crate::listing::parse_value_pipeline(input) {
+                match crate::listing::list(&request, cwd) {
+                    Ok(value) => (value, stages),
+                    Err(message) => return Some(Ok(listing_error(message))),
+                }
+            } else {
+                let (source, stages) = input.split_once("|>")?;
+                if source.trim() != "_" {
+                    return None;
+                }
+                (self.last_interactive_value.clone()?, stages.trim())
+            };
+        if let Some(format) = crate::listing::encode_stage(stages) {
+            let registry = spar::StructuredFormatRegistry::builtin();
+            let Some(descriptor) = registry.descriptor(format) else {
+                return Some(Ok(listing_error(format!(
+                    "to: unknown format `{format}`; try json, yaml, toml, csv, tsv, jsonl, lines or text"
+                ))));
+            };
+            self.last_interactive_value = Some(value.clone());
+            return Some(Ok(ShellResult::Structured(spar::InteractiveRuntimeValue {
+                value,
+                stream_preview: false,
+                truncated: false,
+                presentation: spar::InteractivePresentation::Encoded(descriptor.name()),
+            })));
+        }
+        self.last_interactive_value = Some(value);
+        Some(self.submit_spar(&format!("_ |> {stages}")))
+    }
+
     pub fn take_config_notices(&mut self) -> Vec<String> {
         std::mem::take(&mut self.config_notices)
     }
@@ -826,6 +891,16 @@ impl ShellSession {
 
     pub fn keybindings(&self) -> &[crate::KeybindingConfig] {
         &self.config.keybindings
+    }
+
+    /// Pager keys: the built-in set with `pagerKeybindings` applied on top.
+    pub fn pager_keybindings(&self) -> Vec<crate::PagerKeybindingConfig> {
+        crate::merged_pager_keybindings(&self.config.pager_keybindings)
+    }
+
+    /// The last structured value, i.e. what `_` holds.
+    pub fn last_structured_value(&self) -> Option<&spar::Value> {
+        self.last_interactive_value.as_ref()
     }
 
     /// Problems found in the `prompt` section of the loaded config (empty when
@@ -2280,6 +2355,92 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             panic!("expected table");
         };
         assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn interactive_ls_returns_a_structured_listing_with_hidden_files_and_wins_over_an_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join(".env"), "A=1").unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit(&format!("cd {}", dir.path().display()))
+            .unwrap();
+
+        let ShellResult::Structured(preview) = session.submit("ls").unwrap() else {
+            panic!("expected structured listing");
+        };
+        assert_eq!(
+            preview.presentation,
+            spar::InteractivePresentation::Pipeline
+        );
+        let spar::Value::Table(table) = preview.value else {
+            panic!("expected table");
+        };
+        let names = table
+            .rows()
+            .iter()
+            .map(|row| match row {
+                spar::Value::Object(fields) => format!("{:?}", fields["name"]),
+                other => panic!("record expected: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "String(\"src\")",
+                "String(\".env\")",
+                "String(\"Cargo.toml\")"
+            ]
+        );
+    }
+
+    #[test]
+    fn ls_and_underscore_feed_value_pipelines_including_to_format() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "hello").unwrap();
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit(&format!("cd {}", dir.path().display()))
+            .unwrap();
+
+        let ShellResult::Structured(encoded) = session.submit("ls |> to yaml").unwrap() else {
+            panic!("expected encoded listing");
+        };
+        assert_eq!(
+            encoded.presentation,
+            spar::InteractivePresentation::Encoded("yaml")
+        );
+
+        let ShellResult::Structured(taken) = session.submit("ls |> take(1)").unwrap() else {
+            panic!("expected sliced listing");
+        };
+        let spar::Value::Table(table) = taken.value else {
+            panic!("table expected");
+        };
+        assert_eq!(table.len(), 1);
+
+        let ShellResult::Structured(again) = session.submit("_ |> to json").unwrap() else {
+            panic!("expected encoded value");
+        };
+        assert_eq!(
+            again.presentation,
+            spar::InteractivePresentation::Encoded("json")
+        );
+
+        let ShellResult::Builtin(error) = session.submit("ls |> to wat").unwrap() else {
+            panic!("expected an error message");
+        };
+        assert!(String::from_utf8_lossy(&error.stderr).contains("unknown format `wat`"));
+    }
+
+    #[test]
+    fn interactive_ls_with_pipes_or_unknown_flags_still_runs_the_external_command() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        let piped = session.submit("ls | cat").unwrap();
+        assert!(!matches!(piped, ShellResult::Structured(_)), "{piped:?}");
     }
 
     #[test]

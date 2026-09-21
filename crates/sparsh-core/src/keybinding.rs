@@ -18,6 +18,24 @@ pub const KEYBINDING_ACTION_NAMES: &[&str] = &[
     "right",
     "toStart",
     "toEnd",
+    "pager",
+];
+
+pub const PAGER_ACTION_NAMES: &[&str] = &[
+    "lineDown",
+    "lineUp",
+    "pageDown",
+    "pageUp",
+    "halfPageDown",
+    "halfPageUp",
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "search",
+    "searchNext",
+    "searchPrevious",
+    "quit",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -208,6 +226,8 @@ pub enum KeybindingAction {
     Right,
     ToStart,
     ToEnd,
+    /// Opens the pager over the last structured value (runs `view`).
+    Pager,
 }
 
 impl KeybindingAction {
@@ -230,6 +250,7 @@ impl KeybindingAction {
             "right" => Ok(Self::Right),
             "toStart" => Ok(Self::ToStart),
             "toEnd" => Ok(Self::ToEnd),
+            "pager" => Ok(Self::Pager),
             _ => Err(format!(
                 "unknown keybinding action `{name}`; supported actions: {}",
                 KEYBINDING_ACTION_NAMES.join(", ")
@@ -242,6 +263,119 @@ impl KeybindingAction {
 pub struct KeybindingConfig {
     pub chord: KeyChord,
     pub action: KeybindingAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagerAction {
+    LineDown,
+    LineUp,
+    PageDown,
+    PageUp,
+    HalfPageDown,
+    HalfPageUp,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Search,
+    SearchNext,
+    SearchPrevious,
+    Quit,
+}
+
+impl PagerAction {
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "lineDown" => Ok(Self::LineDown),
+            "lineUp" => Ok(Self::LineUp),
+            "pageDown" => Ok(Self::PageDown),
+            "pageUp" => Ok(Self::PageUp),
+            "halfPageDown" => Ok(Self::HalfPageDown),
+            "halfPageUp" => Ok(Self::HalfPageUp),
+            "top" => Ok(Self::Top),
+            "bottom" => Ok(Self::Bottom),
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "search" => Ok(Self::Search),
+            "searchNext" => Ok(Self::SearchNext),
+            "searchPrevious" => Ok(Self::SearchPrevious),
+            "quit" => Ok(Self::Quit),
+            _ => Err(format!(
+                "unknown pager action `{name}`; supported actions: {}",
+                PAGER_ACTION_NAMES.join(", ")
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagerKeybindingConfig {
+    pub chord: KeyChord,
+    pub action: PagerAction,
+}
+
+/// The pager's built-in keys (less/vim style). `pagerKeybindings` in the
+/// config adds to these and replaces any default on the same chord.
+pub fn default_pager_keybindings() -> Vec<PagerKeybindingConfig> {
+    const DEFAULTS: &[(&str, PagerAction)] = &[
+        ("j", PagerAction::LineDown),
+        ("down", PagerAction::LineDown),
+        ("enter", PagerAction::LineDown),
+        ("k", PagerAction::LineUp),
+        ("up", PagerAction::LineUp),
+        ("space", PagerAction::PageDown),
+        ("pagedown", PagerAction::PageDown),
+        ("ctrl+f", PagerAction::PageDown),
+        ("b", PagerAction::PageUp),
+        ("pageup", PagerAction::PageUp),
+        ("ctrl+b", PagerAction::PageUp),
+        ("d", PagerAction::HalfPageDown),
+        ("ctrl+d", PagerAction::HalfPageDown),
+        ("u", PagerAction::HalfPageUp),
+        ("ctrl+u", PagerAction::HalfPageUp),
+        ("g", PagerAction::Top),
+        ("home", PagerAction::Top),
+        ("G", PagerAction::Bottom),
+        ("end", PagerAction::Bottom),
+        ("h", PagerAction::Left),
+        ("left", PagerAction::Left),
+        ("l", PagerAction::Right),
+        ("right", PagerAction::Right),
+        ("/", PagerAction::Search),
+        ("n", PagerAction::SearchNext),
+        ("N", PagerAction::SearchPrevious),
+        ("q", PagerAction::Quit),
+        ("esc", PagerAction::Quit),
+        ("ctrl+c", PagerAction::Quit),
+    ];
+    DEFAULTS
+        .iter()
+        .map(|(key, action)| PagerKeybindingConfig {
+            chord: KeyChord::parse(key).expect("built-in pager chord"),
+            action: *action,
+        })
+        .collect()
+}
+
+/// Defaults with user bindings applied on top.
+pub fn merged_pager_keybindings(user: &[PagerKeybindingConfig]) -> Vec<PagerKeybindingConfig> {
+    let mut merged = default_pager_keybindings();
+    merged.retain(|binding| user.iter().all(|custom| custom.chord != binding.chord));
+    merged.extend(user.iter().cloned());
+    merged
+}
+
+pub(crate) fn validate_pager_keybindings(bindings: &[PagerKeybindingConfig]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for binding in bindings {
+        if !seen.insert(binding.chord) {
+            return Err(format!(
+                "duplicate pager keybinding chord in config: `{}`",
+                binding.chord
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_keybindings(bindings: &[KeybindingConfig]) -> Result<(), String> {
@@ -316,6 +450,26 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("`ctrl+l`"), "{error}");
+    }
+
+    #[test]
+    fn user_pager_bindings_replace_defaults_on_the_same_chord() {
+        let custom = PagerKeybindingConfig {
+            chord: KeyChord::parse("j").unwrap(),
+            action: PagerAction::PageDown,
+        };
+        let merged = merged_pager_keybindings(std::slice::from_ref(&custom));
+        let for_j = merged
+            .iter()
+            .filter(|binding| binding.chord == custom.chord)
+            .collect::<Vec<_>>();
+        assert_eq!(for_j, [&custom]);
+        assert!(merged
+            .iter()
+            .any(|binding| binding.action == PagerAction::Quit));
+        assert!(PagerAction::parse("scrollSideways")
+            .unwrap_err()
+            .contains("lineDown"));
     }
 
     #[test]

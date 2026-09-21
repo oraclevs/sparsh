@@ -41,6 +41,15 @@ impl RenderOptions {
         }
     }
 
+    /// No row, line or width limits: what the pager scrolls through.
+    pub(crate) fn unbounded() -> Self {
+        Self {
+            width: 1_000_000,
+            max_rows: usize::MAX,
+            max_lines: usize::MAX,
+        }
+    }
+
     /// The current terminal width, with `SPARSH_MAX_ROWS` / `SPARSH_MAX_LINES`
     /// overriding the preview limits.
     pub(crate) fn for_terminal() -> Self {
@@ -491,7 +500,7 @@ fn finish(
         lines.push(dim(
             theme,
             &format!(
-                "… {} hidden: widen the terminal or pick columns with select([...])",
+                "… {} hidden: widen the terminal, type `view` to scroll sideways, or pick columns with select([...])",
                 plural(hidden_columns, "column", "columns")
             ),
         ));
@@ -500,7 +509,7 @@ fn finish(
         lines.push(dim(
             theme,
             &format!(
-                "… {} more {} ({} total), full value in `_`",
+                "… {} more {} ({} total), type `view` to page through all of them",
                 count - shown,
                 if count - shown == 1 { unit.0 } else { unit.1 },
                 count
@@ -544,6 +553,7 @@ fn records_view(
     options: &RenderOptions,
 ) -> String {
     let shown = rows.len().min(options.max_rows);
+    let listing = is_listing(names, rows);
     let mut columns = vec![index_column(shown, 0)];
     for name in names {
         columns.push(Column {
@@ -551,6 +561,8 @@ fn records_view(
             cells: rows[..shown]
                 .iter()
                 .map(|row| match row {
+                    Value::Object(fields) if listing => listing_cell(name, fields)
+                        .unwrap_or_else(|| fields.get(name).map_or_else(Cell::empty, Cell::of)),
                     Value::Object(fields) => fields.get(name).map_or_else(Cell::empty, Cell::of),
                     other if names.first() == Some(name) => Cell::of(other),
                     _ => Cell::empty(),
@@ -568,6 +580,81 @@ fn records_view(
         ("row", "rows"),
         hidden,
     )
+}
+
+// ── Directory listings ───────────────────────────────────────────────────────
+
+const LISTING_KINDS: [&str; 8] = [
+    "dir", "file", "exe", "symlink", "fifo", "socket", "block", "char",
+];
+
+/// A table shaped like the output of the native `ls`: `name`, `type` and
+/// `size` columns whose `type` values are file kinds.
+fn is_listing(names: &[String], rows: &[Value]) -> bool {
+    ["name", "type", "size"]
+        .iter()
+        .all(|required| names.iter().any(|name| name == required))
+        && !rows.is_empty()
+        && rows.iter().all(|row| {
+            matches!(
+                row,
+                Value::Object(fields)
+                    if matches!(fields.get("type"), Some(Value::String(kind)) if LISTING_KINDS.contains(&kind.as_str()))
+            )
+        })
+}
+
+fn kind_role(kind: &str) -> Role {
+    match kind {
+        "dir" => Some(SemanticRole::FileDirectory),
+        "exe" => Some(SemanticRole::FileExecutable),
+        "symlink" => Some(SemanticRole::FileSymlink),
+        "fifo" | "socket" | "block" | "char" => Some(SemanticRole::FileSpecial),
+        _ => None,
+    }
+}
+
+/// Decimal units, like `ls -l --si`: 4096 bytes is "4.1 KB".
+fn human_size(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = "B";
+    for next in UNITS {
+        if value < 1000.0 {
+            break;
+        }
+        value /= 1000.0;
+        unit = next;
+    }
+    format!("{value:.1} {unit}")
+}
+
+/// Type-aware cell for a directory-listing column, or `None` to render the
+/// stored value as-is.
+fn listing_cell(column: &str, fields: &indexmap::IndexMap<String, Value>) -> Option<Cell> {
+    let kind = match fields.get("type") {
+        Some(Value::String(kind)) => kind.as_str(),
+        _ => return None,
+    };
+    match (column, fields.get(column)?) {
+        ("name", Value::String(name)) => Some(Cell::text(kind_role(kind), name.clone())),
+        ("type", Value::String(kind)) => Some(Cell::text(None, kind.clone())),
+        ("size", Value::Int(bytes)) => Some(Cell::text(
+            Some(SemanticRole::DataNumber),
+            human_size(*bytes),
+        )),
+        ("modified", Value::String(stamp)) => {
+            let then = sparsh_core::listing::parse_iso8601(stamp)?;
+            Some(Cell::text(
+                Some(SemanticRole::DataString),
+                sparsh_core::listing::relative_age(then, sparsh_core::listing::now_seconds()),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn list_view(items: &[Value], theme: &Theme, options: &RenderOptions) -> String {
@@ -706,6 +793,109 @@ mod tests {
         .unwrap()
     }
 
+    fn listing_table() -> TableValue {
+        let row = |name: &str, kind: &str, size: i64, modified: &str| {
+            Value::Object(IndexMap::from([
+                ("name".into(), Value::String(name.into())),
+                ("type".into(), Value::String(kind.into())),
+                ("size".into(), Value::Int(size)),
+                ("modified".into(), Value::String(modified.into())),
+            ]))
+        };
+        let mut table = TableValue::from_records(vec![
+            row("assets", "dir", 4096, "2020-01-01T00:00:00Z"),
+            row("tauon.py", "exe", 9600, "2020-01-01T00:00:00Z"),
+            row("LICENSE", "file", 35_100, "2020-01-01T00:00:00Z"),
+            row("link", "symlink", 5, "2020-01-01T00:00:00Z"),
+        ])
+        .unwrap();
+        let mut schema = table.schema().clone();
+        schema.fields.sort_by_key(|field| {
+            ["name", "type", "size", "modified"]
+                .iter()
+                .position(|name| *name == field.name)
+        });
+        table = TableValue::with_schema(table.rows().to_vec(), schema);
+        table
+    }
+
+    #[test]
+    fn unbounded_rendering_keeps_every_row_and_column_for_the_pager() {
+        let rows = (0..300)
+            .map(|n| {
+                Value::Object(IndexMap::from([
+                    ("id".into(), Value::Int(n)),
+                    ("wide".into(), Value::String("x".repeat(200))),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let table = TableValue::from_records(rows).unwrap();
+        let output = render_table(&table, &Theme::plain(), &RenderOptions::unbounded());
+        assert!(!output.contains("more rows"), "{output}");
+        assert!(!output.contains("hidden"), "{output}");
+        assert!(output.contains("│ 299 │"), "last row present");
+        assert!(output.lines().nth(3).unwrap().contains(&"x".repeat(200)));
+        assert!(output.trim_end().ends_with("300 rows"));
+    }
+
+    #[test]
+    fn truncated_tables_point_at_the_pager_not_at_underscore() {
+        let rows = (0..60)
+            .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))])))
+            .collect::<Vec<_>>();
+        let table = TableValue::from_records(rows).unwrap();
+        let output = render_table(&table, &Theme::plain(), &RenderOptions::new(80));
+        assert!(
+            output.contains("10 more rows (60 total), type `view` to page through all of them"),
+            "{output}"
+        );
+        assert!(!output.contains("full value in"), "{output}");
+    }
+
+    #[test]
+    fn human_sizes_use_decimal_units() {
+        assert_eq!(super::human_size(311), "311 B");
+        assert_eq!(super::human_size(4096), "4.1 KB");
+        assert_eq!(super::human_size(115_800), "115.8 KB");
+        assert_eq!(super::human_size(2_500_000_000), "2.5 GB");
+    }
+
+    #[test]
+    fn listing_tables_show_human_sizes_and_relative_dates() {
+        let output = render_table(&listing_table(), &Theme::plain(), &RenderOptions::new(100));
+        let header = output.lines().nth(1).unwrap();
+        let positions = ["name", "type", "size", "modified"].map(|name| header.find(name).unwrap());
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{header}"
+        );
+        assert!(output.contains("4.1 KB"), "{output}");
+        assert!(output.contains("35.1 KB"), "{output}");
+        assert!(output.contains(" years ago"), "{output}");
+        assert!(!output.contains("2020-01-01"), "{output}");
+    }
+
+    #[test]
+    fn listing_names_are_colored_by_kind() {
+        let theme = Theme::colored();
+        let output = render_table(&listing_table(), &theme, &RenderOptions::new(100));
+        for (name, role) in [
+            ("assets", Some(SemanticRole::FileDirectory)),
+            ("tauon.py", Some(SemanticRole::FileExecutable)),
+            ("link", Some(SemanticRole::FileSymlink)),
+            ("LICENSE", None),
+        ] {
+            let painted = role.map_or_else(|| name.to_string(), |role| theme.paint(role, name));
+            assert!(output.contains(&painted), "{name}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn tables_with_a_name_column_but_no_file_kinds_are_left_alone() {
+        let output = render_table(&sample_table(), &Theme::plain(), &RenderOptions::new(100));
+        assert!(output.contains("24"), "{output}");
+    }
+
     fn is_grid_line(line: &str) -> bool {
         matches!(line.chars().next(), Some('╭' | '│' | '├' | '╰'))
     }
@@ -833,7 +1023,7 @@ mod tests {
             },
         );
         assert!(
-            output.contains("… 175 more rows (225 total), full value in `_`"),
+            output.contains("… 175 more rows (225 total), type `view` to page through all of them"),
             "{output}"
         );
         assert!(!output.contains("│ 50 "), "{output}");
