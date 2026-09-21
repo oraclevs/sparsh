@@ -232,7 +232,7 @@ pub(crate) fn config_path(environment: &EnvironmentService) -> Option<PathBuf> {
     environment
         .get("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join(".sparsh/sparsh.spar"))
+        .map(|home| crate::config_home::entry_for_home(&home))
 }
 
 pub(crate) fn read_source(path: &Path) -> Result<String, ConfigLoadError> {
@@ -249,7 +249,7 @@ pub(crate) fn read_source(path: &Path) -> Result<String, ConfigLoadError> {
 /// Evaluates the single Sparsh rc file into `session`. The file is ordinary
 /// Spar source: it may declare variables/functions/imports and may optionally
 /// declare a typed `struct Config { ... };` for declarative shell UI/environment
-/// settings. Public config types can live in `~/.sparsh/sparsh-types.spar`; Sparsh
+/// settings. Public config types can live in `~/.sparsh/src/sparsh-types.spar`; Sparsh
 /// validates the resulting section independently. Absence of `Config` means defaults.
 pub(crate) fn evaluate_source_in_session(
     session: &mut spar::Session,
@@ -569,14 +569,14 @@ struct Config {{
     }
 
     #[test]
-    fn config_path_is_exactly_home_dot_sparsh_sparsh_spar() {
+    fn config_path_is_home_dot_sparsh_src_config_spar_by_default() {
         let environment = EnvironmentService::from_pairs([
             ("XDG_CONFIG_HOME", "/tmp/xdg"),
             ("HOME", "/home/test"),
         ]);
         assert_eq!(
             config_path(&environment),
-            Some(PathBuf::from("/home/test/.sparsh/sparsh.spar"))
+            Some(PathBuf::from("/home/test/.sparsh/src/config.spar"))
         );
 
         let empty = EnvironmentService::from_pairs(std::iter::empty::<(&str, &str)>());

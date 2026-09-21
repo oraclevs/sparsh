@@ -110,6 +110,13 @@ pub(crate) fn locator_for(
 }
 
 pub(crate) fn prepare(home: &Path, store: &PackageStore) -> Result<Prepared, PrepareError> {
+    // Tests must never migrate or seed the developer's real home directory.
+    #[cfg(test)]
+    assert!(
+        std::env::var_os("HOME").as_deref() != Some(home.as_os_str()),
+        "test attempted to prepare the real HOME ({}); set HOME to a temp dir first",
+        home.display()
+    );
     let root = root_for_home(home);
     if root.join(PACKAGE_MANIFEST_FILE).is_file() {
         return Ok(Prepared::AlreadyPackage);
@@ -188,8 +195,7 @@ fn seed(root: &Path, store: &PackageStore) -> Result<(), PrepareError> {
     let entry = root.join("src/config.spar");
     std::fs::create_dir_all(root.join("src")).map_err(|error| step_error("create src/", error))?;
     if !entry.exists() {
-        std::fs::write(&entry, TEMPLATE)
-            .map_err(|error| step_error("write config.spar", error))?;
+        std::fs::write(&entry, TEMPLATE).map_err(|error| step_error("write config.spar", error))?;
     }
     write_manifest_and_lock(root, store)
 }

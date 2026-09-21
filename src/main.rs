@@ -52,7 +52,11 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<CliMode, St
 }
 
 fn load_config_or_report(session: &mut ShellSession, err: &mut impl Write) {
-    if let Err(error) = session.reload_config() {
+    let result = session.reload_config();
+    for notice in session.take_config_notices() {
+        let _ = writeln!(err, "sparsh: {notice}");
+    }
+    if let Err(error) = result {
         let _ = render_error(&error, None, &Theme::plain(), err);
     }
 }

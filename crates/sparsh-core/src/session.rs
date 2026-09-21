@@ -221,6 +221,7 @@ pub struct ShellSession {
     config_generation: u64,
     interactive_source: String,
     last_interactive_value: Option<spar::Value>,
+    config_notices: Vec<String>,
 }
 
 impl ShellSession {
@@ -241,6 +242,7 @@ impl ShellSession {
             config_generation: 0,
             interactive_source: String::new(),
             last_interactive_value: None,
+            config_notices: Vec::new(),
         })
     }
 
@@ -723,7 +725,23 @@ impl ShellSession {
         })
     }
 
+    pub fn take_config_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.config_notices)
+    }
+
     pub fn reload_config(&mut self) -> Result<(), ShellError> {
+        self.config_notices.clear();
+        let store = crate::config_home::store_for(&self.services.environment);
+        let mut package_root: Option<PathBuf> = None;
+        if let Some(home) = self.services.environment.get("HOME").map(PathBuf::from) {
+            match crate::config_home::prepare(&home, &store) {
+                Ok(crate::config_home::Prepared::LegacyKept { notice }) => {
+                    self.config_notices.push(notice);
+                }
+                Ok(_) => package_root = Some(crate::config_home::root_for_home(&home)),
+                Err(error) => self.config_notices.push(error.to_string()),
+            }
+        }
         let (source, base_dir) = match crate::config::config_path(&self.services.environment) {
             Some(path) => {
                 let source = crate::config::read_source(&path).map_err(ShellError::Config)?;
@@ -738,7 +756,19 @@ impl ShellSession {
                 self.services.directories.current().to_path_buf(),
             ),
         };
-        let mut candidate = spar::Engine::default().with_base_dir(base_dir).session();
+        let mut engine = spar::Engine::default()
+            .with_base_dir(base_dir)
+            .with_package_command("pkg");
+        if let Some(root) = &package_root {
+            match crate::config_home::locator_for(root, &store) {
+                Ok(Some(locator)) => engine = engine.with_locator(locator),
+                Ok(None) => {}
+                Err(message) => {
+                    return Err(ShellError::Config(crate::ConfigLoadError::Invalid(message)))
+                }
+            }
+        }
+        let mut candidate = engine.session();
         let config = crate::config::evaluate_source_in_session(&mut candidate, &source)
             .map_err(ShellError::Config)?;
         if !self.interactive_source.trim().is_empty() {
@@ -2351,6 +2381,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
 
         // Loading the config replaces the Spar session; that must not turn
         // structured rendering off (this broke the real prompt).
+        session.submit("unset HOME").unwrap();
         session.reload_config().unwrap();
         let after_reload = session
             .submit("printf 'name,age\\nObi,24\\n' | from csv")
@@ -2369,6 +2400,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         let first = session.submit(source).unwrap();
         assert!(matches!(first, ShellResult::Structured(_)), "{first:?}");
 
+        session.submit("unset HOME").unwrap();
         session.reload_config().unwrap();
         let second = session.submit(source).unwrap();
         assert!(matches!(second, ShellResult::Structured(_)), "{second:?}");
@@ -2534,5 +2566,194 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             session.submit("repl").unwrap(),
             ShellResult::EditorMode(super::EditorMode::Repl)
         ));
+    }
+
+    fn write_tools_package(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("spar.package.spar"),
+            "struct Package: SparPackage {\n    name = \"my-tools\";\n    version = \"1.0.0\";\n    kind = \"library\";\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/lib.spar"),
+            "function dismantler() -> int { return 42; };\n",
+        )
+        .unwrap();
+    }
+
+    fn session_with_home(home: &std::path::Path) -> ShellSession {
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("export HOME={}", home.display()))
+            .unwrap();
+        session
+            .submit("unset XDG_DATA_HOME XDG_CACHE_HOME")
+            .unwrap();
+        session
+    }
+
+    /// A HOME with a seeded config package that depends on `my-tools` (a `path:` dependency).
+    fn home_with_tools_dependency(config_source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        write_tools_package(tools.path());
+        let store = crate::config_home::store_for_paths_for_tests(home.path());
+        crate::config_home::prepare(home.path(), &store).unwrap();
+        let root = home.path().join(".sparsh");
+        spar::package::commands::add(
+            &root,
+            "my-tools",
+            &format!("path:{}", tools.path().display()),
+            &spar::package::GitCommandProvider::default(),
+            spar::package::NetworkPolicy::Offline,
+            &store,
+        )
+        .unwrap();
+        std::fs::write(root.join("src/config.spar"), config_source).unwrap();
+        (home, tools)
+    }
+
+    #[test]
+    fn startup_migrates_a_flat_config_and_keeps_it_working() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".sparsh")).unwrap();
+        std::fs::write(
+            home.path().join(".sparsh/sparsh.spar"),
+            format!(
+                "{}\nstruct Config: SparshConfig {{\n    keybindings = [{{ key: \"ctrl+l\"; action: \"clearScreen\"; }}];\n}};\n",
+                include_str!("../../../examples/sparsh-types.spar")
+            ),
+        )
+        .unwrap();
+        let mut session = session_with_home(home.path());
+
+        session.reload_config().unwrap();
+
+        assert_eq!(session.keybindings().len(), 1);
+        assert!(home.path().join(".sparsh/spar.package.spar").is_file());
+        assert!(home.path().join(".sparsh/src/config.spar").is_file());
+        assert!(home.path().join(".sparsh.bak/sparsh.spar").is_file());
+    }
+
+    #[test]
+    fn config_can_import_a_path_dependency() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let (home, _tools) = home_with_tools_dependency(
+            "import pkg { dismantler } from \"my-tools\";\nvar answer: int = dismantler();\n",
+        );
+        let mut session = session_with_home(home.path());
+
+        session.reload_config().unwrap();
+
+        let result = session.submit_spar("answer").unwrap();
+        assert!(
+            matches!(result, ShellResult::Value(spar::ConfigValue::Int(42))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_can_import_a_dependency_and_call_it() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let (home, _tools) = home_with_tools_dependency("// empty\n");
+        let mut session = session_with_home(home.path());
+        session.reload_config().unwrap();
+
+        session
+            .submit_spar("import pkg { dismantler } from \"my-tools\";")
+            .unwrap();
+        let result = session.submit_spar("dismantler()").unwrap();
+
+        assert!(
+            matches!(result, ShellResult::Value(spar::ConfigValue::Int(42))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn script_can_import_a_dependency() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let (home, _tools) = home_with_tools_dependency("// empty\n");
+        let mut session = session_with_home(home.path());
+        session.reload_config().unwrap();
+
+        let result = session
+            .submit_script(
+                "import pkg { dismantler } from \"my-tools\";\nvar n: int = dismantler();\n",
+            )
+            .unwrap();
+
+        assert!(
+            !matches!(result, ShellResult::CommandStatus { status, .. } if status != 0),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_dependency_alias_points_at_pkg_add() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let (home, _tools) = home_with_tools_dependency("// empty\n");
+        let mut session = session_with_home(home.path());
+        session.reload_config().unwrap();
+
+        let error = session
+            .submit_spar("import pkg { x } from \"nope\";")
+            .expect_err("unknown alias must fail");
+
+        let text = format!("{error:?}");
+        assert!(text.contains("pkg add nope"), "{text}");
+    }
+
+    #[test]
+    fn existing_backup_keeps_the_flat_config_and_reports_a_notice() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".sparsh")).unwrap();
+        std::fs::create_dir(home.path().join(".sparsh.bak")).unwrap();
+        std::fs::write(
+            home.path().join(".sparsh/sparsh.spar"),
+            "var flat: int = 5;\n",
+        )
+        .unwrap();
+        let mut session = session_with_home(home.path());
+
+        session.reload_config().unwrap();
+
+        assert_eq!(
+            session.take_config_notices(),
+            vec!["~/.sparsh.bak exists; move it and restart to migrate".to_string()]
+        );
+        let result = session.submit_spar("flat").unwrap();
+        assert!(
+            matches!(result, ShellResult::Value(spar::ConfigValue::Int(5))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_lockfile_fails_reload_with_a_pkg_install_hint() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let (home, _tools) = home_with_tools_dependency("// empty\n");
+        std::fs::write(
+            home.path().join(".sparsh/spar.package.lock.spar"),
+            "not a lock {{{",
+        )
+        .unwrap();
+        let mut session = session_with_home(home.path());
+
+        let error = session
+            .reload_config()
+            .expect_err("bad lock must fail the reload");
+
+        assert!(error.to_string().contains("pkg install"), "{error}");
     }
 }

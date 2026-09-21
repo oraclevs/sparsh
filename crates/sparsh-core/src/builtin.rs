@@ -394,7 +394,7 @@ impl BuiltinRegistry {
                 ),
                 builtin!(
                     "reload",
-                    "Reload ~/.sparsh/sparsh.spar transactionally",
+                    "Reload ~/.sparsh/src/config.spar transactionally",
                     "reload",
                     "session",
                     true,
