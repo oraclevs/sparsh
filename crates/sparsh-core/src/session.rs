@@ -107,6 +107,7 @@ impl StartupMode {
 pub enum ShellResult {
     Empty,
     Value(spar::ConfigValue),
+    Structured(spar::InteractiveRuntimeValue),
     EditorMode(EditorMode),
     ReloadConfig,
     #[doc(hidden)]
@@ -150,6 +151,16 @@ pub enum ShellError {
 }
 
 impl ShellError {
+    /// Spar errors for `source`, the exact text that was given to Spar. Their
+    /// spans are relative to it, so the error renders under the right line.
+    pub fn from_spar(errors: Vec<spar::SparError>, source: &str) -> Self {
+        Self::SparSource {
+            errors,
+            source: source.to_string(),
+            filename: "<sparsh>".to_string(),
+        }
+    }
+
     pub fn status(&self) -> i32 {
         match self {
             Self::Spar(_) | Self::SparSource { .. } | Self::Config(_) => 1,
@@ -191,6 +202,14 @@ impl fmt::Display for ShellError {
 
 impl std::error::Error for ShellError {}
 
+/// What an interactive prompt needs from its Spar session: structured results
+/// (tables, pretty JSON) rendered by the prompt, and the `std/data` functions
+/// (`where`, `map`, `take`, ...) usable without an `import`.
+fn configure_terminal_session(session: &mut spar::Session) {
+    session.set_structured_terminal(true);
+    session.enable_data_prelude();
+}
+
 pub struct ShellSession {
     spar: spar::Session,
     builtins: BuiltinRegistry,
@@ -201,6 +220,7 @@ pub struct ShellSession {
     config: crate::SparshConfig,
     config_generation: u64,
     interactive_source: String,
+    last_interactive_value: Option<spar::Value>,
 }
 
 impl ShellSession {
@@ -220,12 +240,14 @@ impl ShellSession {
             config: crate::SparshConfig::default(),
             config_generation: 0,
             interactive_source: String::new(),
+            last_interactive_value: None,
         })
     }
 
     pub fn try_new_interactive() -> Result<Self, ShellError> {
         let mut session = Self::try_new()?;
         session.mode = SessionMode::InteractiveTty;
+        configure_terminal_session(&mut session.spar);
         let cwd = session.services.directories.current().to_path_buf();
         let executable = session
             .services
@@ -263,36 +285,96 @@ impl ShellSession {
         let environment = self.services.environment.snapshot();
         let result = self
             .spar
-            .eval_interactive_with_context(source, &cwd, &environment)
-            .map_err(ShellError::Spar)?;
+            .eval_interactive_preview_with_context(
+                source,
+                &cwd,
+                &environment,
+                self.last_interactive_value.clone(),
+                20,
+            )
+            .map_err(|errors| ShellError::from_spar(errors, source))?;
         let committed = self.spar.committed_source();
-        let appended = if before.is_empty() {
+        let appended = if committed == before {
+            String::new()
+        } else if before.is_empty() {
             committed.to_string()
         } else {
             committed
                 .strip_prefix(&before)
                 .and_then(|suffix| suffix.strip_prefix('\n'))
-                .unwrap_or(source)
+                .unwrap_or_default()
                 .to_string()
         };
         append_fragment(&mut self.interactive_source, &appended);
-        match result {
-            spar::InteractiveEvalResult::Empty => Ok(ShellResult::Empty),
-            spar::InteractiveEvalResult::Value(value) => self.handle_interactive_value(value),
-        }
+        let result = match result {
+            spar::InteractivePreviewResult::Empty => ShellResult::Empty,
+            spar::InteractivePreviewResult::Value(value) => self.handle_interactive_value(value)?,
+            spar::InteractivePreviewResult::RuntimeValue(value) => ShellResult::Structured(value),
+            spar::InteractivePreviewResult::Process(outcome) => ShellResult::Process(outcome),
+        };
+        self.remember_interactive_value(&result);
+        Ok(result)
     }
 
     pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
         self.poll_jobs()?;
         let cwd = self.services.directories.current().to_path_buf();
         let environment = self.services.environment.snapshot();
+        if input.trim() == "_" {
+            if let Some(value) = self.last_interactive_value.clone() {
+                let result = match value.clone().try_into_config(&spar::Span::dummy()) {
+                    Ok(value) => self.present_value(value),
+                    Err(_) => ShellResult::Structured(spar::InteractiveRuntimeValue {
+                        value,
+                        stream_preview: false,
+                        truncated: false,
+                        presentation: spar::InteractivePresentation::Value,
+                    }),
+                };
+                return self.finish_submission(Ok(result));
+            }
+            let result = self.submit_spar(input);
+            return self.finish_submission(result);
+        }
         if let Some(plan) = crate::function_pipeline::compose_function_pipeline(
             input,
             &self.spar,
             &cwd,
             &environment,
         )? {
-            let result = execute_plan(&plan, &self.builtins, &mut self.services, self.last_status, self.mode);
+            let result = execute_plan(
+                &plan,
+                &self.builtins,
+                &mut self.services,
+                self.last_status,
+                self.mode,
+            );
+            return self.finish_submission(result);
+        }
+
+        // Mixed byte/value pipelines are shell syntax rather than ordinary Spar
+        // expressions. Execute the raw prompt body through Spar's declaration-safe
+        // interactive shell preview path so a terminal pipeline may return a
+        // structured value without committing a synthetic `shell { ... }` wrapper.
+        if crate::dispatch::is_mixed_byte_pipeline(input) {
+            let preview = self
+                .spar
+                .eval_interactive_shell_preview_with_context(
+                    input,
+                    &cwd,
+                    &environment,
+                    self.last_interactive_value.clone(),
+                    20,
+                )
+                .map_err(|errors| ShellError::from_spar(errors, input.trim()));
+            let result = preview.map(|preview| match preview {
+                spar::InteractivePreviewResult::RuntimeValue(value) => {
+                    ShellResult::Structured(value)
+                }
+                spar::InteractivePreviewResult::Process(outcome) => ShellResult::Process(outcome),
+                spar::InteractivePreviewResult::Empty => ShellResult::Empty,
+                spar::InteractivePreviewResult::Value(value) => ShellResult::Value(value),
+            });
             return self.finish_submission(result);
         }
 
@@ -310,26 +392,47 @@ impl ShellSession {
                     .expect("dispatch verified the variable exists")
                     .clone(),
             )),
-            Dispatch::Command(command) => {
-                self.spar
-                    .eval_shell_plan_with_context(command, &cwd, &environment)
-                    .map_err(ShellError::Spar)
-                    .and_then(|plan| {
-                        execute_plan(
-                            &plan,
-                            &self.builtins,
-                            &mut self.services,
-                            self.last_status,
-                            self.mode,
-                        )
-                    })
-            }
+            Dispatch::Command(command) => self
+                .spar
+                .eval_shell_plan_with_context(command, &cwd, &environment)
+                .map_err(|errors| ShellError::from_spar(errors, command))
+                .and_then(|plan| {
+                    execute_plan(
+                        &plan,
+                        &self.builtins,
+                        &mut self.services,
+                        self.last_status,
+                        self.mode,
+                    )
+                }),
         };
 
         self.finish_submission(result)
     }
 
-    fn finish_submission(&mut self, result: Result<ShellResult, ShellError>) -> Result<ShellResult, ShellError> {
+    /// Submission for scripts (`-c`, piped stdin). A string returned by a Spar
+    /// expression is data, so it is written as-is; a bare variable name still
+    /// shows the quoted, Spar-literal form, as does the prompt.
+    pub fn submit_script(&mut self, input: &str) -> Result<ShellResult, ShellError> {
+        let result = self.submit(input)?;
+        Ok(match result {
+            ShellResult::Value(spar::ConfigValue::Str(text))
+                if !crate::dispatch::is_bare_identifier(input.trim()) =>
+            {
+                ShellResult::Builtin(crate::BuiltinOutput {
+                    stdout: format!("{text}\n").into_bytes(),
+                    stderr: Vec::new(),
+                    status: 0,
+                })
+            }
+            other => other,
+        })
+    }
+
+    fn finish_submission(
+        &mut self,
+        result: Result<ShellResult, ShellError>,
+    ) -> Result<ShellResult, ShellError> {
         match result {
             Ok(ShellResult::ExecRequest { words, template }) => {
                 self.replace_with_command(words, *template)
@@ -341,9 +444,11 @@ impl ShellSession {
                 Ok(ShellResult::ReloadConfig)
             }
             Ok(result) => {
+                self.remember_interactive_value(&result);
                 self.last_status = match &result {
                     ShellResult::Empty
                     | ShellResult::Value(_)
+                    | ShellResult::Structured(_)
                     | ShellResult::EditorMode(_)
                     | ShellResult::ReloadConfig
                     | ShellResult::ExecRequest { .. }
@@ -367,7 +472,24 @@ impl ShellSession {
         }
     }
 
-    pub fn set_history_access(&mut self, history: std::sync::Arc<dyn crate::history::HistoryAccess>) {
+    fn remember_interactive_value(&mut self, result: &ShellResult) {
+        match result {
+            ShellResult::Value(value) => {
+                self.last_interactive_value = Some(spar::Value::from_config(value.clone()));
+            }
+            ShellResult::Structured(value) => {
+                // Stream previews are materialized by Spar before reaching Sparsh,
+                // so `_` never holds a one-shot live Stream resource.
+                self.last_interactive_value = Some(value.value.clone());
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_history_access(
+        &mut self,
+        history: std::sync::Arc<dyn crate::history::HistoryAccess>,
+    ) {
         self.services.set_history_access(history);
     }
 
@@ -380,14 +502,22 @@ impl ShellSession {
         unreachable!("successful exec replaces the Sparsh process")
     }
 
-    fn source_request(&mut self, request: crate::builtin::SourceRequest) -> Result<ShellResult, ShellError> {
+    fn source_request(
+        &mut self,
+        request: crate::builtin::SourceRequest,
+    ) -> Result<ShellResult, ShellError> {
         self.source_path(&request.path, request.shell.as_deref())?;
         Ok(ShellResult::Empty)
     }
 
-    fn source_path(&mut self, raw_path: &str, foreign_shell: Option<&str>) -> Result<(), ShellError> {
+    fn source_path(
+        &mut self,
+        raw_path: &str,
+        foreign_shell: Option<&str>,
+    ) -> Result<(), ShellError> {
         let path = self.resolve_session_path(raw_path)?;
-        if foreign_shell.is_none() && path.extension().and_then(|ext| ext.to_str()) == Some("spar") {
+        if foreign_shell.is_none() && path.extension().and_then(|ext| ext.to_str()) == Some("spar")
+        {
             return self.source_spar_file(&path);
         }
         self.source_foreign_file(&path, foreign_shell)
@@ -395,23 +525,35 @@ impl ShellSession {
 
     fn resolve_session_path(&self, raw: &str) -> Result<PathBuf, ShellError> {
         let expanded = if raw == "~" {
-            PathBuf::from(self.services.environment.get("HOME").ok_or_else(|| ShellError::Process {
-                message: "HOME is not set; cannot expand '~'".into(), status: 1,
+            PathBuf::from(self.services.environment.get("HOME").ok_or_else(|| {
+                ShellError::Process {
+                    message: "HOME is not set; cannot expand '~'".into(),
+                    status: 1,
+                }
             })?)
         } else if let Some(rest) = raw.strip_prefix("~/") {
-            PathBuf::from(self.services.environment.get("HOME").ok_or_else(|| ShellError::Process {
-                message: "HOME is not set; cannot expand '~'".into(), status: 1,
-            })?).join(rest)
+            PathBuf::from(self.services.environment.get("HOME").ok_or_else(|| {
+                ShellError::Process {
+                    message: "HOME is not set; cannot expand '~'".into(),
+                    status: 1,
+                }
+            })?)
+            .join(rest)
         } else {
             let path = Path::new(raw);
-            if path.is_absolute() { path.to_path_buf() } else { self.services.directories.current().join(path) }
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                self.services.directories.current().join(path)
+            }
         };
         Ok(expanded)
     }
 
     fn source_spar_file(&mut self, path: &Path) -> Result<(), ShellError> {
         let source = std::fs::read_to_string(path).map_err(|error| ShellError::Process {
-            message: format!("source: {}: {error}", path.display()), status: 1,
+            message: format!("source: {}: {error}", path.display()),
+            status: 1,
         })?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let source = rebase_relative_imports(&source, base);
@@ -435,7 +577,11 @@ impl ShellSession {
         Ok(())
     }
 
-    fn source_foreign_file(&mut self, path: &Path, requested_shell: Option<&str>) -> Result<(), ShellError> {
+    fn source_foreign_file(
+        &mut self,
+        path: &Path,
+        requested_shell: Option<&str>,
+    ) -> Result<(), ShellError> {
         let previous_environment = self.services.environment.snapshot();
         let inferred_shell = self
             .services
@@ -447,7 +593,9 @@ impl ShellSession {
         let shell = requested_shell.or(inferred_shell).unwrap_or("sh");
         if !matches!(shell, "sh" | "bash" | "zsh") {
             return Err(ShellError::Builtin(BuiltinError {
-                message: format!("source: unsupported foreign shell '{shell}'; expected sh, bash, or zsh"),
+                message: format!(
+                    "source: unsupported foreign shell '{shell}'; expected sh, bash, or zsh"
+                ),
                 status: 2,
             }));
         }
@@ -464,7 +612,8 @@ impl ShellSession {
             .stderr(Stdio::piped())
             .output()
             .map_err(|error| ShellError::Process {
-                message: format!("source: failed to start {shell}: {error}"), status: 1,
+                message: format!("source: failed to start {shell}: {error}"),
+                status: 1,
             })?;
         if !output.status.success() {
             let status = output.status.code().unwrap_or(1);
@@ -472,7 +621,9 @@ impl ShellSession {
             return Err(ShellError::Process {
                 message: if stderr.is_empty() {
                     format!("source: {} exited with status {status}", path.display())
-                } else { stderr },
+                } else {
+                    stderr
+                },
                 status,
             });
         }
@@ -481,7 +632,8 @@ impl ShellSession {
             .next()
             .filter(|field| !field.is_empty())
             .ok_or_else(|| ShellError::Process {
-                message: "source: foreign shell returned no working directory".into(), status: 1,
+                message: "source: foreign shell returned no working directory".into(),
+                status: 1,
             })?;
         #[cfg(unix)]
         let cwd = {
@@ -493,7 +645,9 @@ impl ShellSession {
 
         let mut environment = Vec::new();
         for field in fields.filter(|field| !field.is_empty()) {
-            let Some(index) = field.iter().position(|byte| *byte == b'=') else { continue; };
+            let Some(index) = field.iter().position(|byte| *byte == b'=') else {
+                continue;
+            };
             #[cfg(unix)]
             {
                 use std::os::unix::ffi::OsStringExt;
@@ -510,7 +664,8 @@ impl ShellSession {
         }
         if !cwd.is_dir() {
             return Err(ShellError::Process {
-                message: format!("source: resulting cwd {} is not a directory", cwd.display()), status: 1,
+                message: format!("source: resulting cwd {} is not a directory", cwd.display()),
+                status: 1,
             });
         }
         self.services
@@ -530,17 +685,42 @@ impl ShellSession {
         value: spar::ConfigValue,
     ) -> Result<ShellResult, ShellError> {
         match value {
-            spar::ConfigValue::Shell(plan) => {
-                execute_plan(
-                        &plan,
-                        &self.builtins,
-                        &mut self.services,
-                        self.last_status,
-                        self.mode,
-                    )
-            }
-            other => Ok(ShellResult::Value(other)),
+            spar::ConfigValue::Shell(plan) => execute_plan(
+                &plan,
+                &self.builtins,
+                &mut self.services,
+                self.last_status,
+                self.mode,
+            ),
+            other => Ok(self.present_value(other)),
         }
+    }
+
+    /// Records and lists of records are data, not one-line literals: at a
+    /// terminal they are handed to the prompt as structured values so it can
+    /// draw tables and trees. Scalars and scripts keep the Spar literal form.
+    fn present_value(&self, value: spar::ConfigValue) -> ShellResult {
+        let is_container = |value: &spar::ConfigValue| {
+            matches!(
+                value,
+                spar::ConfigValue::Section(_) | spar::ConfigValue::List(_)
+            )
+        };
+        let structured = self.mode == SessionMode::InteractiveTty
+            && match &value {
+                spar::ConfigValue::Section(fields) => !fields.is_empty(),
+                spar::ConfigValue::List(items) => items.iter().any(is_container),
+                _ => false,
+            };
+        if !structured {
+            return ShellResult::Value(value);
+        }
+        ShellResult::Structured(spar::InteractiveRuntimeValue {
+            value: spar::Value::from_config(value),
+            stream_preview: false,
+            truncated: false,
+            presentation: spar::InteractivePresentation::Value,
+        })
     }
 
     pub fn reload_config(&mut self) -> Result<(), ShellError> {
@@ -553,11 +733,12 @@ impl ShellSession {
                     .to_path_buf();
                 (source, base)
             }
-            None => (String::new(), self.services.directories.current().to_path_buf()),
+            None => (
+                String::new(),
+                self.services.directories.current().to_path_buf(),
+            ),
         };
-        let mut candidate = spar::Engine::default()
-            .with_base_dir(base_dir)
-            .session();
+        let mut candidate = spar::Engine::default().with_base_dir(base_dir).session();
         let config = crate::config::evaluate_source_in_session(&mut candidate, &source)
             .map_err(ShellError::Config)?;
         if !self.interactive_source.trim().is_empty() {
@@ -568,6 +749,11 @@ impl ShellSession {
         self.services
             .apply_config(&config)
             .map_err(|message| ShellError::Config(crate::ConfigLoadError::Invalid(message)))?;
+        // The replacement session must keep the terminal features, or a
+        // config reload at startup silently turns them off.
+        if self.mode == SessionMode::InteractiveTty {
+            configure_terminal_session(&mut candidate);
+        }
         self.spar = candidate;
         self.config = config;
         self.config_generation = self.config_generation.wrapping_add(1);
@@ -596,6 +782,10 @@ impl ShellSession {
 
     pub fn prompt_config(&self) -> &crate::PromptConfig {
         &self.config.prompt
+    }
+
+    pub fn keybindings(&self) -> &[crate::KeybindingConfig] {
+        &self.config.keybindings
     }
 
     /// Problems found in the `prompt` section of the loaded config (empty when
@@ -744,6 +934,9 @@ fn rebase_import_statement(statement: &str, base: &Path) -> String {
 }
 
 fn append_fragment(target: &mut String, fragment: &str) {
+    if fragment.trim().is_empty() {
+        return;
+    }
     if !target.is_empty() {
         target.push('\n');
     }
@@ -763,10 +956,7 @@ impl Drop for ShellSession {
             return;
         }
         for id in self.services.jobs.ids() {
-            loop {
-                let Some(job) = self.services.jobs.get(id) else {
-                    break;
-                };
+            while let Some(job) = self.services.jobs.get(id) {
                 match job.state {
                     crate::job::JobState::Done(_) => break,
                     crate::job::JobState::Stopped => {
@@ -837,7 +1027,10 @@ mod tests {
 
     impl crate::HistoryAccess for MemoryHistory {
         fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String> {
-            let entries = self.entries.lock().map_err(|_| "history lock poisoned".to_string())?;
+            let entries = self
+                .entries
+                .lock()
+                .map_err(|_| "history lock poisoned".to_string())?;
             let start = limit
                 .map(|limit| entries.len().saturating_sub(limit))
                 .unwrap_or(0);
@@ -1025,9 +1218,15 @@ mod tests {
             .unwrap();
         let before = session.config_generation();
 
-        session.reload_config().expect("prompt problems must not fail the reload");
+        session
+            .reload_config()
+            .expect("prompt problems must not fail the reload");
 
-        assert_ne!(session.config_generation(), before, "the config was applied");
+        assert_ne!(
+            session.config_generation(),
+            before,
+            "the config was applied"
+        );
         assert_eq!(session.prompt_issues().len(), 1);
         assert_eq!(session.prompt_issues()[0].slot, Some(2));
         assert!(matches!(
@@ -1038,6 +1237,40 @@ mod tests {
             session.ui_snapshot().classify_command("gs"),
             CommandKind::Alias,
             "the alias from the same file still applies"
+        );
+    }
+
+    #[test]
+    fn reload_applies_keybinding_overrides_and_bumps_editor_generation() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".sparsh")).unwrap();
+        std::fs::write(
+            home.path().join(".sparsh/sparsh.spar"),
+            format!(
+                "{}\nstruct Config: SparshConfig {{\n    keybindings = [{{ key: \"ctrl+l\"; action: \"clearScreen\"; }}];\n}};\n",
+                include_str!("../../../examples/sparsh-types.spar")
+            ),
+        )
+        .unwrap();
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("export HOME={}", home.path().display()))
+            .unwrap();
+        let before = session.config_generation();
+
+        session.reload_config().unwrap();
+
+        assert_ne!(session.config_generation(), before);
+        assert_eq!(session.keybindings().len(), 1);
+        assert_eq!(
+            session.keybindings()[0].action,
+            crate::KeybindingAction::ClearScreen
+        );
+        assert_eq!(
+            session.keybindings()[0].chord,
+            crate::KeyChord::parse("ctrl+l").unwrap()
         );
     }
 
@@ -1170,6 +1403,8 @@ mod tests {
 
     #[test]
     fn wrappers_control_alias_and_builtin_resolution() {
+        // Resolves external programs through PATH, which other tests mutate.
+        let _lock = PROCESS_STATE.lock().unwrap();
         let mut session = ShellSession::new();
         session.submit("alias true = false").unwrap();
 
@@ -1293,11 +1528,19 @@ mod tests {
         let result = session
             .submit("definitely-not-a-command || printf recovered")
             .unwrap();
-        let ShellResult::Process(outcome) = result else {
-            panic!("expected process outcome")
-        };
-        assert!(outcome.success);
-        assert_eq!(outcome.exit_code, 0);
+        // `printf` is a native builtin, so the recovered branch reports either
+        // a process outcome or builtin output — both are a success.
+        match result {
+            ShellResult::Process(outcome) => {
+                assert!(outcome.success);
+                assert_eq!(outcome.exit_code, 0);
+            }
+            ShellResult::Builtin(output) => {
+                assert_eq!(output.status, 0);
+                assert_eq!(output.stdout, b"recovered");
+            }
+            other => panic!("expected process or builtin outcome, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1390,20 +1633,17 @@ mod tests {
         let output = directory.path().join("mixed-shell.txt");
         let mut session = ShellSession::new();
         session
-            .submit(&format!(
-                r#"function writeMarker(output: str) -> shell {{
-    return shell {{
+            .submit(
+                r#"function writeMarker(output: str) -> shell {
+    return shell {
         var value: str = $(printf ready);
-        printf "%s" "${{value}}" > "${{output}}";
-    }};
-}};"#
-            ))
+        printf "%s" "${value}" > "${output}";
+    };
+};"#,
+            )
             .unwrap();
         session
-            .submit(&format!(
-                r#"writeMarker(output: "{}")"#,
-                output.display()
-            ))
+            .submit(&format!(r#"writeMarker(output: "{}")"#, output.display()))
             .unwrap();
         assert_eq!(std::fs::read_to_string(output).unwrap(), "ready");
     }
@@ -1416,22 +1656,19 @@ mod tests {
         let two = directory.path().join("loop-marker-two");
         let mut session = ShellSession::new();
         session
-            .submit(&format!(
-                r#"function writeMarkers(output: str) -> shell {{
-    return shell {{
+            .submit(
+                r#"function writeMarkers(output: str) -> shell {
+    return shell {
         var values: List<str> = ["one", "two"];
-        for value in values {{
-            touch "${{output}}-${{value}}";
-        }}
-    }};
-}};"#
-            ))
+        for value in values {
+            touch "${output}-${value}";
+        }
+    };
+};"#,
+            )
             .unwrap();
         session
-            .submit(&format!(
-                r#"writeMarkers(output: "{}")"#,
-                output.display()
-            ))
+            .submit(&format!(r#"writeMarkers(output: "{}")"#, output.display()))
             .unwrap();
         assert!(one.exists());
         assert!(two.exists());
@@ -1448,7 +1685,7 @@ mod tests {
                 marker.display()
             ))
             .unwrap();
-        session.submit("var plan = build();").unwrap();
+        session.submit("var plan: shell = build();").unwrap();
         assert!(!marker.exists());
     }
 
@@ -1599,12 +1836,17 @@ mod tests {
         let mut session = ShellSession::try_new_interactive().unwrap();
 
         session
-            .submit(&format!("ls {} > {}", directory.path().display(), output.display()))
+            .submit(&format!(
+                "ls {} > {}",
+                directory.path().display(),
+                output.display()
+            ))
             .unwrap();
 
-        assert!(std::fs::read_to_string(output).unwrap().contains("visible-file"));
+        assert!(std::fs::read_to_string(output)
+            .unwrap()
+            .contains("visible-file"));
     }
-
 
     #[test]
     fn practical_io_and_help_builtins_are_native_and_pipeline_capable() {
@@ -1614,9 +1856,15 @@ mod tests {
         std::fs::write(&input, "line-value\n").unwrap();
         let mut session = ShellSession::new();
 
-        assert_eq!(builtin_stdout(session.submit("echo hello Sparsh").unwrap()), "hello Sparsh\n");
+        assert_eq!(
+            builtin_stdout(session.submit("echo hello Sparsh").unwrap()),
+            "hello Sparsh\n"
+        );
         session
-            .submit(&format!("printf '%s\\n' alpha | grep alpha > {}", output.display()))
+            .submit(&format!(
+                "printf '%s\\n' alpha | grep alpha > {}",
+                output.display()
+            ))
             .unwrap();
         assert_eq!(std::fs::read_to_string(output).unwrap(), "alpha\n");
 
@@ -1624,7 +1872,10 @@ mod tests {
             .submit(&format!("read SPARSH_READ_VALUE < {}", input.display()))
             .unwrap();
         let exported = builtin_stdout(session.submit("export").unwrap());
-        assert!(exported.contains("SPARSH_READ_VALUE='line-value'"), "{exported}");
+        assert!(
+            exported.contains("SPARSH_READ_VALUE='line-value'"),
+            "{exported}"
+        );
 
         let help = builtin_stdout(session.submit("help source").unwrap());
         assert!(help.contains("source"), "{help}");
@@ -1666,13 +1917,13 @@ mod tests {
         let sourced = directory.path().join("functions.spar");
         std::fs::write(
             &helper,
-            r#"export function suffix(value: str) -> str { return "${value}-ok"; };"#,
+            r#"function suffix(value: str) -> str { return "${value}-ok"; };"#,
         )
         .unwrap();
         std::fs::write(
             &sourced,
-            r#"import { suffix } from "./helper";
-function greet(name: str) -> str { return suffix(value: name); };"#,
+            r#"import "./helper.spar" as helper;
+function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         )
         .unwrap();
         let mut session = ShellSession::new();
@@ -1731,7 +1982,6 @@ function greet(name: str) -> str { return suffix(value: name); };"#,
         assert!(exported.contains("SPARSH_ACTIVATED='yes'"), "{exported}");
         assert!(exported.contains("VIRTUAL_ENV="), "{exported}");
     }
-
 
     #[test]
     fn deactivate_restores_environment_changed_by_python_activation_only() {
@@ -1795,7 +2045,9 @@ function greet(name: str) -> str { return suffix(value: name); };"#,
         let error = session.submit("deactivate").unwrap_err();
 
         assert_eq!(error.status(), 1);
-        assert!(error.to_string().contains("no active Python virtual environment"));
+        assert!(error
+            .to_string()
+            .contains("no active Python virtual environment"));
     }
 
     #[test]
@@ -1806,11 +2058,7 @@ function greet(name: str) -> str { return suffix(value: name); };"#,
 
         let ShellResult::CommandStatus {
             status: 127,
-            diagnostic:
-                Some(CommandDiagnostic::NotFound {
-                    suggestions,
-                    ..
-                }),
+            diagnostic: Some(CommandDiagnostic::NotFound { suggestions, .. }),
         } = result
         else {
             panic!("expected structured command-not-found result");
@@ -1825,11 +2073,7 @@ function greet(name: str) -> str { return suffix(value: name); };"#,
     fn failed_foreign_source_leaves_environment_and_cwd_unchanged() {
         let directory = tempfile::tempdir().unwrap();
         let script = directory.path().join("broken.sh");
-        std::fs::write(
-            &script,
-            "export SPARSH_ATOMIC=changed\ncd /tmp\nreturn 7\n",
-        )
-        .unwrap();
+        std::fs::write(&script, "export SPARSH_ATOMIC=changed\ncd /tmp\nreturn 7\n").unwrap();
         let mut session = ShellSession::new();
         session.submit("export SPARSH_ATOMIC=before").unwrap();
         let before_cwd = session.ui_snapshot().cwd().to_path_buf();
@@ -1922,7 +2166,365 @@ function greet(name: str) -> str { return suffix(value: name); };"#,
     #[test]
     fn chmod_remains_an_external_command() {
         let session = ShellSession::new();
-        assert_eq!(session.ui_snapshot().classify_command("chmod"), CommandKind::External);
+        assert_eq!(
+            session.ui_snapshot().classify_command("chmod"),
+            CommandKind::External
+        );
+    }
+
+    #[test]
+    fn expression_only_preview_is_not_added_to_replay_source() {
+        let mut session = ShellSession::new();
+
+        session
+            .submit_spar("42")
+            .expect("expression preview should succeed");
+
+        assert!(session.interactive_source.is_empty());
+    }
+
+    #[test]
+    fn declaration_plus_preview_replays_only_the_committed_declaration() {
+        let mut session = ShellSession::new();
+
+        let result = session
+            .submit_spar("var answer: int = 41; answer + 1")
+            .expect("declaration plus preview should succeed");
+        assert!(matches!(
+            result,
+            ShellResult::Value(spar::ConfigValue::Int(42))
+        ));
+        assert!(session.interactive_source.contains("var answer: int = 41"));
+        assert!(
+            !session.interactive_source.contains("answer + 1"),
+            "preview-only expressions must not be replayed after config reload"
+        );
+
+        session
+            .submit("unset HOME")
+            .expect("HOME should be removable in the isolated shell environment");
+        session
+            .reload_config()
+            .expect("reloading should replay only committed interactive source");
+
+        let answer = session
+            .submit_spar("answer")
+            .expect("replayed declaration should remain available");
+        assert!(matches!(
+            answer,
+            ShellResult::Value(spar::ConfigValue::Int(41))
+        ));
+    }
+
+    #[test]
+    fn direct_mixed_pipeline_without_to_returns_a_structured_table() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit_spar(r#"import pkg { where } from "std/data";"#)
+            .unwrap();
+
+        let result = session
+            .submit(
+                "printf 'name,age,team\\nObi,24,core\\nAda,31,ops\\n' | from csv |> where(fn(row) => row.age > 20)",
+            )
+            .expect("direct prompt mixed pipeline should execute");
+
+        let ShellResult::Structured(preview) = result else {
+            panic!("expected structured result, got {result:?}");
+        };
+        assert_eq!(
+            preview.presentation,
+            spar::InteractivePresentation::Pipeline
+        );
+        let spar::Value::Table(table) = preview.value else {
+            panic!("expected table");
+        };
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn direct_scoc_env_without_to_reuses_structured_table_presentation() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        let result = session
+            .submit("printf 'A=1\\nB=2\\n' | from env")
+            .expect("SCOC env prompt pipeline should execute");
+
+        let ShellResult::Structured(preview) = result else {
+            panic!("expected structured result, got {result:?}");
+        };
+        assert_eq!(
+            preview.presentation,
+            spar::InteractivePresentation::Pipeline
+        );
+        let spar::Value::Table(table) = preview.value else {
+            panic!("expected SCOC env table");
+        };
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn direct_terminal_to_json_returns_encoded_structured_result() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        let result = session
+            .submit("printf 'name,age\\nObi,24\\nAda,31\\n' | from csv |> to json")
+            .unwrap();
+
+        let ShellResult::Structured(preview) = result else {
+            panic!("expected structured result, got {result:?}");
+        };
+        assert_eq!(
+            preview.presentation,
+            spar::InteractivePresentation::Encoded("json")
+        );
+    }
+
+    #[test]
+    fn direct_mixed_preview_keeps_full_value_in_underscore_and_failure_does_not_replace_it() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        let rows = (0..75)
+            .map(|n| format!("row{n},{n}"))
+            .collect::<Vec<_>>()
+            .join("\\n");
+        let command = format!("printf 'name,value\\n{rows}\\n' | from csv");
+
+        let first = session.submit(&command).unwrap();
+        let ShellResult::Structured(first) = first else {
+            panic!("expected structured result");
+        };
+        let spar::Value::Table(table) = &first.value else {
+            panic!("expected table");
+        };
+        assert_eq!(table.len(), 75);
+
+        assert!(session
+            .submit("printf 'x\\n1\\n' | from csv |> definitelyMissing()")
+            .is_err());
+
+        let recalled = session.submit("_").unwrap();
+        let ShellResult::Structured(recalled) = recalled else {
+            panic!("expected structured underscore");
+        };
+        let spar::Value::Table(table) = recalled.value else {
+            panic!("expected table");
+        };
+        assert_eq!(table.len(), 75);
+    }
+
+    #[test]
+    fn structured_result_becomes_the_previous_interactive_value() {
+        let mut session = ShellSession::new();
+        let result = session
+            .submit_spar(
+                r#"
+                import pkg { collectTable } from "std/data";
+                struct User { name: str = ""; age: int = 0; };
+                [User(name: "Obi", age: 24), User(name: "Ada", age: 31)]
+                    |> collectTable()
+                "#,
+            )
+            .expect("structured preview should succeed");
+        assert!(matches!(result, ShellResult::Structured(_)));
+
+        let previous = session
+            .submit("_")
+            .expect("underscore should return the previous value");
+        let ShellResult::Structured(previous) = previous else {
+            panic!("expected structured previous value");
+        };
+        let spar::Value::Table(table) = previous.value else {
+            panic!("expected previous Table value");
+        };
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn interactive_session_returns_mixed_pipeline_as_a_structured_value() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        let result = session
+            .submit("printf 'name,age\\nObi,24\\n' | from csv |> to json")
+            .unwrap();
+        assert!(matches!(result, ShellResult::Structured(_)), "{result:?}");
+        let bare = session
+            .submit("printf 'name,age\\nObi,24\\n' | from csv")
+            .unwrap();
+        assert!(matches!(bare, ShellResult::Structured(_)), "bare: {bare:?}");
+
+        // Loading the config replaces the Spar session; that must not turn
+        // structured rendering off (this broke the real prompt).
+        session.reload_config().unwrap();
+        let after_reload = session
+            .submit("printf 'name,age\\nObi,24\\n' | from csv")
+            .unwrap();
+        assert!(
+            matches!(after_reload, ShellResult::Structured(_)),
+            "after reload: {after_reload:?}"
+        );
+    }
+
+    #[test]
+    fn interactive_prompt_can_use_data_functions_without_an_import_even_after_reload() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        let source =
+            "printf 'name,age\\nObi,24\\nAda,31\\n' | from csv |> where(fn(r) => r.age > 24)";
+        let first = session.submit(source).unwrap();
+        assert!(matches!(first, ShellResult::Structured(_)), "{first:?}");
+
+        session.reload_config().unwrap();
+        let second = session.submit(source).unwrap();
+        assert!(matches!(second, ShellResult::Structured(_)), "{second:?}");
+
+        // The user's own names still win, and an explicit import is harmless.
+        session.submit("var mut count: int = 0;").unwrap();
+        session.submit("count = count + 1;").unwrap();
+        session
+            .submit("import pkg { take } from \"std/data\";")
+            .unwrap();
+        let third = session.submit(source).unwrap();
+        assert!(matches!(third, ShellResult::Structured(_)), "{third:?}");
+    }
+
+    #[test]
+    fn scripts_still_need_an_explicit_data_import() {
+        let mut session = ShellSession::try_new().unwrap();
+        let result = session.submit("printf 'a\\n1\\n' | from csv |> where(fn(r) => r.a > 0)");
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// Serves the same canned HTTP response `requests` times on a loopback
+    /// port and returns its URL.
+    fn serve(requests: usize, content_type: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..requests {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    fn serve_once(content_type: &'static str, body: &'static str) -> String {
+        serve(1, content_type, body)
+    }
+
+    #[test]
+    fn await_at_the_prompt_fetches_and_keeps_the_response_for_underscore() {
+        let url = serve_once("application/json", r#"{"name":"ditto","cry":null}"#);
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("import pkg { get } from \"std/http\";")
+            .unwrap();
+
+        // No promise is shown: `await` waits and returns the response.
+        let result = session
+            .submit(&format!("await get(url: \"{url}\")"))
+            .unwrap();
+        let ShellResult::Structured(response) = result else {
+            panic!("expected a structured response, got {result:?}");
+        };
+        let spar::Value::Object(fields) = &response.value else {
+            panic!("expected a record");
+        };
+        assert_eq!(fields.get("status"), Some(&spar::Value::Int(200)));
+        assert_eq!(
+            fields.get("contentType"),
+            Some(&spar::Value::String("application/json".into()))
+        );
+
+        // `_` is the response, so `.json()` works on it, and the JSON null
+        // survives instead of turning into 0.
+        let ShellResult::Structured(json) = session.submit("_.json()").unwrap() else {
+            panic!("expected the decoded JSON record");
+        };
+        let spar::Value::Object(record) = &json.value else {
+            panic!("expected a record");
+        };
+        assert_eq!(
+            record.get("name"),
+            Some(&spar::Value::String("ditto".into()))
+        );
+        assert!(
+            matches!(record.get("cry"), Some(spar::Value::Void)),
+            "{record:?}"
+        );
+
+        // The decoded record is now `_`; its fields are reachable.
+        let name = session.submit("_.name").unwrap();
+        assert!(
+            matches!(&name, ShellResult::Value(spar::ConfigValue::Str(text)) if text == "ditto"),
+            "{name:?}"
+        );
+    }
+
+    #[test]
+    fn response_status_is_reachable_through_underscore() {
+        let url = serve_once("text/html", "<p>hi</p>");
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("import pkg { get } from \"std/http\";")
+            .unwrap();
+        session
+            .submit(&format!("await get(url: \"{url}\")"))
+            .unwrap();
+
+        let status = session.submit("_.status").unwrap();
+        assert!(
+            matches!(&status, ShellResult::Value(spar::ConfigValue::Int(200))),
+            "{status:?}"
+        );
+    }
+
+    const STATS: &str = r#"{"name":"ditto","stats":[{"stat":"hp","base":48},{"stat":"attack","base":48},{"stat":"speed","base":48},{"stat":"special","base":10}],"meta":{"id":1}}"#;
+
+    #[test]
+    fn a_fetched_json_list_can_be_chained_through_where_select_and_take_in_one_line() {
+        let url = serve(3, "application/json", STATS);
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("import pkg { get } from \"std/http\";")
+            .unwrap();
+
+        let ShellResult::Structured(rows) = session
+            .submit(&format!(
+                "(await get(url: \"{url}\")).json().stats |> where(fn(s) => s.base > 40) |> select([\"stat\"])"
+            ))
+            .unwrap()
+        else {
+            panic!("expected a structured result");
+        };
+        let spar::Value::List(items) = &rows.value else {
+            panic!("expected a list of records, got {:?}", rows.value);
+        };
+        assert_eq!(items.len(), 3);
+
+        // `count` ends the chain with a plain number.
+        let count = session
+            .submit(&format!(
+                "(await get(url: \"{url}\")).json().stats |> where(fn(s) => s.stat == \"hp\") |> count()"
+            ))
+            .unwrap();
+        assert!(
+            matches!(&count, ShellResult::Value(spar::ConfigValue::Int(1))),
+            "{count:?}"
+        );
+
+        // A record where a list is needed fails with a clear message.
+        let error = session
+            .submit(&format!(
+                "(await get(url: \"{url}\")).json().meta |> take(1)"
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("list"), "unclear error: {error}");
     }
 
     #[test]
@@ -1933,5 +2535,4 @@ function greet(name: str) -> str { return suffix(value: name); };"#,
             ShellResult::EditorMode(super::EditorMode::Repl)
         ));
     }
-
 }

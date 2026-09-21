@@ -132,7 +132,11 @@ mod tests {
     #[test]
     fn detects_nearest_project_root_from_a_nested_directory() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .unwrap();
         let nested = root.path().join("src/deep");
         std::fs::create_dir_all(&nested).unwrap();
 
@@ -142,7 +146,11 @@ mod tests {
     #[test]
     fn detects_python_and_node_in_a_polyglot_project() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("pyproject.toml"), "[project]\nname = \"demo\"\n").unwrap();
+        std::fs::write(
+            root.path().join("pyproject.toml"),
+            "[project]\nname = \"demo\"\n",
+        )
+        .unwrap();
         std::fs::write(root.path().join("package.json"), "{}\n").unwrap();
 
         assert_eq!(

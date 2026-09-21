@@ -5,6 +5,7 @@ import type {
     SparshPrompt,
     SparshHistory,
     SparshCompletion,
+    SparshKeybinding,
     SparshConfig
 } from "./sparsh-types";
 
@@ -45,6 +46,13 @@ struct Config: SparshConfig {
     };
     history = { maxEntries: 10000; dedupeConsecutive: true; };
     completion = { enabled: true; };
+    keybindings: List<SparshKeybinding> = [
+        // Defaults are retained unless the same chord is listed here.
+        // Alt+Shift+Enter inserts a literal newline without submitting.
+        // Bind `insertNewline` to another chord if your terminal cannot distinguish it.
+        { key: "ctrl+r"; action: "historySearch"; },
+        { key: "alt+e"; action: "openEditor"; }
+    ];
 };
 
 function startup() -> shell {

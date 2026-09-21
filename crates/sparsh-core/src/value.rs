@@ -27,8 +27,18 @@ pub fn render_value(value: &spar::ConfigValue) -> String {
         spar::ConfigValue::Shell(plan) => render_shell_plan(plan),
         spar::ConfigValue::ShellProgram(_) => "<shell-program>".into(),
         spar::ConfigValue::Promise(_) => "<promise>".into(),
-        spar::ConfigValue::Error { message, kind, code, .. } => {
-            format!("error(kind: {}, code: {}, message: {})", quote(kind), code, quote(message))
+        spar::ConfigValue::Error {
+            message,
+            kind,
+            code,
+            ..
+        } => {
+            format!(
+                "error(kind: {}, code: {}, message: {})",
+                quote(kind),
+                code,
+                quote(message)
+            )
         }
     }
 }
@@ -143,7 +153,7 @@ fn escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
 
     use spar::ConfigValue;
     use spar_command::{
@@ -169,7 +179,7 @@ mod tests {
 
     #[test]
     fn renders_sections_in_stable_key_order() {
-        let value = ConfigValue::Section(HashMap::from([
+        let value = ConfigValue::Section(IndexMap::from([
             ("z".into(), ConfigValue::Int(2)),
             ("a".into(), ConfigValue::Int(1)),
         ]));

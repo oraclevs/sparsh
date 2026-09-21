@@ -1,11 +1,21 @@
 use super::{error, success, usage_error, BuiltinContext, BuiltinRegistry, BuiltinResult};
 
-pub(super) fn umask(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+pub(super) fn umask(
+    args: &[String],
+    _: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
     match args {
-        [] => Ok(success(Some(format!("{:04o}\n", spar_process::current_umask() & 0o7777)))),
+        [] => Ok(success(Some(format!(
+            "{:04o}\n",
+            spar_process::current_umask() & 0o7777
+        )))),
         [value] => {
-            let mask = u32::from_str_radix(value, 8).map_err(|_| usage_error("umask [0000-0777]"))?;
-            if mask > 0o777 { return Err(usage_error("umask [0000-0777]")); }
+            let mask =
+                u32::from_str_radix(value, 8).map_err(|_| usage_error("umask [0000-0777]"))?;
+            if mask > 0o777 {
+                return Err(usage_error("umask [0000-0777]"));
+            }
             spar_process::set_umask(mask);
             Ok(success(None))
         }
@@ -14,7 +24,11 @@ pub(super) fn umask(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinRegi
 }
 
 #[cfg(unix)]
-pub(super) fn ulimit(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+pub(super) fn ulimit(
+    args: &[String],
+    _: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
     use spar_process::LimitResource;
     if args == ["-a"] {
         let mut out = String::new();
@@ -24,8 +38,12 @@ pub(super) fn ulimit(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinReg
             ("-s", "stack size", LimitResource::Stack, 1024u64),
             ("-u", "max user processes", LimitResource::NProc, 1u64),
         ] {
-            let (soft, _) = spar_process::get_limit(resource).map_err(|e| error(format!("ulimit: {e}")))?;
-            out.push_str(&format!("{flag} {label:<20} {}\n", format_limit(soft, scale)));
+            let (soft, _) =
+                spar_process::get_limit(resource).map_err(|e| error(format!("ulimit: {e}")))?;
+            out.push_str(&format!(
+                "{flag} {label:<20} {}\n",
+                format_limit(soft, scale)
+            ));
         }
         return Ok(success(Some(out)));
     }
@@ -45,9 +63,13 @@ pub(super) fn ulimit(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinReg
         let target = if value == "unlimited" {
             libc_rlim_infinity()
         } else {
-            value.parse::<u64>().map_err(|_| usage_error("ulimit -a | -n|-c|-s|-u [value|unlimited]"))?.saturating_mul(scale)
+            value
+                .parse::<u64>()
+                .map_err(|_| usage_error("ulimit -a | -n|-c|-s|-u [value|unlimited]"))?
+                .saturating_mul(scale)
         };
-        spar_process::set_soft_limit(resource, target).map_err(|e| error(format!("ulimit: {e}")))?;
+        spar_process::set_soft_limit(resource, target)
+            .map_err(|e| error(format!("ulimit: {e}")))?;
         return Ok(success(None));
     }
     let (soft, _) = spar_process::get_limit(resource).map_err(|e| error(format!("ulimit: {e}")))?;
@@ -55,14 +77,24 @@ pub(super) fn ulimit(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinReg
 }
 
 #[cfg(unix)]
-fn libc_rlim_infinity() -> u64 { u64::MAX }
+fn libc_rlim_infinity() -> u64 {
+    u64::MAX
+}
 
 #[cfg(unix)]
 fn format_limit(value: u64, scale: u64) -> String {
-    if value == u64::MAX { "unlimited".into() } else { (value / scale).to_string() }
+    if value == u64::MAX {
+        "unlimited".into()
+    } else {
+        (value / scale).to_string()
+    }
 }
 
 #[cfg(not(unix))]
-pub(super) fn ulimit(_: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+pub(super) fn ulimit(
+    _: &[String],
+    _: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
     Err(error("ulimit: unsupported on this platform"))
 }

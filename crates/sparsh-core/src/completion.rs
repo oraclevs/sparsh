@@ -60,7 +60,10 @@ impl CompletionSnapshot {
     }
 }
 
-pub fn complete(snapshot: &CompletionSnapshot, request: CompletionRequest<'_>) -> Vec<CompletionItem> {
+pub fn complete(
+    snapshot: &CompletionSnapshot,
+    request: CompletionRequest<'_>,
+) -> Vec<CompletionItem> {
     let cursor = request.cursor.min(request.line.len());
     if !request.line.is_char_boundary(cursor) {
         return Vec::new();
@@ -87,12 +90,9 @@ pub fn complete(snapshot: &CompletionSnapshot, request: CompletionRequest<'_>) -
             span,
             PathCompletionMode::FilesAndDirectories,
         ),
-        CompletionContext::Directory => complete_paths(
-            snapshot,
-            token,
-            span,
-            PathCompletionMode::DirectoriesOnly,
-        ),
+        CompletionContext::Directory => {
+            complete_paths(snapshot, token, span, PathCompletionMode::DirectoriesOnly)
+        }
         CompletionContext::SparIdentifier => complete_spar_identifiers(snapshot, token, span),
         CompletionContext::Import => complete_imports(snapshot, token, span),
         CompletionContext::Argument => complete_paths(
@@ -172,17 +172,24 @@ fn active_token_start(prefix: &str) -> usize {
             }
             None => match character {
                 '\'' | '"' => {
-                    if index == start {
-                        quote = Some(character);
-                    } else {
-                        quote = Some(character);
-                    }
+                    quote = Some(character);
                 }
                 character
                     if character.is_whitespace()
                         || matches!(
                             character,
-                            '|' | '&' | ';' | '>' | '<' | '=' | '(' | ')' | '{' | '}' | '[' | ']' | ','
+                            '|' | '&'
+                                | ';'
+                                | '>'
+                                | '<'
+                                | '='
+                                | '('
+                                | ')'
+                                | '{'
+                                | '}'
+                                | '['
+                                | ']'
+                                | ','
                         ) =>
                 {
                     start = index + character.len_utf8();
@@ -196,8 +203,17 @@ fn active_token_start(prefix: &str) -> usize {
 
 fn looks_like_spar(trimmed: &str) -> bool {
     const PREFIXES: &[&str] = &[
-        "var ", "var mut ", "function ", "private function ", "functionGroup ", "struct ",
-        "type ", "enum ", "if ", "for ", "export ",
+        "var ",
+        "var mut ",
+        "function ",
+        "private function ",
+        "functionGroup ",
+        "struct ",
+        "type ",
+        "enum ",
+        "if ",
+        "for ",
+        "export ",
     ];
     PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) || starts_with_call_syntax(trimmed)
 }
@@ -237,10 +253,17 @@ fn complete_function_parameters(
     let name_start = before_open
         .char_indices()
         .rev()
-        .find_map(|(index, ch)| (!(ch == '_' || ch.is_alphanumeric())).then_some(index + ch.len_utf8()))
+        .find_map(|(index, ch)| {
+            (!(ch == '_' || ch.is_alphanumeric())).then_some(index + ch.len_utf8())
+        })
         .unwrap_or(0);
     let function = &before_open[name_start..];
-    if function.is_empty() || !function.chars().next().is_some_and(|ch| ch == '_' || ch.is_alphabetic()) {
+    if function.is_empty()
+        || !function
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_alphabetic())
+    {
         return None;
     }
     let params = snapshot.spar_functions.get(function)?;
@@ -479,7 +502,10 @@ fn quote_completion(path: &str, existing_quote: Option<char>, is_dir: bool) -> S
                 format!("\"{}\"", escape_double_quoted(path))
             }
         }
-        _ if path.chars().any(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"')) => {
+        _ if path
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"')) =>
+        {
             if is_dir {
                 format!("\"{}", escape_double_quoted(path))
             } else {
@@ -536,10 +562,9 @@ mod tests {
     #[test]
     fn function_name_completion_offers_call_form_without_changing_bare_command_semantics() {
         let mut snapshot = CompletionSnapshot::fixture();
-        snapshot.spar_functions.insert(
-            "create".into(),
-            vec!["name".into(), "path".into()],
-        );
+        snapshot
+            .spar_functions
+            .insert("create".into(), vec!["name".into(), "path".into()]);
 
         let items = complete(
             &snapshot,
@@ -550,18 +575,16 @@ mod tests {
         );
 
         assert!(items.iter().any(|item| {
-            item.replacement == "create("
-                && item.description.as_deref() == Some("Spar function")
+            item.replacement == "create(" && item.description.as_deref() == Some("Spar function")
         }));
     }
 
     #[test]
     fn function_call_tab_completion_inserts_named_argument_labels() {
         let mut snapshot = CompletionSnapshot::fixture();
-        snapshot.spar_functions.insert(
-            "create".into(),
-            vec!["name".into(), "path".into()],
-        );
+        snapshot
+            .spar_functions
+            .insert("create".into(), vec!["name".into(), "path".into()]);
 
         let items = complete(
             &snapshot,
@@ -572,7 +595,7 @@ mod tests {
         );
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].replacement, "name: , path: " );
+        assert_eq!(items[0].replacement, "name: , path: ");
         assert_eq!(items[0].span, 7..7);
         assert_eq!(items[0].description.as_deref(), Some("function parameters"));
     }
@@ -580,10 +603,9 @@ mod tests {
     #[test]
     fn function_parameter_completion_filters_already_typed_prefix() {
         let mut snapshot = CompletionSnapshot::fixture();
-        snapshot.spar_functions.insert(
-            "create".into(),
-            vec!["name".into(), "path".into()],
-        );
+        snapshot
+            .spar_functions
+            .insert("create".into(), vec!["name".into(), "path".into()]);
 
         let items = complete(
             &snapshot,
@@ -600,8 +622,17 @@ mod tests {
     #[test]
     fn command_completion_combines_sources_and_deduplicates() {
         let snapshot = CompletionSnapshot::fixture();
-        let items = complete(&snapshot, CompletionRequest { line: "g", cursor: 1 });
-        let names = items.into_iter().map(|item| item.replacement).collect::<Vec<_>>();
+        let items = complete(
+            &snapshot,
+            CompletionRequest {
+                line: "g",
+                cursor: 1,
+            },
+        );
+        let names = items
+            .into_iter()
+            .map(|item| item.replacement)
+            .collect::<Vec<_>>();
         assert_eq!(names, vec!["git", "grep", "gs"]);
     }
 
@@ -681,7 +712,9 @@ mod tests {
 
         assert!(items.iter().any(|item| item.replacement == "Projects/"));
         assert!(items.iter().all(|item| item.replacement != "Project.toml"));
-        assert!(items.iter().all(|item| item.description.as_deref() == Some("directory")));
+        assert!(items
+            .iter()
+            .all(|item| item.description.as_deref() == Some("directory")));
     }
 
     #[test]
@@ -729,7 +762,6 @@ mod tests {
         assert!(items.iter().any(|item| item.replacement == "grep"));
     }
 
-
     #[test]
     fn command_position_can_offer_matching_directory_paths() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -750,5 +782,4 @@ mod tests {
 
         assert!(items.iter().any(|item| item.replacement == "Projects/"));
     }
-
 }

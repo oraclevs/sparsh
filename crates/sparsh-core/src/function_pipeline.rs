@@ -23,7 +23,7 @@ pub(crate) fn compose_function_pipeline(
         if is_explicit_call(stage) {
             let value = spar
                 .eval_transient_with_context(stage, cwd, environment)
-                .map_err(ShellError::Spar)?;
+                .map_err(|errors| ShellError::from_spar(errors, stage))?;
             let spar::InteractiveEvalResult::Value(spar::ConfigValue::Shell(plan)) = value else {
                 return Err(ShellError::Process {
                     message: "pipeline stage must evaluate to shell".into(),
@@ -34,7 +34,7 @@ pub(crate) fn compose_function_pipeline(
         } else {
             let plan = spar
                 .eval_shell_plan_with_context(stage, cwd, environment)
-                .map_err(ShellError::Spar)?;
+                .map_err(|errors| ShellError::from_spar(errors, stage))?;
             commands.extend(flatten_single_pipeline(plan)?);
         }
     }
@@ -85,11 +85,25 @@ fn split_top_level_pipeline(source: &str) -> Vec<&str> {
     let mut escaped = false;
 
     for (index, byte) in bytes.iter().copied().enumerate() {
-        if escaped { escaped = false; continue; }
-        if byte == b'\\' && !single { escaped = true; continue; }
-        if byte == b'\'' && !double { single = !single; continue; }
-        if byte == b'"' && !single { double = !double; continue; }
-        if single || double { continue; }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && !single {
+            escaped = true;
+            continue;
+        }
+        if byte == b'\'' && !double {
+            single = !single;
+            continue;
+        }
+        if byte == b'"' && !single {
+            double = !double;
+            continue;
+        }
+        if single || double {
+            continue;
+        }
         match byte {
             b'(' => paren += 1,
             b')' => paren = paren.saturating_sub(1),
@@ -123,7 +137,10 @@ mod tests {
 
     #[test]
     fn splits_only_top_level_single_pipes() {
-        assert_eq!(split_top_level_pipeline("emit(name: \"a|b\") | grep a || echo no"), ["emit(name: \"a|b\") ", " grep a || echo no"]);
+        assert_eq!(
+            split_top_level_pipeline("emit(name: \"a|b\") | grep a || echo no"),
+            ["emit(name: \"a|b\") ", " grep a || echo no"]
+        );
     }
 
     #[test]
@@ -175,7 +192,9 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.status(), 2);
-        assert!(error.to_string().contains("pipeline stage must evaluate to shell"));
+        assert!(error
+            .to_string()
+            .contains("pipeline stage must evaluate to shell"));
     }
 
     #[test]
@@ -191,13 +210,9 @@ mod tests {
             .unwrap();
         let environment: Vec<(OsString, OsString)> = Vec::new();
 
-        let error = compose_function_pipeline(
-            "emit() | cat",
-            &session,
-            Path::new("/"),
-            &environment,
-        )
-        .unwrap_err();
+        let error =
+            compose_function_pipeline("emit() | cat", &session, Path::new("/"), &environment)
+                .unwrap_err();
 
         assert_eq!(error.status(), 2);
         assert!(error

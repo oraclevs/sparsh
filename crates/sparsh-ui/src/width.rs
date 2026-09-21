@@ -84,14 +84,7 @@ pub(crate) fn fold_path(
 
     // Preserve the complete path whenever the first-line budget can hold it.
     // Parent shortening is a responsive fallback, not the default rendering.
-    let full = render_path(
-        &prefix,
-        &parents,
-        &last,
-        usize::MAX,
-        usize::MAX,
-        false,
-    );
+    let full = render_path(&prefix, &parents, &last, usize::MAX, usize::MAX, false);
     if display_width(&full) <= budget {
         return full;
     }
@@ -115,11 +108,17 @@ pub(crate) fn fold_path(
             }
             let overhead = display_width(&render_path(&prefix, &parents, "", 1, 0, true));
             last_width = budget.saturating_sub(overhead).max(1);
-            return truncate_display(&render_path(&prefix, &parents, &last, 1, last_width, true), budget);
+            return truncate_display(
+                &render_path(&prefix, &parents, &last, 1, last_width, true),
+                budget,
+            );
         }
         let overhead = display_width(&render_path(&prefix, &parents, "", 1, 0, false));
         last_width = budget.saturating_sub(overhead).max(1);
-        return truncate_display(&render_path(&prefix, &parents, &last, 1, last_width, false), budget);
+        return truncate_display(
+            &render_path(&prefix, &parents, &last, 1, last_width, false),
+            budget,
+        );
     }
 }
 
@@ -137,7 +136,11 @@ fn render_path(
         parts.push("…".into());
         parts.push(truncate_display(parents.last().unwrap(), parent_width));
     } else {
-        parts.extend(parents.iter().map(|part| truncate_display(part, parent_width)));
+        parts.extend(
+            parents
+                .iter()
+                .map(|part| truncate_display(part, parent_width)),
+        );
     }
     if !last.is_empty() {
         parts.push(truncate_display(last, last_width));
@@ -176,7 +179,8 @@ mod tests {
             2,
             24,
         );
-        assert!(path.starts_with("~/Pr/Sp/"));
+        // A parent limited to two columns keeps one letter plus the ellipsis.
+        assert!(path.starts_with("~/P…/S…/"), "{path}");
         assert!(path.ends_with("/src"));
         assert!(display_width(&path) <= 30);
     }
@@ -195,7 +199,13 @@ mod tests {
 
     #[test]
     fn unicode_truncation_stays_valid_and_in_budget() {
-        let path = fold_path(Path::new("/tmp/日本語/very-long-directory-name"), None, 12, 2, 20);
+        let path = fold_path(
+            Path::new("/tmp/日本語/very-long-directory-name"),
+            None,
+            12,
+            2,
+            20,
+        );
         assert!(display_width(&path) <= 12);
         assert!(std::str::from_utf8(path.as_bytes()).is_ok());
     }

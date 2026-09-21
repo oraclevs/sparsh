@@ -35,6 +35,11 @@ pub(crate) fn default_history_path(environment: &EnvironmentService) -> PathBuf 
     PathBuf::from(".sparsh_history")
 }
 
+pub trait HistoryAccess: Send + Sync {
+    fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String>;
+    fn clear(&self) -> Result<(), String>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,7 +49,10 @@ mod tests {
         let mut environment = EnvironmentService::from_pairs_for_validation();
         environment.set_os("HOME", "/home/occ");
         environment.set_os("XDG_STATE_HOME", "/state");
-        assert_eq!(default_history_path(&environment), PathBuf::from("/state/sparsh/history"));
+        assert_eq!(
+            default_history_path(&environment),
+            PathBuf::from("/state/sparsh/history")
+        );
     }
 
     #[test]
@@ -56,9 +64,4 @@ mod tests {
             PathBuf::from("/home/occ/.local/state/sparsh/history")
         );
     }
-}
-
-pub trait HistoryAccess: Send + Sync {
-    fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String>;
-    fn clear(&self) -> Result<(), String>;
 }

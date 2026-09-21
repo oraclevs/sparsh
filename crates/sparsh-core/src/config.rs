@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -60,7 +60,12 @@ pub struct PromptTimeConfig {
 }
 
 impl Default for PromptTimeConfig {
-    fn default() -> Self { Self { enabled: true, format: "HH:mm:ss".into() } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            format: "HH:mm:ss".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,29 +142,17 @@ impl EnvironmentVariableConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SparshConfig {
     pub aliases: Vec<(String, Vec<String>)>,
     pub environment: Vec<EnvironmentVariableConfig>,
     pub prompt: PromptConfig,
     pub history: HistoryConfig,
     pub completion: CompletionConfig,
+    pub keybindings: Vec<crate::KeybindingConfig>,
     /// Problems found in the `prompt` section. They never fail the load: bad
     /// settings fall back to defaults and are reported to the user instead.
     pub prompt_issues: Vec<crate::prompt_config::PromptIssue>,
-}
-
-impl Default for SparshConfig {
-    fn default() -> Self {
-        Self {
-            aliases: Vec::new(),
-            environment: Vec::new(),
-            prompt: PromptConfig::default(),
-            history: HistoryConfig::default(),
-            completion: CompletionConfig::default(),
-            prompt_issues: Vec::new(),
-        }
-    }
 }
 
 impl SparshConfig {
@@ -201,6 +194,7 @@ impl SparshConfig {
         if self.history.max_entries == 0 {
             return Err("history.maxEntries must be greater than zero".into());
         }
+        crate::keybinding::validate_keybindings(&self.keybindings)?;
         Ok(())
     }
 }
@@ -273,12 +267,11 @@ pub(crate) fn evaluate_source_in_session(
     Ok(config)
 }
 
+#[cfg(test)]
 pub fn load_candidate(path: &Path) -> Result<SparshConfig, ConfigLoadError> {
     let source = read_source(path)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut session = spar::Engine::default()
-        .with_base_dir(base_dir)
-        .session();
+    let mut session = spar::Engine::default().with_base_dir(base_dir).session();
     evaluate_source_in_session(&mut session, &source)
 }
 
@@ -293,7 +286,14 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
     ensure_allowed_fields(
         root,
         "config",
-        &["aliases", "environment", "prompt", "history", "completion"],
+        &[
+            "aliases",
+            "environment",
+            "prompt",
+            "history",
+            "completion",
+            "keybindings",
+        ],
     )?;
     let mut config = SparshConfig::default();
 
@@ -373,7 +373,8 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
                 .map_err(|_| "config.history.maxEntries must be greater than zero".to_string())?;
         }
         if let Some(value) = history.get("dedupeConsecutive") {
-            config.history.dedupe_consecutive = expect_bool(value, "config.history.dedupeConsecutive")?;
+            config.history.dedupe_consecutive =
+                expect_bool(value, "config.history.dedupeConsecutive")?;
         }
     }
 
@@ -385,26 +386,46 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
         }
     }
 
+    if let Some(value) = root.get("keybindings") {
+        config.keybindings = expect_list(value, "config.keybindings")?
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let path = format!("config.keybindings[{index}]");
+                let binding = expect_section(value, &path)?;
+                ensure_allowed_fields(binding, &path, &["key", "action"])?;
+                let key = expect_string(required(binding, "key", &path)?, &format!("{path}.key"))?;
+                let action = expect_string(
+                    required(binding, "action", &path)?,
+                    &format!("{path}.action"),
+                )?;
+                Ok(crate::KeybindingConfig {
+                    chord: crate::KeyChord::parse(&key)?,
+                    action: crate::KeybindingAction::parse(&action)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        crate::keybinding::validate_keybindings(&config.keybindings)?;
+    }
+
     Ok(config)
 }
 
 fn ensure_allowed_fields(
-    section: &HashMap<String, ConfigValue>,
+    section: &IndexMap<String, ConfigValue>,
     path: &str,
     allowed: &[&str],
 ) -> Result<(), String> {
     for field in section.keys() {
         if !allowed.iter().any(|candidate| *candidate == field) {
-            return Err(format!(
-                "unsupported Sparsh config field: {path}.{field}"
-            ));
+            return Err(format!("unsupported Sparsh config field: {path}.{field}"));
         }
     }
     Ok(())
 }
 
 fn required<'a>(
-    section: &'a HashMap<String, ConfigValue>,
+    section: &'a IndexMap<String, ConfigValue>,
     field: &str,
     path: &str,
 ) -> Result<&'a ConfigValue, String> {
@@ -413,10 +434,16 @@ fn required<'a>(
         .ok_or_else(|| format!("{path}.{field} is required"))
 }
 
-fn expect_section<'a>(value: &'a ConfigValue, path: &str) -> Result<&'a HashMap<String, ConfigValue>, String> {
+fn expect_section<'a>(
+    value: &'a ConfigValue,
+    path: &str,
+) -> Result<&'a IndexMap<String, ConfigValue>, String> {
     match value {
         ConfigValue::Section(value) => Ok(value),
-        other => Err(format!("{path} must be a section, got {}", other.type_name())),
+        other => Err(format!(
+            "{path} must be a section, got {}",
+            other.type_name()
+        )),
     }
 }
 
@@ -448,16 +475,6 @@ fn expect_int(value: &ConfigValue, path: &str) -> Result<i64, String> {
     }
 }
 
-fn expect_usize(value: &ConfigValue, path: &str) -> Result<usize, String> {
-    usize::try_from(expect_int(value, path)?)
-        .map_err(|_| format!("{path} must be a non-negative integer"))
-}
-
-fn expect_u64(value: &ConfigValue, path: &str) -> Result<u64, String> {
-    u64::try_from(expect_int(value, path)?)
-        .map_err(|_| format!("{path} must be a non-negative integer"))
-}
-
 fn string_list(value: &ConfigValue, path: &str) -> Result<Vec<String>, String> {
     expect_list(value, path)?
         .iter()
@@ -486,6 +503,7 @@ type SparshPromptTime {{ enabled?: bool; format?: str; }};
 type SparshPrompt {{ showStatus?: bool; showDuration?: bool; durationThresholdMs?: int; path?: SparshPromptPath; git?: SparshPromptGit; time?: SparshPromptTime; }};
 type SparshHistory {{ path?: str; maxEntries?: int; dedupeConsecutive?: bool; }};
 type SparshCompletion {{ enabled?: bool; }};
+type SparshKeybinding {{ key: str; action: str; }};
 struct Config {{
 {body}
 }};
@@ -518,7 +536,11 @@ struct Config {{
         )
         .unwrap();
         let config = load_candidate(&file).expect("prompt errors are soft");
-        assert_eq!(config.aliases.len(), 1, "aliases must survive a broken prompt");
+        assert_eq!(
+            config.aliases.len(),
+            1,
+            "aliases must survive a broken prompt"
+        );
         assert_eq!(
             config.prompt.path.parent_length,
             PromptPathConfig::default().parent_length
@@ -584,14 +606,21 @@ struct Config {{
     ];
     prompt: SparshPrompt = { showDuration: false; };
     history: SparshHistory = { path: "/tmp/sparsh-history"; maxEntries: 5000; dedupeConsecutive: false; };
-    completion: SparshCompletion = { enabled: false; };"#,
+    completion: SparshCompletion = { enabled: false; };
+    keybindings: List<SparshKeybinding> = [
+        { key: "ctrl+r"; action: "historySearch"; },
+        { key: "alt+e"; action: "openEditor"; }
+    ];"#,
             ),
         )
         .unwrap();
 
         let config = load_candidate(&path).unwrap();
 
-        assert_eq!(config.aliases, vec![("ll".into(), vec!["ls".into(), "-la".into()])]);
+        assert_eq!(
+            config.aliases,
+            vec![("ll".into(), vec!["ls".into(), "-la".into()])]
+        );
         assert_eq!(
             config.environment,
             vec![
@@ -605,10 +634,22 @@ struct Config {{
             ]
         );
         assert!(!config.prompt.show_duration);
-        assert_eq!(config.history.path, Some(PathBuf::from("/tmp/sparsh-history")));
+        assert_eq!(
+            config.history.path,
+            Some(PathBuf::from("/tmp/sparsh-history"))
+        );
         assert_eq!(config.history.max_entries, 5000);
         assert!(!config.history.dedupe_consecutive);
         assert!(!config.completion.enabled);
+        assert_eq!(config.keybindings.len(), 2);
+        assert_eq!(
+            config.keybindings[0].action,
+            crate::KeybindingAction::HistorySearch
+        );
+        assert_eq!(
+            config.keybindings[1].action,
+            crate::KeybindingAction::OpenEditor
+        );
     }
 
     #[test]
@@ -667,7 +708,9 @@ struct Config {{
         let path = dir.path().join("sparsh.spar");
         fs::write(
             &path,
-            wrapped_config(r#"    aliases: List<SparshAlias> = [{ name: "g"; command: ["git"]; }];"#),
+            wrapped_config(
+                r#"    aliases: List<SparshAlias> = [{ name: "g"; command: ["git"]; }];"#,
+            ),
         )
         .unwrap();
 
@@ -677,6 +720,7 @@ struct Config {{
         assert_eq!(config.prompt, PromptConfig::default());
         assert_eq!(config.history, HistoryConfig::default());
         assert_eq!(config.completion, CompletionConfig::default());
+        assert!(config.keybindings.is_empty());
     }
 
     #[test]
@@ -698,7 +742,10 @@ struct Config {{
             aliases: vec![("bad".into(), Vec::new())],
             ..SparshConfig::default()
         };
-        assert!(empty_alias.validate().unwrap_err().contains("requires a command"));
+        assert!(empty_alias
+            .validate()
+            .unwrap_err()
+            .contains("requires a command"));
 
         let zero_history = SparshConfig {
             history: HistoryConfig {
@@ -707,7 +754,10 @@ struct Config {{
             },
             ..SparshConfig::default()
         };
-        assert!(zero_history.validate().unwrap_err().contains("greater than zero"));
+        assert!(zero_history
+            .validate()
+            .unwrap_err()
+            .contains("greater than zero"));
     }
 
     #[test]
@@ -769,16 +819,19 @@ struct Config: SparshConfig {
         .unwrap();
 
         let config = load_candidate(&path).unwrap();
-        assert_eq!(config.aliases, vec![("ll".into(), vec!["eza".into(), "--icons".into()])]);
+        assert_eq!(
+            config.aliases,
+            vec![("ll".into(), vec!["eza".into(), "--icons".into()])]
+        );
         assert!(!config.prompt.show_duration);
         assert!(config.prompt.path.enabled);
     }
 
     #[test]
     fn startup_config_field_is_rejected_in_favor_of_startup_function() {
-        let value = ConfigValue::Section(HashMap::from([(
+        let value = ConfigValue::Section(IndexMap::from([(
             "startup".into(),
-            ConfigValue::Section(HashMap::from([(
+            ConfigValue::Section(IndexMap::from([(
                 "commands".into(),
                 ConfigValue::List(vec![ConfigValue::Str("nitch".into())]),
             )])),
@@ -822,9 +875,12 @@ struct Config: SparshConfig {
 
     #[test]
     fn config_rejects_fields_sparsh_does_not_implement() {
-        let value = ConfigValue::Section(HashMap::from([
+        let value = ConfigValue::Section(IndexMap::from([
             ("aliases".into(), ConfigValue::List(Vec::new())),
-            ("futureField".into(), ConfigValue::Str("not-supported".into())),
+            (
+                "futureField".into(),
+                ConfigValue::Str("not-supported".into()),
+            ),
         ]));
 
         let error = config_from_value(&value).unwrap_err();
@@ -842,5 +898,46 @@ struct Config: SparshConfig {
 
         let environment = EnvironmentService::from_pairs([("HOME", "/home/test")]);
         assert_eq!(environment.get("HOME"), Some(OsStr::new("/home/test")));
+    }
+    #[test]
+    fn keybinding_config_rejects_unknown_actions_invalid_keys_and_duplicates() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sparsh.spar");
+
+        fs::write(
+            &path,
+            wrapped_config(
+                r#"    keybindings: List<SparshKeybinding> = [{ key: "ctrl+r"; action: "runClosure"; }];"#,
+            ),
+        )
+        .unwrap();
+        let error = load_candidate(&path).unwrap_err().to_string();
+        assert!(error.contains("unknown keybinding action"), "{error}");
+
+        fs::write(
+            &path,
+            wrapped_config(
+                r#"    keybindings: List<SparshKeybinding> = [{ key: "meta+wat"; action: "historySearch"; }];"#,
+            ),
+        )
+        .unwrap();
+        let error = load_candidate(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("modifier") || error.contains("unsupported"),
+            "{error}"
+        );
+
+        fs::write(
+            &path,
+            wrapped_config(
+                r#"    keybindings: List<SparshKeybinding> = [
+        { key: "ctrl+r"; action: "historySearch"; },
+        { key: "control+r"; action: "clearScreen"; }
+    ];"#,
+            ),
+        )
+        .unwrap();
+        let error = load_candidate(&path).unwrap_err().to_string();
+        assert!(error.contains("duplicate keybinding chord"), "{error}");
     }
 }

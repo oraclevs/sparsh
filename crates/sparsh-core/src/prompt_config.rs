@@ -5,7 +5,8 @@
 //! each problem is recorded as a [`PromptIssue`] so the UI can show it while
 //! the shell (and the rest of the config) keeps working.
 
-use std::collections::{BTreeSet, HashMap};
+use indexmap::IndexMap;
+use std::collections::BTreeSet;
 
 use spar::ConfigValue;
 
@@ -37,7 +38,9 @@ pub struct SlotSpec {
 pub enum SlotConfig {
     Ok(SlotSpec),
     /// The slot's configuration is invalid; the UI shows a red marker.
-    Broken { message: String },
+    Broken {
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,7 +117,9 @@ impl RightPromptConfig {
         for slot in self.slots.iter().flatten() {
             let SlotConfig::Ok(spec) = slot else { continue };
             for piece in &spec.template.pieces {
-                let Piece::Widget(widget) = piece else { continue };
+                let Piece::Widget(widget) = piece else {
+                    continue;
+                };
                 needed.kinds.insert(widget.kind);
                 if widget.kind == WidgetKind::Disk {
                     for arg in widget.args.iter().filter(|arg| arg.starts_with('/')) {
@@ -174,7 +179,7 @@ pub fn legacy_time_format_to_strftime(format: &str) -> Option<&'static str> {
     }
 }
 
-type Section = HashMap<String, ConfigValue>;
+type Section = IndexMap<String, ConfigValue>;
 
 #[derive(Default)]
 struct Issues(Vec<PromptIssue>);
@@ -218,7 +223,13 @@ fn check_fields(section: &Section, path: &str, allowed: &[&str], issues: &mut Is
     }
 }
 
-fn get_bool(section: &Section, key: &str, parent: &str, default: bool, issues: &mut Issues) -> bool {
+fn get_bool(
+    section: &Section,
+    key: &str,
+    parent: &str,
+    default: bool,
+    issues: &mut Issues,
+) -> bool {
     match section.get(key) {
         None => default,
         Some(ConfigValue::Bool(value)) => *value,
@@ -286,7 +297,14 @@ pub(crate) fn parse_prompt(value: &ConfigValue) -> (PromptConfig, Vec<PromptIssu
     );
 
     prompt.show_status = get_bool(section, "showStatus", path, prompt.show_status, &mut issues);
-    if let Some(ms) = get_uint(section, "durationThresholdMs", path, 0, 86_400_000, &mut issues) {
+    if let Some(ms) = get_uint(
+        section,
+        "durationThresholdMs",
+        path,
+        0,
+        86_400_000,
+        &mut issues,
+    ) {
         prompt.duration_threshold_ms = ms;
     }
 
@@ -299,11 +317,25 @@ pub(crate) fn parse_prompt(value: &ConfigValue) -> (PromptConfig, Vec<PromptIssu
                 &["enabled", "parentLength", "maxLastLength", "maxWidth"],
                 &mut issues,
             );
-            prompt.path.enabled = get_bool(path_section, "enabled", path, prompt.path.enabled, &mut issues);
-            if let Some(v) = get_uint(path_section, "parentLength", path, 1, i64::MAX, &mut issues) {
+            prompt.path.enabled = get_bool(
+                path_section,
+                "enabled",
+                path,
+                prompt.path.enabled,
+                &mut issues,
+            );
+            if let Some(v) = get_uint(path_section, "parentLength", path, 1, i64::MAX, &mut issues)
+            {
                 prompt.path.parent_length = v as usize;
             }
-            if let Some(v) = get_uint(path_section, "maxLastLength", path, 1, i64::MAX, &mut issues) {
+            if let Some(v) = get_uint(
+                path_section,
+                "maxLastLength",
+                path,
+                1,
+                i64::MAX,
+                &mut issues,
+            ) {
                 prompt.path.max_last_length = v as usize;
             }
             if let Some(v) = get_uint(path_section, "maxWidth", path, 8, i64::MAX, &mut issues) {
@@ -332,7 +364,13 @@ pub(crate) fn parse_prompt(value: &ConfigValue) -> (PromptConfig, Vec<PromptIssu
             let g = &mut prompt.git;
             g.enabled = get_bool(git, "enabled", path, g.enabled, &mut issues);
             g.show_branch = get_bool(git, "showBranch", path, g.show_branch, &mut issues);
-            g.show_ahead_behind = get_bool(git, "showAheadBehind", path, g.show_ahead_behind, &mut issues);
+            g.show_ahead_behind = get_bool(
+                git,
+                "showAheadBehind",
+                path,
+                g.show_ahead_behind,
+                &mut issues,
+            );
             g.show_staged = get_bool(git, "showStaged", path, g.show_staged, &mut issues);
             g.show_modified = get_bool(git, "showModified", path, g.show_modified, &mut issues);
             g.show_untracked = get_bool(git, "showUntracked", path, g.show_untracked, &mut issues);
@@ -358,13 +396,20 @@ pub(crate) fn parse_prompt(value: &ConfigValue) -> (PromptConfig, Vec<PromptIssu
         }
         prompt.right = parse_right(right, &mut issues);
     } else {
-        prompt.show_duration = get_bool(section, "showDuration", path, prompt.show_duration, &mut issues);
+        prompt.show_duration = get_bool(
+            section,
+            "showDuration",
+            path,
+            prompt.show_duration,
+            &mut issues,
+        );
         let mut strftime = "%H:%M:%S";
         if let Some(value) = section.get("time") {
             let path = "config.prompt.time";
             if let Some(time) = as_section(value, path, &mut issues) {
                 check_fields(time, path, &["enabled", "format"], &mut issues);
-                prompt.time.enabled = get_bool(time, "enabled", path, prompt.time.enabled, &mut issues);
+                prompt.time.enabled =
+                    get_bool(time, "enabled", path, prompt.time.enabled, &mut issues);
                 match time.get("format") {
                     None => {}
                     Some(ConfigValue::Str(format)) => match legacy_time_format_to_strftime(format) {
@@ -386,11 +431,8 @@ pub(crate) fn parse_prompt(value: &ConfigValue) -> (PromptConfig, Vec<PromptIssu
                 }
             }
         }
-        prompt.right = RightPromptConfig::legacy_default(
-            prompt.show_duration,
-            prompt.time.enabled,
-            strftime,
-        );
+        prompt.right =
+            RightPromptConfig::legacy_default(prompt.show_duration, prompt.time.enabled, strftime);
     }
 
     (prompt, issues.0)
@@ -401,7 +443,14 @@ fn parse_right(section: &Section, issues: &mut Issues) -> RightPromptConfig {
     check_fields(
         section,
         path,
-        &["slot1", "slot2", "slot3", "separator", "glyphWidth", "thresholds"],
+        &[
+            "slot1",
+            "slot2",
+            "slot3",
+            "separator",
+            "glyphWidth",
+            "thresholds",
+        ],
         issues,
     );
     let mut right = RightPromptConfig {
@@ -441,11 +490,17 @@ fn parse_right(section: &Section, issues: &mut Issues) -> RightPromptConfig {
     if let Some(value) = section.get("thresholds") {
         let path = "config.prompt.right.thresholds";
         if let Some(thresholds) = as_section(value, path, issues) {
-            check_fields(thresholds, path, &["cpu", "ram", "disk", "battery", "load"], issues);
+            check_fields(
+                thresholds,
+                path,
+                &["cpu", "ram", "disk", "battery", "load"],
+                issues,
+            );
             right.thresholds.cpu = parse_threshold(thresholds, "cpu", path, 100, false, issues);
             right.thresholds.ram = parse_threshold(thresholds, "ram", path, 100, false, issues);
             right.thresholds.disk = parse_threshold(thresholds, "disk", path, 100, false, issues);
-            right.thresholds.battery = parse_threshold(thresholds, "battery", path, 100, true, issues);
+            right.thresholds.battery =
+                parse_threshold(thresholds, "battery", path, 100, true, issues);
             right.thresholds.load = parse_threshold(thresholds, "load", path, 1000, false, issues);
         }
     }
@@ -473,7 +528,11 @@ fn parse_threshold(
         critical: get_uint(section, "critical", &path, 0, max, issues).map(|v| v as u32),
     };
     if let (Some(warn), Some(critical)) = (threshold.warn, threshold.critical) {
-        let ordered = if lower_is_worse { warn > critical } else { warn < critical };
+        let ordered = if lower_is_worse {
+            warn > critical
+        } else {
+            warn < critical
+        };
         if !ordered {
             let expectation = if lower_is_worse {
                 "warn must be greater than critical (lower is worse)"
@@ -552,7 +611,9 @@ fn parse_slot(value: &ConfigValue, number: u8, issues: &mut Issues) -> SlotConfi
                         return broken(
                             issues,
                             format!("{path}.style"),
-                            format!("unknown style {shown} (expected bold, dim, italic or underline)"),
+                            format!(
+                                "unknown style {shown} (expected bold, dim, italic or underline)"
+                            ),
                         );
                     }
                 }
@@ -607,7 +668,10 @@ mod tests {
         assert_eq!(parse_color("#ff8800"), Ok(ColorSpec::Rgb(255, 136, 0)));
         assert_eq!(parse_color("208"), Ok(ColorSpec::Indexed(208)));
         let e = parse_color("teal").unwrap_err();
-        assert!(e.contains("unknown color 'teal'") && e.contains("#rrggbb"), "{e}");
+        assert!(
+            e.contains("unknown color 'teal'") && e.contains("#rrggbb"),
+            "{e}"
+        );
         assert!(parse_color("300").is_err());
         assert!(parse_color("#12345").is_err());
     }
@@ -640,7 +704,10 @@ mod tests {
         assert!(p.right.slots[0].is_none());
         match &p.right.slots[1] {
             Some(SlotConfig::Ok(spec)) => {
-                assert_eq!(spec.template, Template::parse("{time:%I:%M:%S %p}").unwrap())
+                assert_eq!(
+                    spec.template,
+                    Template::parse("{time:%I:%M:%S %p}").unwrap()
+                )
             }
             other => panic!("{other:?}"),
         }
@@ -698,11 +765,21 @@ mod tests {
             ]),
         )]));
         assert!(matches!(p.right.slots[0], Some(SlotConfig::Ok(_))));
-        assert!(matches!(&p.right.slots[1], Some(SlotConfig::Broken { message }) if message.contains("unknown widget 'cpuu'")));
-        assert!(matches!(&p.right.slots[2], Some(SlotConfig::Broken { message }) if message.contains("unknown color 'nope'")));
+        assert!(
+            matches!(&p.right.slots[1], Some(SlotConfig::Broken { message }) if message.contains("unknown widget 'cpuu'"))
+        );
+        assert!(
+            matches!(&p.right.slots[2], Some(SlotConfig::Broken { message }) if message.contains("unknown color 'nope'"))
+        );
         let paths: Vec<_> = issues.iter().map(|i| (i.path.as_str(), i.slot)).collect();
-        assert!(paths.contains(&("config.prompt.right.slot2.text", Some(2))), "{paths:?}");
-        assert!(paths.contains(&("config.prompt.right.slot3.color", Some(3))), "{paths:?}");
+        assert!(
+            paths.contains(&("config.prompt.right.slot2.text", Some(2))),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&("config.prompt.right.slot3.color", Some(3))),
+            "{paths:?}"
+        );
     }
 
     #[test]
@@ -754,7 +831,10 @@ mod tests {
             "config.prompt.right.thresholds.cpu.warn",
             "config.prompt.right.thresholds.battery",
         ] {
-            assert!(issues.iter().any(|i| i.path == path), "missing issue for {path}: {issues:?}");
+            assert!(
+                issues.iter().any(|i| i.path == path),
+                "missing issue for {path}: {issues:?}"
+            );
         }
     }
 
@@ -771,7 +851,9 @@ mod tests {
             i.message
         );
         let (_, issues) = parse_prompt(&sec(&[("shwoStatus", b(true))]));
-        assert!(issues.iter().any(|i| i.message.contains("did you mean 'showStatus'?")));
+        assert!(issues
+            .iter()
+            .any(|i| i.message.contains("did you mean 'showStatus'?")));
     }
 
     #[test]
@@ -793,7 +875,9 @@ mod tests {
         assert!(matches!(p.right.slots[0], Some(SlotConfig::Ok(_))));
         assert!(p.right.slots[1].is_none());
         assert!(
-            issues.iter().any(|i| i.message.contains("ignored because prompt.right is set")),
+            issues
+                .iter()
+                .any(|i| i.message.contains("ignored because prompt.right is set")),
             "{issues:?}"
         );
     }

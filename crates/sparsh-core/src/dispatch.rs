@@ -11,7 +11,12 @@ pub(crate) fn classify<'a>(input: &'a str, session: &spar::Session) -> Dispatch<
     if input.is_empty() {
         return Dispatch::Empty;
     }
-    if is_explicit_spar_construct(input) || is_explicit_call(input) {
+    if input.contains("|>")
+        || is_explicit_spar_construct(input)
+        || is_explicit_call(input)
+        || is_previous_value_access(input)
+        || input.starts_with("(await")
+    {
         return Dispatch::SparFragment(input);
     }
     if let Some((left, right)) = input.split_once('=') {
@@ -24,6 +29,13 @@ pub(crate) fn classify<'a>(input: &'a str, session: &spar::Session) -> Dispatch<
         return Dispatch::SparValue(input);
     }
     Dispatch::Command(input)
+}
+
+/// `_.field`, `_[0]`, `_.method()`: member access on the previous result.
+fn is_previous_value_access(input: &str) -> bool {
+    input
+        .strip_prefix('_')
+        .is_some_and(|rest| rest.starts_with(['.', '[']))
 }
 
 fn is_explicit_spar_construct(input: &str) -> bool {
@@ -40,13 +52,21 @@ fn is_explicit_spar_construct(input: &str) -> bool {
         "if",
         "for",
         "shell",
-        "exec",
+        "await",
     ];
     if KEYWORDS
         .iter()
         .any(|keyword| begins_with_word(input, keyword))
     {
         return true;
+    }
+    // `exec { ... }` / `exec shell { ... }` is Spar; `exec printf ok` is the
+    // process-replacing builtin and stays a command.
+    if begins_with_word(input, "exec") {
+        let rest = input["exec".len()..].trim_start();
+        if rest.starts_with('{') || begins_with_word(rest, "shell") {
+            return true;
+        }
     }
     if let Some(rest) = input.strip_prefix("private") {
         if rest.starts_with(char::is_whitespace) {
@@ -92,6 +112,78 @@ pub(crate) fn is_explicit_call(input: &str) -> bool {
     !name.is_empty() && name.split("::").all(is_identifier)
 }
 
+/// A real shell byte pipe feeding Spar's explicit decoder (`... | from FORMAT`).
+/// Quoted `| from` text is ignored so ordinary command arguments cannot be
+/// misclassified as mixed pipelines.
+pub(crate) fn is_mixed_byte_pipeline(input: &str) -> bool {
+    let input = input.trim();
+    if begins_with_word(input, "shell") {
+        return false;
+    }
+
+    let bytes = input.as_bytes();
+    let mut quote = None::<u8>;
+    let mut escaped = false;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+
+        if let Some(active_quote) = quote {
+            if active_quote == b'"' && byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'\'' | b'"' => {
+                quote = Some(byte);
+                index += 1;
+            }
+            b'\\' => {
+                escaped = true;
+                index += 1;
+            }
+            b'|' => {
+                let previous_is_pipe = index > 0 && bytes[index - 1] == b'|';
+                let next = bytes.get(index + 1).copied();
+                if previous_is_pipe || matches!(next, Some(b'|' | b'>')) {
+                    index += 1;
+                    continue;
+                }
+
+                let mut cursor = index + 1;
+                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                    cursor += 1;
+                }
+                let from_end = cursor.saturating_add(4);
+                if bytes.get(cursor..from_end) == Some(&b"from"[..])
+                    && bytes.get(from_end).is_none_or(u8::is_ascii_whitespace)
+                {
+                    return true;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    false
+}
+
+pub(crate) fn is_bare_identifier(value: &str) -> bool {
+    is_identifier(value)
+}
+
 fn is_identifier(value: &str) -> bool {
     let mut characters = value.chars();
     let Some(first) = characters.next() else {
@@ -135,9 +227,47 @@ mod tests {
             "Rust::build();",
             "shell { echo hello; }",
             "exec { printf hello; }",
+            "await get(url: \"http://localhost\")",
+            "(await get(url: \"http://localhost\")).json()",
+            "_.status",
+            "_[0]",
         ] {
             assert_eq!(classify(input, &session), Dispatch::SparFragment(input));
         }
+    }
+
+    #[test]
+    fn byte_pipe_into_from_is_a_mixed_shell_pipeline() {
+        assert!(super::is_mixed_byte_pipeline("printf x | from jsonl"));
+        assert!(super::is_mixed_byte_pipeline(
+            "printf x | from jsonl |> take(1) |> to jsonl"
+        ));
+        assert!(!super::is_mixed_byte_pipeline("users |> take(2)"));
+        assert!(!super::is_mixed_byte_pipeline("printf x | cat"));
+        assert!(!super::is_mixed_byte_pipeline("printf '%s\n' '| from csv'"));
+        assert!(!super::is_mixed_byte_pipeline("printf \"| from csv\""));
+        assert!(!super::is_mixed_byte_pipeline("printf x || from csv"));
+        assert!(super::is_mixed_byte_pipeline("printf 'a|b' | from csv"));
+        assert!(super::is_mixed_byte_pipeline(
+            "shellcheck report.txt | from lines"
+        ));
+        assert!(!super::is_mixed_byte_pipeline(
+            "shell { printf x | from jsonl |> to jsonl; }"
+        ));
+    }
+
+    #[test]
+    fn structured_value_pipelines_are_dispatched_to_spar() {
+        let session = spar::Engine::default().session();
+
+        assert_eq!(
+            classify("users |> take(2)", &session),
+            Dispatch::SparFragment("users |> take(2)")
+        );
+        assert_eq!(
+            classify("_ |> inspect()", &session),
+            Dispatch::SparFragment("_ |> inspect()")
+        );
     }
 
     #[test]

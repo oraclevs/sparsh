@@ -77,10 +77,7 @@ impl ShellServices {
 
         let mut alias_originals = BTreeMap::new();
         for (name, _) in &config.aliases {
-            alias_originals.insert(
-                name.clone(),
-                aliases.get(name).map(|words| words.to_vec()),
-            );
+            alias_originals.insert(name.clone(), aliases.get(name).map(|words| words.to_vec()));
         }
         aliases.define_many(&config.aliases)?;
 
@@ -179,7 +176,8 @@ impl ShellServices {
             }
         }
 
-        self.environment.replace_snapshot(current.into_iter().collect());
+        self.environment
+            .replace_snapshot(current.into_iter().collect());
         self.reload_path_from_environment();
         self.path.invalidate_executable_cache();
         self.resolver.clear();
@@ -205,7 +203,7 @@ fn apply_environment_config(
 
         // Validation guarantees prepend/append entries are PATH entries.
         let mut path = PathService::from_environment(environment.get("PATH"));
-        let home = environment.get("HOME").map(|value| Path::new(value));
+        let home = environment.get("HOME").map(Path::new);
 
         // PathService::prepend inserts at index 0. Expand and de-duplicate
         // first, then apply in reverse so the first configured entry retains
@@ -262,9 +260,7 @@ fn expand_environment_references(
             (&remainder[..end], end + 3)
         } else {
             let mut end = index + 1;
-            while end < bytes.len()
-                && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric())
-            {
+            while end < bytes.len() && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
                 end += 1;
             }
             if end == index + 1 {
@@ -334,7 +330,10 @@ mod tests {
             .unwrap();
 
         let first = SparshConfig {
-            aliases: vec![("keep".into(), vec!["configured".into()]), ("new".into(), vec!["true".into()])],
+            aliases: vec![
+                ("keep".into(), vec!["configured".into()]),
+                ("new".into(), vec!["true".into()]),
+            ],
             environment: vec![
                 EnvironmentVariableConfig::value("KEEP_ENV", "configured"),
                 EnvironmentVariableConfig::value("NEW_ENV", "one"),
@@ -444,7 +443,10 @@ mod tests {
     #[test]
     fn invalid_candidate_does_not_mutate_active_state() {
         let mut services = ShellServices::from_process().unwrap();
-        services.aliases.define("keep", vec!["true".into()]).unwrap();
+        services
+            .aliases
+            .define("keep", vec!["true".into()])
+            .unwrap();
         let before_path = services.path.directories().to_vec();
 
         let invalid = SparshConfig {

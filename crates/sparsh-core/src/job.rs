@@ -68,7 +68,11 @@ impl JobRecord {
     }
 
     fn recompute_state(&mut self) -> JobState {
-        let state = if self.processes.iter().all(|process| process.state.is_terminal()) {
+        let state = if self
+            .processes
+            .iter()
+            .all(|process| process.state.is_terminal())
+        {
             let code = self
                 .processes
                 .iter()
@@ -163,12 +167,6 @@ impl JobTable {
         self.jobs.get(&id).map(|job| job.pgid)
     }
 
-    pub(crate) fn pids(&self, id: JobId) -> Option<Vec<u32>> {
-        self.jobs
-            .get(&id)
-            .map(|job| job.processes.iter().map(|process| process.pid).collect())
-    }
-
     pub(crate) fn all_owned_pids(&self) -> Vec<u32> {
         self.jobs
             .values()
@@ -194,7 +192,10 @@ impl JobTable {
         let (previous, current, command_text) = {
             let job = self.jobs.get_mut(&id)?;
             let previous = job.state.clone();
-            let process = job.processes.iter_mut().find(|process| process.pid == pid)?;
+            let process = job
+                .processes
+                .iter_mut()
+                .find(|process| process.pid == pid)?;
             process.state = match state {
                 WaitState::Continued { .. } => ProcessRecordState::Running,
                 WaitState::Stopped { signal, .. } => ProcessRecordState::Stopped(signal),
@@ -242,10 +243,8 @@ impl JobTable {
             loop {
                 match spar_process::wait_pid(pid, true) {
                     Ok(Some(state)) => {
-                        let terminal = matches!(
-                            state,
-                            WaitState::Exited { .. } | WaitState::Signaled { .. }
-                        );
+                        let terminal =
+                            matches!(state, WaitState::Exited { .. } | WaitState::Signaled { .. });
                         self.apply_wait_state(state);
                         if terminal {
                             break;
@@ -303,9 +302,9 @@ impl JobTable {
         }
 
         let lease = if use_terminal && spar_process::stdin_is_tty() {
-            let pgid = self
-                .pgid(id)
-                .ok_or_else(|| std::io::Error::other("job disappeared before foreground handoff"))?;
+            let pgid = self.pgid(id).ok_or_else(|| {
+                std::io::Error::other("job disappeared before foreground handoff")
+            })?;
             Some(JobTerminalLease::acquire(pgid)?)
         } else {
             None
@@ -348,18 +347,6 @@ impl JobTable {
 
     pub(crate) fn take_notifications(&mut self) -> Vec<String> {
         self.notifications.drain(..).collect()
-    }
-
-    pub(crate) fn clear_done(&mut self) {
-        let done = self
-            .jobs
-            .iter()
-            .filter_map(|(id, job)| matches!(&job.state, JobState::Done(_)).then_some(*id))
-            .collect::<Vec<_>>();
-        for id in done {
-            self.jobs.remove(&id);
-            self.order.retain(|candidate| *candidate != id);
-        }
     }
 }
 

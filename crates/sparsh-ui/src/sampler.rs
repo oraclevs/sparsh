@@ -112,8 +112,9 @@ pub(crate) fn parse_meminfo(text: &str) -> Option<MemUsage> {
             .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
     };
     let total = kb("MemTotal")?;
-    let avail = kb("MemAvailable")
-        .or_else(|| Some(kb("MemFree")? + kb("Buffers").unwrap_or(0) + kb("Cached").unwrap_or(0)))?;
+    let avail = kb("MemAvailable").or_else(|| {
+        Some(kb("MemFree")? + kb("Buffers").unwrap_or(0) + kb("Cached").unwrap_or(0))
+    })?;
     Some(MemUsage {
         total: total * 1024,
         avail: avail * 1024,
@@ -223,7 +224,10 @@ fn current_host() -> Option<String> {
     if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
         return None;
     }
-    let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+    let end = buffer
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(buffer.len());
     let host = String::from_utf8_lossy(&buffer[..end]).into_owned();
     (!host.is_empty()).then_some(host)
 }
@@ -311,7 +315,13 @@ mod tests {
     #[test]
     fn parses_proc_stat_and_computes_busy_delta() {
         let a = parse_proc_stat("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 1 1 1\n").unwrap();
-        assert_eq!(a, CpuTimes { total: 1000, idle: 850 });
+        assert_eq!(
+            a,
+            CpuTimes {
+                total: 1000,
+                idle: 850
+            }
+        );
         assert!((cpu_busy_percent(None, a).unwrap() - 15.0).abs() < 1e-9);
         let b = parse_proc_stat("cpu  150 0 100 800 50 0 0 0 0 0\n").unwrap();
         assert!((cpu_busy_percent(Some(a), b).unwrap() - 100.0).abs() < 1e-9);
@@ -332,8 +342,9 @@ mod tests {
                 avail: 8_000_000 * 1024
             }
         );
-        let f = parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 150 kB\n")
-            .unwrap();
+        let f =
+            parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 150 kB\n")
+                .unwrap();
         assert_eq!(
             f,
             MemUsage {
@@ -346,7 +357,10 @@ mod tests {
 
     #[test]
     fn parses_loadavg_and_uptime() {
-        assert_eq!(parse_loadavg("0.52 0.61 0.70 1/512 12345\n"), Some([0.52, 0.61, 0.70]));
+        assert_eq!(
+            parse_loadavg("0.52 0.61 0.70 1/512 12345\n"),
+            Some([0.52, 0.61, 0.70])
+        );
         assert_eq!(parse_uptime("12345.67 9999.00\n"), Some(12345));
         assert!(parse_loadavg("x").is_none() && parse_uptime("").is_none());
     }
@@ -368,9 +382,15 @@ mod tests {
             })
         );
         std::fs::write(bat.join("status"), "Discharging\n").unwrap();
-        assert_eq!(read_battery(dir.path()).unwrap().state, BatteryState::Discharging);
+        assert_eq!(
+            read_battery(dir.path()).unwrap().state,
+            BatteryState::Discharging
+        );
         std::fs::write(bat.join("status"), "Not charging\n").unwrap();
-        assert_eq!(read_battery(dir.path()).unwrap().state, BatteryState::Unknown);
+        assert_eq!(
+            read_battery(dir.path()).unwrap().state,
+            BatteryState::Unknown
+        );
     }
 
     #[test]
@@ -392,10 +412,20 @@ mod tests {
         needed.kinds.insert(WidgetKind::Cpu);
         let s1 = sampler.sample(&needed, root.path());
         assert!((s1.cpu_busy.unwrap() - 15.0).abs() < 1e-9);
-        assert!(s1.ram.is_none() && s1.load.is_none(), "unneeded widgets must not be sampled");
+        assert!(
+            s1.ram.is_none() && s1.load.is_none(),
+            "unneeded widgets must not be sampled"
+        );
         let s2 = sampler.sample(&needed, root.path());
-        assert!((s2.cpu_busy.unwrap() - 15.0).abs() < 1e-9, "zero delta reuses the last value");
-        std::fs::write(root.path().join("stat"), "cpu  150 0 100 800 50 0 0 0 0 0\n").unwrap();
+        assert!(
+            (s2.cpu_busy.unwrap() - 15.0).abs() < 1e-9,
+            "zero delta reuses the last value"
+        );
+        std::fs::write(
+            root.path().join("stat"),
+            "cpu  150 0 100 800 50 0 0 0 0 0\n",
+        )
+        .unwrap();
         let s3 = sampler.sample(&needed, root.path());
         assert!((s3.cpu_busy.unwrap() - 100.0).abs() < 1e-9);
     }

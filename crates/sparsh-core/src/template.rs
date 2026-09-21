@@ -143,7 +143,10 @@ fn parse_placeholder(body: &str) -> Result<WidgetRef, String> {
         let names: Vec<&str> = WidgetKind::ALL.iter().map(|kind| kind.name()).collect();
         return Err(match suggest(name, &names) {
             Some(close) => format!("unknown widget '{name}'; did you mean '{close}'?"),
-            None => format!("unknown widget '{name}' (expected one of: {})", names.join(", ")),
+            None => format!(
+                "unknown widget '{name}' (expected one of: {})",
+                names.join(", ")
+            ),
         });
     };
 
@@ -169,7 +172,9 @@ fn validate_args(kind: WidgetKind, args: &[String]) -> Result<(), String> {
                     return Err(format!("widget '{name}' has an empty format"));
                 }
                 if format.chars().any(char::is_control) {
-                    return Err(format!("widget '{name}' format contains a control character"));
+                    return Err(format!(
+                        "widget '{name}' format contains a control character"
+                    ));
                 }
             }
         }
@@ -207,7 +212,10 @@ fn validate_args(kind: WidgetKind, args: &[String]) -> Result<(), String> {
                 } else if SIZE_MODES.contains(&arg.as_str()) {
                     modes += 1;
                 } else {
-                    return Err(unknown_mode(arg, "free, used, avail, total or an absolute path"));
+                    return Err(unknown_mode(
+                        arg,
+                        "free, used, avail, total or an absolute path",
+                    ));
                 }
             }
             if modes > 1 {
@@ -298,7 +306,12 @@ mod tests {
         let t = Template::parse("  {cpu}% {{x}} {time:%H:%M}").unwrap();
         assert_eq!(
             t.pieces,
-            vec![lit("  "), w(WidgetKind::Cpu, &[]), lit("% {x} "), w(WidgetKind::Time, &["%H:%M"])]
+            vec![
+                lit("  "),
+                w(WidgetKind::Cpu, &[]),
+                lit("% {x} "),
+                w(WidgetKind::Time, &["%H:%M"])
+            ]
         );
         assert!(t.has_widgets());
         assert!(!Template::parse("just text \u{f303}").unwrap().has_widgets());
@@ -319,16 +332,28 @@ mod tests {
     #[test]
     fn unknown_widget_suggests_the_closest_name() {
         let e = Template::parse("{cpuu}").unwrap_err();
-        assert!(e.contains("unknown widget 'cpuu'") && e.contains("did you mean 'cpu'?"), "{e}");
+        assert!(
+            e.contains("unknown widget 'cpuu'") && e.contains("did you mean 'cpu'?"),
+            "{e}"
+        );
         let e = Template::parse("{zzzzzz}").unwrap_err();
-        assert!(e.contains("unknown widget 'zzzzzz'") && !e.contains("did you mean"), "{e}");
+        assert!(
+            e.contains("unknown widget 'zzzzzz'") && !e.contains("did you mean"),
+            "{e}"
+        );
     }
 
     #[test]
     fn structural_errors_are_reported() {
-        assert!(Template::parse("{cpu").unwrap_err().contains("unclosed '{'"));
-        assert!(Template::parse("cpu}").unwrap_err().contains("unmatched '}'"));
-        assert!(Template::parse("{}").unwrap_err().contains("empty placeholder"));
+        assert!(Template::parse("{cpu")
+            .unwrap_err()
+            .contains("unclosed '{'"));
+        assert!(Template::parse("cpu}")
+            .unwrap_err()
+            .contains("unmatched '}'"));
+        assert!(Template::parse("{}")
+            .unwrap_err()
+            .contains("empty placeholder"));
     }
 
     #[test]
@@ -337,20 +362,33 @@ mod tests {
         assert!(Template::parse("{ram:bogus}")
             .unwrap_err()
             .contains("unknown mode 'bogus' for widget 'ram'"));
-        assert!(Template::parse("{duration:x}").unwrap_err().contains("does not take arguments"));
-        assert!(Template::parse("{disk:free,used}").unwrap_err().contains("at most one mode"));
-        assert!(Template::parse("{disk:/a,/b}").unwrap_err().contains("at most one path"));
+        assert!(Template::parse("{duration:x}")
+            .unwrap_err()
+            .contains("does not take arguments"));
+        assert!(Template::parse("{disk:free,used}")
+            .unwrap_err()
+            .contains("at most one mode"));
+        assert!(Template::parse("{disk:/a,/b}")
+            .unwrap_err()
+            .contains("at most one path"));
         assert!(Template::parse("{battery:icon}").is_ok());
         assert!(Template::parse("{load:5}").is_ok());
         assert!(Template::parse("{load:7}").is_err());
         assert!(Template::parse("{host:full}").is_ok());
-        assert!(Template::parse("{time:}").unwrap_err().contains("empty format"));
-        assert!(Template::parse("{time:a\u{7}b}").unwrap_err().contains("control character"));
+        assert!(Template::parse("{time:}")
+            .unwrap_err()
+            .contains("empty format"));
+        assert!(Template::parse("{time:a\u{7}b}")
+            .unwrap_err()
+            .contains("control character"));
     }
 
     #[test]
     fn suggest_finds_close_names_only() {
-        assert_eq!(suggest("batery", &["battery", "cpu"]), Some("battery".into()));
+        assert_eq!(
+            suggest("batery", &["battery", "cpu"]),
+            Some("battery".into())
+        );
         assert_eq!(suggest("xyz", &["battery", "cpu"]), None);
     }
 }

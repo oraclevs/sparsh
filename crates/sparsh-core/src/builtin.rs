@@ -744,7 +744,10 @@ fn bg(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) ->
         .resume(id)
         .map_err(io_error)?
         .ok_or_else(|| error(format!("bg: no such job: %{}", id.0)))?;
-    Ok(success(Some(format!("[{}] {}\n", id.0, snapshot.command_text))))
+    Ok(success(Some(format!(
+        "[{}] {}\n",
+        id.0, snapshot.command_text
+    ))))
 }
 
 fn wait(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
@@ -788,7 +791,10 @@ fn kill(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) 
 
     let mut signal = spar_process::signal_number("TERM").unwrap_or(15);
     let mut first_target = 0usize;
-    if let Some(option) = args.first().filter(|value| value.starts_with('-') && value.len() > 1) {
+    if let Some(option) = args
+        .first()
+        .filter(|value| value.starts_with('-') && value.len() > 1)
+    {
         signal = spar_process::signal_number(&option[1..])
             .ok_or_else(|| error(format!("kill: unknown signal: {}", &option[1..])))?;
         first_target = 1;
@@ -819,7 +825,10 @@ fn kill(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) 
     Ok(success(None))
 }
 
-fn parse_optional_job_target(args: &[String], usage: &str) -> Result<Option<crate::job::JobId>, BuiltinError> {
+fn parse_optional_job_target(
+    args: &[String],
+    usage: &str,
+) -> Result<Option<crate::job::JobId>, BuiltinError> {
     if args.len() > 1 {
         return Err(usage_error(usage));
     }
@@ -935,10 +944,41 @@ mod tests {
     fn registry_contains_service_builtins_with_execution_metadata() {
         let registry = BuiltinRegistry::new();
         let expected = [
-            "cd", "pwd", "pushd", "popd", "dirs", "alias", "unalias", "export", "unset", "path",
-            "hash", "type", "which", "command", "builtin", "jobs", "fg", "bg", "wait",
-            "disown", "kill", "history", "echo", "printf", "read", "umask", "ulimit", "help",
-            "exec", "logout", "source", "deactivate", "repl", "reload", "exit",
+            "cd",
+            "pwd",
+            "pushd",
+            "popd",
+            "dirs",
+            "alias",
+            "unalias",
+            "export",
+            "unset",
+            "path",
+            "hash",
+            "type",
+            "which",
+            "command",
+            "builtin",
+            "jobs",
+            "fg",
+            "bg",
+            "wait",
+            "disown",
+            "kill",
+            "history",
+            "echo",
+            "printf",
+            "read",
+            "umask",
+            "ulimit",
+            "help",
+            "exec",
+            "logout",
+            "source",
+            "deactivate",
+            "repl",
+            "reload",
+            "exit",
         ];
         for name in expected {
             assert!(registry.find(name).is_some(), "missing {name}");

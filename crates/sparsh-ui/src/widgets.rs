@@ -30,7 +30,10 @@ pub struct RenderedSlot {
 
 impl RenderedSlot {
     pub fn plain(&self) -> String {
-        self.pieces.iter().map(|piece| piece.text.as_str()).collect()
+        self.pieces
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect()
     }
 }
 
@@ -41,9 +44,9 @@ pub struct LocalTime {
 
 impl LocalTime {
     pub fn now() -> Option<LocalTime> {
-        let mut now = unsafe { libc::time(std::ptr::null_mut()) };
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        if unsafe { libc::localtime_r(&mut now, &mut tm) }.is_null() {
+        if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
             return None;
         }
         Some(LocalTime { tm })
@@ -51,7 +54,14 @@ impl LocalTime {
 
     /// Builds a time from UTC calendar parts (weekday and day-of-year are
     /// computed). Meant for tests that need a fixed, timezone-independent time.
-    pub fn from_utc_parts(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> LocalTime {
+    pub fn from_utc_parts(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        min: u32,
+        sec: u32,
+    ) -> LocalTime {
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         tm.tm_year = year - 1900;
         tm.tm_mon = month as i32 - 1;
@@ -71,7 +81,12 @@ impl LocalTime {
         let format = std::ffi::CString::new(strftime).ok()?;
         let mut buffer = [0u8; 256];
         let written = unsafe {
-            libc::strftime(buffer.as_mut_ptr().cast(), buffer.len(), format.as_ptr(), &self.tm)
+            libc::strftime(
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                format.as_ptr(),
+                &self.tm,
+            )
         };
         if written == 0 {
             return None;
@@ -161,7 +176,11 @@ fn disk_used_percent(disk: &DiskUsage) -> f64 {
     }
 }
 
-fn render_widget(widget: &WidgetRef, inputs: &WidgetInputs, thresholds: &Thresholds) -> (String, Level) {
+fn render_widget(
+    widget: &WidgetRef,
+    inputs: &WidgetInputs,
+    thresholds: &Thresholds,
+) -> (String, Level) {
     let system = inputs.system;
     let args = &widget.args;
     let normal = |text: String| (text, Level::Normal);
@@ -169,9 +188,19 @@ fn render_widget(widget: &WidgetRef, inputs: &WidgetInputs, thresholds: &Thresho
 
     match widget.kind {
         WidgetKind::Time | WidgetKind::Date => {
-            let default = if widget.kind == WidgetKind::Time { "%H:%M:%S" } else { "%Y-%m-%d" };
+            let default = if widget.kind == WidgetKind::Time {
+                "%H:%M:%S"
+            } else {
+                "%Y-%m-%d"
+            };
             let format = args.first().map_or(default, String::as_str);
-            normal(inputs.now.as_ref().and_then(|now| now.format(format)).unwrap_or_default())
+            normal(
+                inputs
+                    .now
+                    .as_ref()
+                    .and_then(|now| now.format(format))
+                    .unwrap_or_default(),
+            )
         }
         WidgetKind::Duration => match inputs.last_duration {
             Some(duration) if duration >= inputs.duration_threshold => {
@@ -180,13 +209,24 @@ fn render_widget(widget: &WidgetRef, inputs: &WidgetInputs, thresholds: &Thresho
             _ => empty(),
         },
         WidgetKind::Cpu => {
-            let Some(busy) = system.cpu_busy else { return empty() };
+            let Some(busy) = system.cpu_busy else {
+                return empty();
+            };
             let used = percent(busy);
-            let shown = if args.first().is_some_and(|arg| arg == "free") { 100 - used } else { used };
-            (shown.to_string(), level_high(busy, thresholds.cpu, 70.0, 90.0))
+            let shown = if args.first().is_some_and(|arg| arg == "free") {
+                100 - used
+            } else {
+                used
+            };
+            (
+                shown.to_string(),
+                level_high(busy, thresholds.cpu, 70.0, 90.0),
+            )
         }
         WidgetKind::Ram => {
-            let Some(memory) = system.ram else { return empty() };
+            let Some(memory) = system.ram else {
+                return empty();
+            };
             if memory.total == 0 {
                 return empty();
             }
@@ -220,7 +260,9 @@ fn render_widget(widget: &WidgetRef, inputs: &WidgetInputs, thresholds: &Thresho
             (text, level)
         }
         WidgetKind::Battery => {
-            let Some(battery) = system.battery else { return empty() };
+            let Some(battery) = system.battery else {
+                return empty();
+            };
             let level = if matches!(battery.state, BatteryState::Charging | BatteryState::Full) {
                 Level::Normal
             } else {
@@ -253,7 +295,9 @@ fn render_widget(widget: &WidgetRef, inputs: &WidgetInputs, thresholds: &Thresho
             (text, level)
         }
         WidgetKind::Load => {
-            let Some(load) = system.load else { return empty() };
+            let Some(load) = system.load else {
+                return empty();
+            };
             let index = match args.first().map(String::as_str) {
                 Some("5") => 1,
                 Some("15") => 2,
@@ -296,7 +340,11 @@ pub fn format_duration(duration: Duration) -> String {
 }
 
 pub fn format_uptime(seconds: u64) -> String {
-    let (days, hours, minutes) = (seconds / 86_400, seconds % 86_400 / 3_600, seconds % 3_600 / 60);
+    let (days, hours, minutes) = (
+        seconds / 86_400,
+        seconds % 86_400 / 3_600,
+        seconds % 3_600 / 60,
+    );
     if days > 0 {
         format!("{days}d {hours}h")
     } else if hours > 0 {
@@ -325,8 +373,17 @@ pub fn human_size(bytes: u64) -> String {
 /// charging glyph.
 pub fn battery_icon(percent: u8, charging: bool) -> char {
     const LEVELS: [char; 11] = [
-        '\u{f008e}', '\u{f007a}', '\u{f007b}', '\u{f007c}', '\u{f007d}', '\u{f007e}',
-        '\u{f007f}', '\u{f0080}', '\u{f0081}', '\u{f0082}', '\u{f0079}',
+        '\u{f008e}',
+        '\u{f007a}',
+        '\u{f007b}',
+        '\u{f007c}',
+        '\u{f007d}',
+        '\u{f007e}',
+        '\u{f007f}',
+        '\u{f0080}',
+        '\u{f0081}',
+        '\u{f0082}',
+        '\u{f0079}',
     ];
     if charging {
         '\u{f0084}'
@@ -351,8 +408,12 @@ mod tests {
     }
 
     fn render_with(src: &str, inputs: &WidgetInputs) -> Option<String> {
-        render_slot(&Template::parse(src).unwrap(), inputs, &Thresholds::default())
-            .map(|slot| slot.plain())
+        render_slot(
+            &Template::parse(src).unwrap(),
+            inputs,
+            &Thresholds::default(),
+        )
+        .map(|slot| slot.plain())
     }
 
     fn render(src: &str, system: &SystemSnapshot) -> Option<String> {
@@ -360,13 +421,17 @@ mod tests {
     }
 
     fn level(src: &str, system: &SystemSnapshot, thresholds: &Thresholds) -> Level {
-        render_slot(&Template::parse(src).unwrap(), &inputs_with(system), thresholds)
-            .unwrap()
-            .pieces
-            .iter()
-            .find(|piece| piece.kind.is_some())
-            .unwrap()
-            .level
+        render_slot(
+            &Template::parse(src).unwrap(),
+            &inputs_with(system),
+            thresholds,
+        )
+        .unwrap()
+        .pieces
+        .iter()
+        .find(|piece| piece.kind.is_some())
+        .unwrap()
+        .level
     }
 
     #[test]
@@ -384,8 +449,15 @@ mod tests {
     fn percent_widgets_print_bare_numbers_and_modes() {
         let s = SystemSnapshot {
             cpu_busy: Some(12.4),
-            ram: Some(MemUsage { total: 16 << 30, avail: 4 << 30 }),
-            disk_cwd: Some(DiskUsage { total: 100 << 30, avail: 5 << 30, used: 95 << 30 }),
+            ram: Some(MemUsage {
+                total: 16 << 30,
+                avail: 4 << 30,
+            }),
+            disk_cwd: Some(DiskUsage {
+                total: 100 << 30,
+                avail: 5 << 30,
+                used: 95 << 30,
+            }),
             ..Default::default()
         };
         assert_eq!(render("{cpu}%", &s).unwrap(), "12%");
@@ -402,7 +474,14 @@ mod tests {
     #[test]
     fn explicit_disk_path_uses_its_own_reading() {
         let mut s = SystemSnapshot::default();
-        s.disk_paths.insert("/home".into(), DiskUsage { total: 200, avail: 50, used: 150 });
+        s.disk_paths.insert(
+            "/home".into(),
+            DiskUsage {
+                total: 200,
+                avail: 50,
+                used: 150,
+            },
+        );
         assert_eq!(render("{disk:/home}%", &s).unwrap(), "75%");
         assert!(render("{disk:/nowhere}%", &s).is_none());
     }
@@ -422,14 +501,20 @@ mod tests {
     #[test]
     fn battery_variants() {
         let mut s = SystemSnapshot {
-            battery: Some(BatteryReading { percent: 83, state: BatteryState::Charging }),
+            battery: Some(BatteryReading {
+                percent: 83,
+                state: BatteryState::Charging,
+            }),
             ..Default::default()
         };
         assert_eq!(render("{battery}%", &s).unwrap(), "83%");
         assert_eq!(render("{battery:state}", &s).unwrap(), "charging");
         assert_eq!(render("{battery:icon}", &s).unwrap().chars().count(), 1);
         s.battery = None;
-        assert!(render("{battery}%", &s).is_none(), "no battery hides the slot");
+        assert!(
+            render("{battery}%", &s).is_none(),
+            "no battery hides the slot"
+        );
     }
 
     #[test]
@@ -466,8 +551,15 @@ mod tests {
         let t = Thresholds::default();
         let s = SystemSnapshot {
             cpu_busy: Some(95.0),
-            disk_cwd: Some(DiskUsage { total: 100, avail: 4, used: 96 }),
-            battery: Some(BatteryReading { percent: 10, state: BatteryState::Discharging }),
+            disk_cwd: Some(DiskUsage {
+                total: 100,
+                avail: 4,
+                used: 96,
+            }),
+            battery: Some(BatteryReading {
+                percent: 10,
+                state: BatteryState::Discharging,
+            }),
             cores: 4,
             ..Default::default()
         };
@@ -475,18 +567,32 @@ mod tests {
         assert_eq!(level("{disk:free}", &s, &t), Level::Critical);
         assert_eq!(level("{battery}", &s, &t), Level::Critical);
         let mut charging = s.clone();
-        charging.battery = Some(BatteryReading { percent: 10, state: BatteryState::Charging });
+        charging.battery = Some(BatteryReading {
+            percent: 10,
+            state: BatteryState::Charging,
+        });
         assert_eq!(level("{battery}", &charging, &t), Level::Normal);
-        let warn = SystemSnapshot { cpu_busy: Some(75.0), ..Default::default() };
+        let warn = SystemSnapshot {
+            cpu_busy: Some(75.0),
+            ..Default::default()
+        };
         assert_eq!(level("{cpu}", &warn, &t), Level::Warn);
-        let calm = SystemSnapshot { cpu_busy: Some(10.0), ..Default::default() };
+        let calm = SystemSnapshot {
+            cpu_busy: Some(10.0),
+            ..Default::default()
+        };
         assert_eq!(level("{cpu}", &calm, &t), Level::Normal);
     }
 
     #[test]
     fn custom_thresholds_and_load_defaults_scale_with_cores() {
-        let mut t = Thresholds::default();
-        t.cpu = Threshold { warn: Some(10), critical: Some(20) };
+        let t = Thresholds {
+            cpu: Threshold {
+                warn: Some(10),
+                critical: Some(20),
+            },
+            ..Thresholds::default()
+        };
         let s = SystemSnapshot {
             cpu_busy: Some(15.0),
             load: Some([9.0, 0.0, 0.0]),
@@ -500,7 +606,10 @@ mod tests {
 
     #[test]
     fn control_characters_never_reach_the_output() {
-        let s = SystemSnapshot { user: Some("a\nb\u{1b}c".into()), ..Default::default() };
+        let s = SystemSnapshot {
+            user: Some("a\nb\u{1b}c".into()),
+            ..Default::default()
+        };
         assert_eq!(render("{user}", &s).unwrap(), "abc");
     }
 

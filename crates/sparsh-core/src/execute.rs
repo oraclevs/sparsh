@@ -12,7 +12,10 @@ use crate::services::ShellServices;
 use crate::session::{CommandDiagnostic, SessionMode, ShellError, ShellResult};
 
 enum PreparedCommand {
-    Builtin { name: String, plan: CommandPlan },
+    Builtin {
+        name: String,
+        plan: CommandPlan,
+    },
     SparScript(CommandPlan),
     External(CommandPlan),
     Missing {
@@ -235,18 +238,18 @@ impl SparshExecutor<'_> {
                     index += 1;
                 }
                 PreparedCommand::SparScript(plan) => {
-                    let mut output = run_spar_script_stage(
-                        self.services,
-                        plan,
-                        input.take(),
-                    )?;
+                    let mut output =
+                        run_spar_script_stage(self.services, plan, input.take(), false)?;
                     let status = spar_process::ExitStatus {
                         success: output.status == 0,
                         code: Some(output.status),
                     };
                     statuses.push(status);
                     if !output.stderr.is_empty() {
-                        io::stderr().lock().write_all(&output.stderr).map_err(process_error)?;
+                        io::stderr()
+                            .lock()
+                            .write_all(&output.stderr)
+                            .map_err(process_error)?;
                         output.stderr.clear();
                     }
                     if index + 1 == stages.len() {
@@ -312,7 +315,9 @@ impl SparshExecutor<'_> {
         }
 
         let aggregate = aggregate_pipeline_status(&statuses);
-        self.last_status = aggregate.code.unwrap_or(if aggregate.success { 0 } else { 1 });
+        self.last_status = aggregate
+            .code
+            .unwrap_or(if aggregate.success { 0 } else { 1 });
         if let Some(mut output) = final_in_process {
             output.status = self.last_status;
             self.last_result = Some(ShellResult::Builtin(output));
@@ -322,23 +327,36 @@ impl SparshExecutor<'_> {
         Ok(aggregate)
     }
 
-    fn run_spar_script(&mut self, plan: &CommandPlan) -> Result<spar_process::ExitStatus, ShellError> {
+    fn run_spar_script(
+        &mut self,
+        plan: &CommandPlan,
+    ) -> Result<spar_process::ExitStatus, ShellError> {
         if plan.background {
             return Err(ShellError::Process {
-                message: "background execution of in-process .spar scripts is not supported yet".into(),
+                message: "background execution of in-process .spar scripts is not supported yet"
+                    .into(),
                 status: 2,
             });
         }
-        let mut output = run_spar_script_stage(self.services, plan, None)?;
+        let mut output = run_spar_script_stage(self.services, plan, None, true)?;
         if !output.stdout.is_empty() {
-            io::stdout().lock().write_all(&output.stdout).map_err(process_error)?;
+            io::stdout()
+                .lock()
+                .write_all(&output.stdout)
+                .map_err(process_error)?;
             output.stdout.clear();
         }
         if !output.stderr.is_empty() {
-            io::stderr().lock().write_all(&output.stderr).map_err(process_error)?;
+            io::stderr()
+                .lock()
+                .write_all(&output.stderr)
+                .map_err(process_error)?;
             output.stderr.clear();
         }
-        let status = spar_process::ExitStatus { success: output.status == 0, code: Some(output.status) };
+        let status = spar_process::ExitStatus {
+            success: output.status == 0,
+            code: Some(output.status),
+        };
         self.last_status = output.status;
         self.last_result = Some(ShellResult::Process(shell_outcome(&status)));
         Ok(status)
@@ -387,7 +405,8 @@ impl SparshExecutor<'_> {
         command_text: String,
     ) -> Result<spar_process::ExitStatus, ShellError> {
         let options = execution_options(self.services);
-        let spawned = spar_process::spawn_job_pipeline(pipeline, &options).map_err(process_error)?;
+        let spawned =
+            spar_process::spawn_job_pipeline(pipeline, &options).map_err(process_error)?;
         let pgid = spawned.pgid.0;
         let id = self.services.jobs.insert(spawned, command_text);
         let status = spar_process::ExitStatus {
@@ -415,7 +434,8 @@ impl SparshExecutor<'_> {
         command_text: String,
     ) -> Result<spar_process::ExitStatus, ShellError> {
         let options = execution_options(self.services);
-        let spawned = spar_process::spawn_job_pipeline(pipeline, &options).map_err(process_error)?;
+        let spawned =
+            spar_process::spawn_job_pipeline(pipeline, &options).map_err(process_error)?;
         self.finish_foreground_job(spawned, command_text)
     }
 
@@ -460,8 +480,8 @@ impl SparshExecutor<'_> {
         // Prepare every redirection before executing a stateful builtin.
         // A failed open therefore cannot leave cd/export/alias half-applied.
         let cwd = self.services.directories.current().to_path_buf();
-        let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(process_error)?;
-        let (stdin, stdin_available) = read_builtin_stdin(plan, &cwd).map_err(process_error)?;
+        let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(redirection_error)?;
+        let (stdin, stdin_available) = read_builtin_stdin(plan, &cwd).map_err(redirection_error)?;
         let login_shell = self.services.login_shell;
         let mut context = BuiltinContext {
             services: self.services,
@@ -485,9 +505,7 @@ impl SparshExecutor<'_> {
         self.requested_exit = context.requested_exit;
         self.requested_editor_mode = context.requested_editor_mode;
         self.requested_reload_config = context.requested_reload_config;
-        self.requested_exec = context
-            .requested_exec
-            .map(|words| (words, plan.clone()));
+        self.requested_exec = context.requested_exec.map(|words| (words, plan.clone()));
         self.requested_source = context.requested_source;
         self.last_status = visible.status;
         let status = spar_process::ExitStatus {
@@ -498,7 +516,6 @@ impl SparshExecutor<'_> {
         Ok(status)
     }
 }
-
 
 pub(crate) fn replace_with_external_command(
     words: &[String],
@@ -518,7 +535,7 @@ pub(crate) fn replace_with_external_command(
     template.args = words[1..].to_vec();
     template.background = false;
     let registry = BuiltinRegistry::new();
-    match prepare_command(&template, ResolutionMode::Normal, &registry, services)? {
+    match prepare_command(&template, ResolutionMode::ExternalOnly, &registry, services)? {
         PreparedCommand::External(plan) => {
             let error = spar_process::replace_process(&plan, &execution_options(services));
             Err(process_error(error))
@@ -542,19 +559,26 @@ fn should_execute_as_spar(path: &Path) -> bool {
     if path.extension().and_then(|extension| extension.to_str()) != Some("spar") {
         return false;
     }
-    let Ok(bytes) = std::fs::read(path) else { return false; };
-    let first_line = bytes.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let first_line = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
     if !first_line.starts_with(b"#!") {
         return true;
     }
     let line = String::from_utf8_lossy(first_line);
-    line.split_whitespace().any(|word| word == "spar" || word.ends_with("/spar"))
+    line.split_whitespace()
+        .any(|word| word == "spar" || word.ends_with("/spar"))
 }
 
 fn run_spar_script_stage(
     services: &ShellServices,
     plan: &CommandPlan,
     pipeline_input: Option<Vec<u8>>,
+    live_output: bool,
 ) -> Result<crate::builtin::BuiltinOutput, ShellError> {
     use std::sync::{Arc, Mutex};
 
@@ -565,11 +589,13 @@ fn run_spar_script_stage(
     })?;
     let filename = path.display().to_string();
     let engine = spar::Engine::default();
-    let compiled = engine.compile_path(path).map_err(|errors| ShellError::SparSource {
-        errors,
-        source: source.clone(),
-        filename: filename.clone(),
-    })?;
+    let compiled = engine
+        .compile_path(path)
+        .map_err(|errors| ShellError::SparSource {
+            errors,
+            source: source.clone(),
+            filename: filename.clone(),
+        })?;
     let cwd = match &plan.cwd {
         Some(spar_command::WorkingDirectory::Path(path)) => PathBuf::from(path),
         None => services.directories.current().to_path_buf(),
@@ -580,34 +606,73 @@ fn run_spar_script_stage(
         environment.retain(|(key, _)| key != OsStr::new(&entry.key));
         environment.push((entry.key.clone().into(), entry.value.clone().into()));
     }
-    context.replace_environment(environment.iter().filter_map(|(key, value)| {
-        Some((key.to_str()?.to_string(), value.to_str()?.to_string()))
-    }));
+    context.replace_environment(
+        environment.iter().filter_map(|(key, value)| {
+            Some((key.to_str()?.to_string(), value.to_str()?.to_string()))
+        }),
+    );
     context.set_args(plan.args.clone());
 
     if let Some(input) = pipeline_input {
         context.set_stdin(spar::RuntimeInput::from_bytes(input));
-    } else if let Some((input, true)) = read_builtin_stdin(plan, &cwd).ok() {
+    } else if let Ok((input, true)) = read_builtin_stdin(plan, &cwd) {
         context.set_stdin(spar::RuntimeInput::from_bytes(input));
     }
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
-    context.set_stdout(spar::RuntimeOutput::Buffer(stdout.clone()));
-    context.set_stderr(spar::RuntimeOutput::Buffer(stderr.clone()));
-    let outcome = engine
-        .execute_compiled_with_context(&compiled, context)
-        .map_err(|errors| ShellError::SparSource {
-            errors,
-            source: source.clone(),
-            filename: filename.clone(),
-        })?;
+    // A script running on its own, with nothing capturing its output, writes
+    // straight to the terminal so `println` shows up while it runs. Pipelines
+    // and redirections still get buffered output to route.
+    let unrouted = plan.stdout.is_none() && plan.stderr.is_none() && plan.redirections.is_empty();
+    if live_output && unrouted {
+        context.set_stdout(spar::RuntimeOutput::Stdout);
+        context.set_stderr(spar::RuntimeOutput::Stderr);
+    } else {
+        context.set_stdout(spar::RuntimeOutput::Buffer(stdout.clone()));
+        context.set_stderr(spar::RuntimeOutput::Buffer(stderr.clone()));
+    }
+    let outcome = match engine.execute_compiled_with_context(&compiled, context) {
+        Ok(outcome) => outcome,
+        Err(errors) => {
+            // Output the script produced before it failed is still output:
+            // show it ahead of the error instead of dropping the buffers.
+            use std::io::Write as _;
+            if let Ok(bytes) = stdout.lock() {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(&bytes);
+                let _ = out.flush();
+            }
+            if let Ok(bytes) = stderr.lock() {
+                let mut err = std::io::stderr().lock();
+                let _ = err.write_all(&bytes);
+                let _ = err.flush();
+            }
+            return Err(ShellError::SparSource {
+                errors,
+                source: source.clone(),
+                filename: filename.clone(),
+            });
+        }
+    };
     let output = crate::builtin::BuiltinOutput {
-        stdout: stdout.lock().map_err(|_| ShellError::Process { message: "Spar stdout buffer lock poisoned".into(), status: 1 })?.clone(),
-        stderr: stderr.lock().map_err(|_| ShellError::Process { message: "Spar stderr buffer lock poisoned".into(), status: 1 })?.clone(),
+        stdout: stdout
+            .lock()
+            .map_err(|_| ShellError::Process {
+                message: "Spar stdout buffer lock poisoned".into(),
+                status: 1,
+            })?
+            .clone(),
+        stderr: stderr
+            .lock()
+            .map_err(|_| ShellError::Process {
+                message: "Spar stderr buffer lock poisoned".into(),
+                status: 1,
+            })?
+            .clone(),
         status: outcome.exit_status,
     };
-    let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(process_error)?;
+    let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(redirection_error)?;
     streams.route(output).map_err(process_error)
 }
 
@@ -620,7 +685,11 @@ fn prepare_command(
     let mut plan = original.clone();
     if plan.cwd.is_none() {
         plan.cwd = Some(spar_command::WorkingDirectory::Path(
-            services.directories.current().to_string_lossy().into_owned(),
+            services
+                .directories
+                .current()
+                .to_string_lossy()
+                .into_owned(),
         ));
     }
     if mode == ResolutionMode::Normal {
@@ -698,9 +767,10 @@ fn prepare_command(
         Err(message) if message == format!("command not found: `{}`", plan.program) => {
             let mut additional = registry.names();
             additional.extend(services.aliases.names().map(str::to_string));
-            let suggestions = services
-                .resolver
-                .suggestions(&plan.program, &services.path, &additional);
+            let suggestions =
+                services
+                    .resolver
+                    .suggestions(&plan.program, &services.path, &additional);
             Ok(PreparedCommand::Missing {
                 program: plan.program,
                 suggestions,
@@ -774,7 +844,7 @@ fn run_isolated_builtin_stage(
 ) -> Result<crate::builtin::BuiltinOutput, ShellError> {
     let mut isolated = services.snapshot_for_isolated_stage();
     let cwd = isolated.directories.current().to_path_buf();
-    let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(process_error)?;
+    let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(redirection_error)?;
     let login_shell = isolated.login_shell;
     let mut context = BuiltinContext {
         services: &mut isolated,
@@ -879,6 +949,10 @@ impl BuiltinStreams {
             streams.apply(2, redirection, cwd)?;
         }
         for redirection in &plan.redirections {
+            // fd 0 is the builtin's input, read separately by `read_builtin_stdin`.
+            if redirection.fd == 0 {
+                continue;
+            }
             streams.apply(redirection.fd, &redirection.target, cwd)?;
         }
         Ok(streams)
@@ -928,7 +1002,10 @@ impl BuiltinStreams {
         }
     }
 
-    fn route(&mut self, output: crate::builtin::BuiltinOutput) -> io::Result<crate::builtin::BuiltinOutput> {
+    fn route(
+        &mut self,
+        output: crate::builtin::BuiltinOutput,
+    ) -> io::Result<crate::builtin::BuiltinOutput> {
         let mut visible_stdout = Vec::new();
         let mut visible_stderr = Vec::new();
         write_builtin_bytes(
@@ -1223,6 +1300,15 @@ fn shell_outcome(status: &spar_process::ExitStatus) -> spar::ShellPlanOutcome {
         signal: None,
         pid: 0,
         pipeline: Vec::new(),
+    }
+}
+
+/// A redirection that cannot be opened fails the command with status 1 (as
+/// in POSIX shells), even when the cause is a missing directory.
+fn redirection_error(error: std::io::Error) -> ShellError {
+    ShellError::Process {
+        status: 1,
+        message: error.to_string(),
     }
 }
 

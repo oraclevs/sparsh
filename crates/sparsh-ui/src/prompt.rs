@@ -8,8 +8,8 @@ use sparsh_core::{PromptConfig, SlotConfig, SlotSpec, TextStyle, WidgetKind};
 use crate::project::ProjectKind;
 use crate::sampler::SystemSnapshot;
 use crate::theme::{SemanticRole, Theme};
-use crate::width::{display_width, display_width_with_glyphs, fold_path};
 use crate::widgets::{render_slot, Level, LocalTime, RenderedSlot, WidgetInputs};
+use crate::width::{display_width, display_width_with_glyphs, fold_path};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitState {
@@ -55,12 +55,7 @@ impl PromptState {
         Self { slow_threshold }
     }
 
-    pub fn prompt(
-        &self,
-        data: &PromptData,
-        config: &PromptConfig,
-        theme: &Theme,
-    ) -> SparshPrompt {
+    pub fn prompt(&self, data: &PromptData, config: &PromptConfig, theme: &Theme) -> SparshPrompt {
         let width = data.terminal_width.max(12);
         let prefix = "╭─ ";
         let separator = "  ";
@@ -92,10 +87,12 @@ impl PromptState {
         // full counters -> branch only -> hidden.  Unlike the previous prompt,
         // this mode is shared by width calculation and colored rendering.
         let right_cells = right_width(&right, config);
-        if minimum_first_line_width(prefix, separator, data, config, git_mode, right_cells) > width {
+        if minimum_first_line_width(prefix, separator, data, config, git_mode, right_cells) > width
+        {
             git_mode = GitMode::BranchOnly;
         }
-        if minimum_first_line_width(prefix, separator, data, config, git_mode, right_cells) > width {
+        if minimum_first_line_width(prefix, separator, data, config, git_mode, right_cells) > width
+        {
             git_mode = GitMode::Hidden;
         }
 
@@ -151,9 +148,7 @@ impl PromptState {
             first_line.push_str(&context_colored);
         }
         if !right_colored.is_empty() {
-            let spaces = width
-                .saturating_sub(left_plain_width + right_cells)
-                .max(1);
+            let spaces = width.saturating_sub(left_plain_width + right_cells).max(1);
             first_line.push_str(&" ".repeat(spaces));
             first_line.push_str(&right_colored);
         }
@@ -180,7 +175,12 @@ impl PromptState {
     /// The right block, in display order: the fixed status marker, then the
     /// three user slots. Hidden slots are skipped; a broken slot shows a red
     /// marker so the user can see which one needs fixing.
-    fn right_blocks(&self, data: &PromptData, config: &PromptConfig, theme: &Theme) -> Vec<RightBlock> {
+    fn right_blocks(
+        &self,
+        data: &PromptData,
+        config: &PromptConfig,
+        theme: &Theme,
+    ) -> Vec<RightBlock> {
         let mut blocks = Vec::new();
         if config.show_status && data.previous_status != 0 {
             let plain = format!("✕ {}", data.previous_status);
@@ -207,7 +207,9 @@ impl PromptState {
                     });
                 }
                 Some(SlotConfig::Ok(spec)) => {
-                    if let Some(rendered) = render_slot(&spec.template, &inputs, &config.right.thresholds) {
+                    if let Some(rendered) =
+                        render_slot(&spec.template, &inputs, &config.right.thresholds)
+                    {
                         blocks.push(paint_slot(spec, &rendered, theme));
                     }
                 }
@@ -321,10 +323,7 @@ fn context_segments(
     }
 
     if let Some(environment) = &data.python_environment {
-        segments.push((
-            SemanticRole::VirtualEnvironment,
-            format!(" {environment}"),
-        ));
+        segments.push((SemanticRole::VirtualEnvironment, format!(" {environment}")));
     }
 
     segments.extend(git_segments(data.git.as_ref(), config, git_mode));
@@ -368,9 +367,7 @@ fn git_segments(
     if config.git.show_ahead_behind && git.behind > 0 {
         segments.push((SemanticRole::GitBehind, format!("↓{}", git.behind)));
     }
-    if segments.len() == 1
-        && git.staged + git.modified + git.untracked + git.conflicts == 0
-    {
+    if segments.len() == 1 && git.staged + git.modified + git.untracked + git.conflicts == 0 {
         segments.push((SemanticRole::GitClean, "✓".into()));
     }
     segments
@@ -384,11 +381,7 @@ fn join_plain(segments: &[(SemanticRole, String)], separator: &str) -> String {
         .join(separator)
 }
 
-fn paint_segments(
-    segments: &[(SemanticRole, String)],
-    separator: &str,
-    theme: &Theme,
-) -> String {
+fn paint_segments(segments: &[(SemanticRole, String)], separator: &str, theme: &Theme) -> String {
     segments
         .iter()
         .map(|(role, text)| theme.paint(*role, text))
@@ -461,16 +454,14 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use sparsh_core::{
-        PromptConfig, RightPromptConfig, SlotConfig, SlotSpec, Template, TextStyle,
-    };
+    use sparsh_core::{PromptConfig, RightPromptConfig, SlotConfig, SlotSpec, Template, TextStyle};
 
     use super::{GitState, PromptData, PromptState};
     use crate::project::ProjectKind;
     use crate::sampler::SystemSnapshot;
     use crate::theme::{SemanticRole, Theme};
-    use crate::width::display_width;
     use crate::widgets::LocalTime;
+    use crate::width::display_width;
 
     fn slot(template: &str) -> Option<SlotConfig> {
         Some(SlotConfig::Ok(SlotSpec {
@@ -496,9 +487,7 @@ mod tests {
 
     fn data(width: usize) -> PromptData {
         PromptData {
-            cwd: PathBuf::from(
-                "/home/occ/Projects/Rust/occ_lang/sparsh/crates/sparsh-core",
-            ),
+            cwd: PathBuf::from("/home/occ/Projects/Rust/occ_lang/sparsh/crates/sparsh-core"),
             home: Some(PathBuf::from("/home/occ")),
             git: Some(GitState {
                 branch: "main".into(),
@@ -554,7 +543,11 @@ mod tests {
 
         assert!(first.contains(" .venv"), "{first}");
         assert!(first.contains(""), "{first}");
-        assert_eq!(first.matches('').count(), 1, "python icon should not be duplicated: {first}");
+        assert_eq!(
+            first.matches('').count(),
+            1,
+            "python icon should not be duplicated: {first}"
+        );
     }
 
     #[test]
@@ -568,8 +561,14 @@ mod tests {
         let first = prompt.left.lines().next().unwrap();
 
         assert!(display_width(first) <= width, "{first:?} is too wide");
-        assert!(!first.contains("+1"), "full git counters should be compacted: {first}");
-        assert!(first.contains("~/") || first.contains("~"), "path shape disappeared: {first}");
+        assert!(
+            !first.contains("+1"),
+            "full git counters should be compacted: {first}"
+        );
+        assert!(
+            first.contains("~/") || first.contains("~"),
+            "path shape disappeared: {first}"
+        );
     }
 
     #[test]
@@ -595,17 +594,17 @@ mod tests {
             &PromptConfig::default(),
             &Theme::plain(),
         );
-        assert_eq!(first_line(&narrow), "╭─ ~/…/…/…/sparsh…  \u{e7a8} \u{e0a0} main");
+        assert_eq!(
+            first_line(&narrow),
+            "╭─ ~/…/…/…/sparsh…  \u{e7a8} \u{e0a0} main"
+        );
     }
 
     #[test]
     fn custom_slots_render_in_order_after_the_status() {
         let mut d = data(160);
         d.system.host = Some("arch.local".into());
-        let config = config_with(
-            [slot("{host}"), slot("mid"), slot("{date:%d %b}")],
-            " | ",
-        );
+        let config = config_with([slot("{host}"), slot("mid"), slot("{date:%d %b}")], " | ");
         let prompt = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::plain());
         let first = first_line(&prompt);
         assert!(first.ends_with("✕ 7 | arch | mid | 20 Sep"), "{first:?}");
@@ -628,7 +627,9 @@ mod tests {
         let config = config_with(
             [
                 slot("one"),
-                Some(SlotConfig::Broken { message: "unknown widget 'cpuu'".into() }),
+                Some(SlotConfig::Broken {
+                    message: "unknown widget 'cpuu'".into(),
+                }),
                 slot("three"),
             ],
             " ",
@@ -636,10 +637,18 @@ mod tests {
         let mut d = data(160);
         d.previous_status = 0;
         let plain = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::plain());
-        assert!(first_line(&plain).ends_with("one ✕ slot2 three"), "{:?}", first_line(&plain));
-        assert!(!plain.left.contains('\u{1b}'), "plain theme must not emit escapes");
+        assert!(
+            first_line(&plain).ends_with("one ✕ slot2 three"),
+            "{:?}",
+            first_line(&plain)
+        );
+        assert!(
+            !plain.left.contains('\u{1b}'),
+            "plain theme must not emit escapes"
+        );
 
-        let colored = PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::colored());
+        let colored =
+            PromptState::new(Duration::from_secs(2)).prompt(&d, &config, &Theme::colored());
         let marker = Theme::colored().paint(SemanticRole::Failure, "✕ slot2");
         assert!(colored.left.contains(&marker), "{:?}", colored.left);
     }
@@ -648,21 +657,39 @@ mod tests {
     fn width_pressure_sheds_slot3_then_slot2_then_slot1_then_status_and_never_overflows() {
         let config = config_with([slot("AAAA"), slot("BBBB"), slot("CCCC")], "  ");
         for width in [120usize, 60, 30, 12] {
-            let prompt = PromptState::new(Duration::from_secs(2)).prompt(&data(width), &config, &Theme::plain());
-            assert!(display_width(first_line(&prompt)) <= width, "width {width}: {:?}", first_line(&prompt));
+            let prompt = PromptState::new(Duration::from_secs(2)).prompt(
+                &data(width),
+                &config,
+                &Theme::plain(),
+            );
+            assert!(
+                display_width(first_line(&prompt)) <= width,
+                "width {width}: {:?}",
+                first_line(&prompt)
+            );
         }
         // Shrink one column at a time: whatever survives is always a prefix of
         // the full right block (status, slot1, slot2, slot3), never a suffix.
         let full = "✕ 7  AAAA  BBBB  CCCC";
         for width in 12..=120 {
-            let prompt = PromptState::new(Duration::from_secs(2)).prompt(&data(width), &config, &Theme::plain());
+            let prompt = PromptState::new(Duration::from_secs(2)).prompt(
+                &data(width),
+                &config,
+                &Theme::plain(),
+            );
             let first = first_line(&prompt);
             let survivors: Vec<&str> = ["✕ 7", "AAAA", "BBBB", "CCCC"]
                 .into_iter()
                 .filter(|token| first.contains(token))
                 .collect();
-            let expected: Vec<&str> = ["✕ 7", "AAAA", "BBBB", "CCCC"].into_iter().take(survivors.len()).collect();
-            assert_eq!(survivors, expected, "width {width}: {first:?} (full block {full:?})");
+            let expected: Vec<&str> = ["✕ 7", "AAAA", "BBBB", "CCCC"]
+                .into_iter()
+                .take(survivors.len())
+                .collect();
+            assert_eq!(
+                survivors, expected,
+                "width {width}: {first:?} (full block {full:?})"
+            );
         }
     }
 
@@ -708,12 +735,18 @@ mod tests {
         let calm_line = PromptState::new(Duration::from_secs(2)).prompt(&calm, &config, &t);
         let hot_line = PromptState::new(Duration::from_secs(2)).prompt(&hot, &config, &t);
         assert!(
-            calm_line.left.contains(&t.paint_spec(Some(ColorSpec::Indexed(6)), TextStyle::default(), "10")),
+            calm_line.left.contains(&t.paint_spec(
+                Some(ColorSpec::Indexed(6)),
+                TextStyle::default(),
+                "10"
+            )),
             "{:?}",
             calm_line.left
         );
         assert!(
-            hot_line.left.contains(&t.paint(SemanticRole::Failure, "95")),
+            hot_line
+                .left
+                .contains(&t.paint(SemanticRole::Failure, "95")),
             "critical level overrides the slot color: {:?}",
             hot_line.left
         );

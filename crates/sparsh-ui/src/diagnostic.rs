@@ -71,7 +71,11 @@ pub fn render_prompt_issues(issues: &[sparsh_core::PromptIssue], theme: &Theme) 
     if issues.is_empty() {
         return String::new();
     }
-    let noun = if issues.len() == 1 { "problem" } else { "problems" };
+    let noun = if issues.len() == 1 {
+        "problem"
+    } else {
+        "problems"
+    };
     let mut text = theme.paint(
         SemanticRole::Failure,
         &format!(
@@ -144,7 +148,8 @@ mod tests {
                 message: "command substitution exited with status 1".into(),
                 span: spar::Span::new(31, 40, 2, 9),
             }],
-            source: "function main() -> int {\n    var x: str = $(false);\n    return 0;\n};\n".into(),
+            source: "function main() -> int {\n    var x: str = $(false);\n    return 0;\n};\n"
+                .into(),
             filename: "/tmp/main.spar".into(),
         };
 

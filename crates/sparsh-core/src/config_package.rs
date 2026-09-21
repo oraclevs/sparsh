@@ -57,5 +57,6 @@ mod tests {
         let source = std::fs::read_to_string(root.join("config.spar")).unwrap();
         assert!(source.contains("export type SparshConfig"));
         assert!(source.contains("command: List<str>"));
+        assert!(source.contains("keybindings?: List<KeybindingConfig>"));
     }
 }

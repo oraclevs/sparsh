@@ -4,15 +4,20 @@ use sparsh_core::{render_value, CommandDiagnostic, ShellResult, ShellSession};
 
 mod command_editor;
 mod completion;
+mod data_view;
 mod diagnostic;
 mod editor;
+mod encoded;
 mod git;
 mod highlight;
 mod history;
+mod http_view;
 mod paste;
 mod project;
 mod prompt;
 mod sampler;
+mod structured;
+mod styled;
 mod theme;
 mod validator;
 mod widgets;
@@ -67,6 +72,25 @@ pub fn render_result<W: Write>(
 ) -> io::Result<()> {
     match result {
         ShellResult::Value(value) => writeln!(out, "{}", render_value(value)),
+        ShellResult::Structured(value) if !interactive => {
+            writeln!(out, "{}", structured::render_structured_plain(value))
+        }
+        ShellResult::Structured(value) => {
+            let options = data_view::RenderOptions::for_terminal();
+            writeln!(
+                out,
+                "{}",
+                structured::render_structured_value(value, theme, &options)
+            )?;
+            if value.stream_preview && value.truncated {
+                writeln!(
+                    out,
+                    "{}",
+                    theme.paint(SemanticRole::Secondary, "… preview truncated")
+                )?;
+            }
+            Ok(())
+        }
         ShellResult::Builtin(output) => {
             let _ = (theme, interactive);
             // Builtin command output is command output, not Sparsh UI. Preserve
@@ -126,7 +150,7 @@ where
             return Ok(session.last_status());
         }
         let submitted = line.trim_end_matches(['\r', '\n']);
-        match session.submit(submitted) {
+        match session.submit_script(submitted) {
             Ok(result) => {
                 let exit_status = match &result {
                     ShellResult::Exit(status) => Some(*status),
@@ -214,6 +238,84 @@ mod tests {
     }
 
     #[test]
+    fn structured_tables_render_with_headers_rows_and_stream_preview_marker() {
+        use indexmap::IndexMap;
+
+        let table = spar::TableValue::from_records(vec![
+            spar::Value::Object(IndexMap::from([
+                ("name".into(), spar::Value::String("Obi".into())),
+                ("age".into(), spar::Value::Int(24)),
+            ])),
+            spar::Value::Object(IndexMap::from([
+                ("name".into(), spar::Value::String("Ada".into())),
+                ("age".into(), spar::Value::Int(31)),
+            ])),
+        ])
+        .unwrap();
+        let result = ShellResult::Structured(spar::InteractiveRuntimeValue {
+            value: spar::Value::Table(table),
+            stream_preview: true,
+            truncated: true,
+            presentation: spar::InteractivePresentation::Value,
+        });
+        let mut output = Vec::new();
+
+        render_result(&result, &Theme::plain(), true, &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("age"));
+        assert!(output.contains("name"));
+        assert!(output.contains("24"));
+        assert!(output.contains("Obi"));
+        assert!(output.contains("31"));
+        assert!(output.contains("Ada"));
+        assert!(output.contains("preview truncated"));
+    }
+
+    #[test]
+    fn schema_and_inspect_use_dedicated_interactive_presentations() {
+        use indexmap::IndexMap;
+
+        let table = spar::TableValue::from_records(vec![spar::Value::Object(IndexMap::from([
+            ("name".into(), spar::Value::String("Obi".into())),
+            ("age".into(), spar::Value::Int(24)),
+        ]))])
+        .unwrap();
+
+        let schema_result = ShellResult::Structured(spar::InteractiveRuntimeValue {
+            value: spar::Value::Schema(table.schema().clone()),
+            stream_preview: false,
+            truncated: false,
+            presentation: spar::InteractivePresentation::Schema,
+        });
+        let mut schema_output = Vec::new();
+        render_result(&schema_result, &Theme::plain(), true, &mut schema_output).unwrap();
+        let schema_output = String::from_utf8(schema_output).unwrap();
+        assert!(schema_output.contains("Schema"));
+        assert!(schema_output.contains("field"));
+        assert!(schema_output.contains("type"));
+        assert!(schema_output.contains("optional"));
+        assert!(schema_output.contains("name"));
+        assert!(schema_output.contains("str"));
+
+        let inspect_result = ShellResult::Structured(spar::InteractiveRuntimeValue {
+            value: spar::Value::Table(table),
+            stream_preview: false,
+            truncated: false,
+            presentation: spar::InteractivePresentation::Inspect,
+        });
+        let mut inspect_output = Vec::new();
+        render_result(&inspect_result, &Theme::plain(), true, &mut inspect_output).unwrap();
+        let inspect_output = String::from_utf8(inspect_output).unwrap();
+        assert!(inspect_output.contains("Inspect"));
+        assert!(inspect_output.contains("type: Table"));
+        assert!(inspect_output.contains("rows: 1"));
+        assert!(inspect_output.contains("schema:"));
+        assert!(inspect_output.contains("value:"));
+        assert!(inspect_output.contains("Obi"));
+    }
+
+    #[test]
     fn no_color_and_noninteractive_modes_disable_style() {
         assert_eq!(ColorPolicy::for_environment(true, false), ColorPolicy::Auto);
         assert_eq!(ColorPolicy::for_environment(true, true), ColorPolicy::Never);
@@ -221,5 +323,30 @@ mod tests {
             ColorPolicy::for_environment(false, false),
             ColorPolicy::Never
         );
+    }
+
+    #[test]
+    fn no_color_policy_keeps_structured_layout_without_ansi() {
+        use indexmap::IndexMap;
+
+        let table = spar::TableValue::from_records(vec![spar::Value::Object(IndexMap::from([
+            ("name".into(), spar::Value::String("Obi".into())),
+            ("age".into(), spar::Value::Int(24)),
+        ]))])
+        .unwrap();
+        let result = ShellResult::Structured(spar::InteractiveRuntimeValue {
+            value: spar::Value::Table(table),
+            stream_preview: false,
+            truncated: false,
+            presentation: spar::InteractivePresentation::Pipeline,
+        });
+        let theme = ColorPolicy::for_environment(true, true).theme();
+        let mut output = Vec::new();
+
+        render_result(&result, &theme, true, &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains('╭') && output.contains('│') && output.contains('╰'));
+        assert!(output.contains("Obi"));
+        assert!(!output.contains("\x1b["), "{output:?}");
     }
 }

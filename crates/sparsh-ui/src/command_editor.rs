@@ -8,9 +8,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
-use crossterm::terminal::{
-    self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use sparsh_core::{ShellSession, ShellUiSnapshot};
 use unicode_width::UnicodeWidthChar;
 
@@ -21,6 +19,8 @@ use crate::Theme;
 pub(crate) enum EditorAction {
     Save,
     Execute,
+    // Only produced by the paste-review flow's tests today.
+    #[allow(dead_code)]
     Cancel,
 }
 
@@ -325,7 +325,11 @@ fn render(
     let mut cursor_y = 1usize;
     for screen_row in 0..content_height {
         let row = *viewport_row + screen_row;
-        queue!(output, MoveTo(0, (screen_row + 1) as u16), Clear(ClearType::CurrentLine))?;
+        queue!(
+            output,
+            MoveTo(0, (screen_row + 1) as u16),
+            Clear(ClearType::CurrentLine)
+        )?;
         if row >= buffer.lines.len() {
             continue;
         }
@@ -339,7 +343,10 @@ fn render(
             let line = buffer.lines[row].iter().collect::<String>();
             let start_byte = char_index_to_byte(&line, start_char);
             let end_byte = start_byte + visible.len();
-            queue!(output, Print(paint_range(&line, start_byte..end_byte, snapshot, theme)))?;
+            queue!(
+                output,
+                Print(paint_range(&line, start_byte..end_byte, snapshot, theme))
+            )?;
         } else {
             queue!(output, Print(visible))?;
         }

@@ -42,8 +42,7 @@ pub fn multiline_submissions(source: &str) -> Vec<String> {
         }
         pending.push_str(line);
 
-        if !pending.trim().is_empty()
-            && input_completeness(&pending) == InputCompleteness::Complete
+        if !pending.trim().is_empty() && input_completeness(&pending) == InputCompleteness::Complete
         {
             submissions.push(std::mem::take(&mut pending));
         }
@@ -62,7 +61,11 @@ pub fn review_multiline_paste(
 ) -> io::Result<Option<String>> {
     let stderr = io::stderr();
     let mut err = stderr.lock();
-    writeln!(err, "\nSparsh paste review ({} lines):", source.lines().count().max(1))?;
+    writeln!(
+        err,
+        "\nSparsh paste review ({} lines):",
+        source.lines().count().max(1)
+    )?;
     writeln!(err, "---")?;
     writeln!(err, "{source}")?;
     writeln!(err, "---")?;
@@ -79,7 +82,11 @@ pub fn review_multiline_paste(
             PasteEditOutcome::Execute(source) => Ok(Some(source)),
             PasteEditOutcome::Save(source) => {
                 let path = save_paste_draft(&source)?;
-                writeln!(io::stderr().lock(), "saved Sparsh draft: {}", path.display())?;
+                writeln!(
+                    io::stderr().lock(),
+                    "saved Sparsh draft: {}",
+                    path.display()
+                )?;
                 Ok(None)
             }
             PasteEditOutcome::Cancel => Ok(None),
@@ -175,6 +182,13 @@ mod tests {
                 "build()".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn structured_pipeline_stays_grouped_by_parser_completeness() {
+        let source = "users |>\n    take(2) |>\n    inspect()";
+
+        assert_eq!(multiline_submissions(source), vec![source.to_string()]);
     }
 
     #[test]

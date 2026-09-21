@@ -1,48 +1,165 @@
 use std::io::{self, Write};
 use std::process::Command;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 use std::time::{Duration, Instant};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultHinter, Emacs, FileBackedHistory, KeyCode,
-    KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle, OutputMode, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings, ColumnarMenu, DefaultHinter, EditCommand, EditMode, Emacs,
+    FileBackedHistory, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle,
+    OutputMode, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
 };
-use sparsh_core::{CompletionSnapshot, EditorMode, ShellResult, ShellSession, ShellUiSnapshot};
+use sparsh_core::{
+    CompletionSnapshot, EditorMode, KeybindingAction, KeybindingConfig, KeybindingKey, ShellResult,
+    ShellSession, ShellUiSnapshot,
+};
 
 use crate::history::{SharedHistory, SparshHistory};
 use crate::{
-    active_python_environment, detect_projects, is_multiline_paste_candidate, multiline_submissions,
-    render_command_diagnostic, render_error, render_prompt_issues, render_result,
-    review_multiline_paste, ColorPolicy,
-    GitProbe, LocalTime, PromptData, PromptState, SparshCompleter,
-    SparshHighlighter, SparshValidator, SystemSampler, Theme,
+    active_python_environment, detect_projects, is_multiline_paste_candidate,
+    multiline_submissions, render_command_diagnostic, render_error, render_prompt_issues,
+    render_result, review_multiline_paste, ColorPolicy, GitProbe, LocalTime, PromptData,
+    PromptState, SparshCompleter, SparshHighlighter, SparshValidator, SystemSampler, Theme,
 };
 
-fn sparsh_emacs_keybindings() -> Keybindings {
+struct PasteTrackingEmacs {
+    inner: Emacs,
+    multiline_paste_seen: Arc<AtomicBool>,
+}
+
+impl PasteTrackingEmacs {
+    fn new(keybindings: Keybindings, multiline_paste_seen: Arc<AtomicBool>) -> Self {
+        Self {
+            inner: Emacs::new(keybindings),
+            multiline_paste_seen,
+        }
+    }
+}
+
+impl EditMode for PasteTrackingEmacs {
+    fn parse_event(&mut self, raw: ReedlineRawEvent) -> ReedlineEvent {
+        let event = self.inner.parse_event(raw);
+        if event_contains_multiline_paste_insert(&event) {
+            self.multiline_paste_seen.store(true, Ordering::Release);
+        }
+        event
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+}
+
+fn event_contains_multiline_paste_insert(event: &ReedlineEvent) -> bool {
+    matches!(
+        event,
+        ReedlineEvent::Edit(commands)
+            if commands.iter().any(|command| matches!(
+                command,
+                EditCommand::InsertString(text)
+                    if text.contains('\n') || text.contains('\r')
+            ))
+    )
+}
+
+fn should_review_multiline_submission(
+    mode: EditorMode,
+    source: &str,
+    multiline_paste_seen: bool,
+) -> bool {
+    mode == EditorMode::Normal && multiline_paste_seen && is_multiline_paste_candidate(source)
+}
+
+fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
     let mut keybindings = default_emacs_keybindings();
     keybindings.add_binding(
         KeyModifiers::ALT,
         KeyCode::Char('e'),
         ReedlineEvent::OpenEditor,
     );
+    keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, completion_event());
     keybindings.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::Menu("completion_menu".to_string()),
-            ReedlineEvent::MenuNext,
-        ]),
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+        KeyCode::Enter,
+        ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
     );
+
+    for binding in overrides {
+        let (modifiers, key) = reedline_chord(binding);
+        keybindings.add_binding(modifiers, key, reedline_action(binding.action));
+    }
     keybindings
 }
 
+fn completion_event() -> ReedlineEvent {
+    ReedlineEvent::UntilFound(vec![
+        ReedlineEvent::Menu("completion_menu".to_string()),
+        ReedlineEvent::MenuNext,
+    ])
+}
+
+fn reedline_chord(binding: &KeybindingConfig) -> (KeyModifiers, KeyCode) {
+    let chord = &binding.chord;
+    let mut modifiers = KeyModifiers::NONE;
+    if chord.control {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if chord.alt {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if chord.shift {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+
+    let key = match chord.key {
+        KeybindingKey::Char(character) => KeyCode::Char(character),
+        KeybindingKey::Tab => KeyCode::Tab,
+        KeybindingKey::BackTab => KeyCode::BackTab,
+        KeybindingKey::Enter => KeyCode::Enter,
+        KeybindingKey::Esc => KeyCode::Esc,
+        KeybindingKey::Backspace => KeyCode::Backspace,
+        KeybindingKey::Delete => KeyCode::Delete,
+        KeybindingKey::Insert => KeyCode::Insert,
+        KeybindingKey::Left => KeyCode::Left,
+        KeybindingKey::Right => KeyCode::Right,
+        KeybindingKey::Up => KeyCode::Up,
+        KeybindingKey::Down => KeyCode::Down,
+        KeybindingKey::Home => KeyCode::Home,
+        KeybindingKey::End => KeyCode::End,
+        KeybindingKey::PageUp => KeyCode::PageUp,
+        KeybindingKey::PageDown => KeyCode::PageDown,
+        KeybindingKey::Function(number) => KeyCode::F(number),
+    };
+    (modifiers, key)
+}
+
+fn reedline_action(action: KeybindingAction) -> ReedlineEvent {
+    match action {
+        KeybindingAction::Completion => completion_event(),
+        KeybindingAction::HistoryMenu => ReedlineEvent::Menu("history_menu".to_string()),
+        KeybindingAction::HistorySearch => ReedlineEvent::SearchHistory,
+        KeybindingAction::OpenEditor => ReedlineEvent::OpenEditor,
+        KeybindingAction::ClearScreen => ReedlineEvent::ClearScreen,
+        KeybindingAction::InsertNewline => ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        KeybindingAction::Submit => ReedlineEvent::SubmitOrNewline,
+        KeybindingAction::Cancel => ReedlineEvent::CtrlC,
+        KeybindingAction::Eof => ReedlineEvent::CtrlD,
+        KeybindingAction::PreviousHistory => ReedlineEvent::PreviousHistory,
+        KeybindingAction::NextHistory => ReedlineEvent::NextHistory,
+        KeybindingAction::Up => ReedlineEvent::Up,
+        KeybindingAction::Down => ReedlineEvent::Down,
+        KeybindingAction::Left => ReedlineEvent::Left,
+        KeybindingAction::Right => ReedlineEvent::Right,
+        KeybindingAction::ToStart => ReedlineEvent::ToStart,
+        KeybindingAction::ToEnd => ReedlineEvent::ToEnd,
+    }
+}
+
 fn completion_menu_text_style() -> MenuTextStyle {
-    let selected = Style::new()
-        .fg(Color::Black)
-        .on(Color::LightCyan)
-        .bold();
+    let selected = Style::new().fg(Color::Black).on(Color::LightCyan).bold();
     MenuTextStyle {
         text_style: Style::new().fg(Color::White),
         selected_text_style: selected,
@@ -70,16 +187,15 @@ fn build_editor(
     snapshot: Arc<RwLock<ShellUiSnapshot>>,
     completion_snapshot: Arc<RwLock<CompletionSnapshot>>,
     editor_mode: Arc<RwLock<EditorMode>>,
+    multiline_paste_seen: Arc<AtomicBool>,
 ) -> io::Result<Reedline> {
     let history_settings = session.history_settings();
     if let Some(parent) = history_settings.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let history = FileBackedHistory::with_file(
-        history_settings.max_entries,
-        history_settings.path.clone(),
-    )
-    .map_err(|error| io::Error::other(error.to_string()))?;
+    let history =
+        FileBackedHistory::with_file(history_settings.max_entries, history_settings.path.clone())
+            .map_err(|error| io::Error::other(error.to_string()))?;
     let history = SharedHistory::new(SparshHistory::new(
         history,
         history_settings.ignore_consecutive_duplicates,
@@ -90,17 +206,13 @@ fn build_editor(
     let completer = SparshCompleter::new(completion_snapshot);
     let mut buffer_editor = Command::new(std::env::current_exe()?);
     buffer_editor.arg("--edit-buffer");
-    let buffer_file = std::env::temp_dir().join(format!(
-        "sparsh-buffer-{}.spar",
-        std::process::id()
-    ));
+    let buffer_file =
+        std::env::temp_dir().join(format!("sparsh-buffer-{}.spar", std::process::id()));
     Ok(Reedline::create()
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(Some(" ".into()))
         .with_completer(Box::new(completer))
-        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
-            completion_menu(),
-        )))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu())))
         .with_menu(ReedlineMenu::HistoryMenu(Box::new(
             ListMenu::default()
                 .with_name("history_menu")
@@ -109,7 +221,10 @@ fn build_editor(
         .with_hinter(Box::new(DefaultHinter::default()))
         .with_quick_completions(true)
         .with_partial_completions(true)
-        .with_edit_mode(Box::new(Emacs::new(sparsh_emacs_keybindings())))
+        .with_edit_mode(Box::new(PasteTrackingEmacs::new(
+            sparsh_emacs_keybindings(session.keybindings()),
+            multiline_paste_seen,
+        )))
         .with_buffer_editor(buffer_editor, buffer_file)
         .use_bracketed_paste(true)
         .with_validator(Box::new(SparshValidator::new(editor_mode)))
@@ -117,10 +232,7 @@ fn build_editor(
         .with_highlighter(Box::new(highlighter)))
 }
 
-fn run_interactive_startup(
-    session: &mut ShellSession,
-    theme: &Theme,
-) -> io::Result<Option<i32>> {
+fn run_interactive_startup(session: &mut ShellSession, theme: &Theme) -> io::Result<Option<i32>> {
     match session.run_startup_hook() {
         Ok(result) => {
             let exit_status = match &result {
@@ -133,19 +245,14 @@ fn run_interactive_startup(
             }
         }
         Err(error) => {
-            render_error(
-                &error,
-                Some("startup()"),
-                theme,
-                &mut io::stderr().lock(),
-            )?;
+            render_error(&error, Some("startup()"), theme, &mut io::stderr().lock())?;
         }
     }
 
     Ok(None)
 }
 
-fn terminal_width() -> usize {
+pub(crate) fn terminal_width() -> usize {
     #[cfg(unix)]
     {
         for fd in [libc::STDERR_FILENO, libc::STDOUT_FILENO, libc::STDIN_FILENO] {
@@ -155,7 +262,11 @@ fn terminal_width() -> usize {
             }
         }
     }
-    std::env::var("COLUMNS").ok().and_then(|value| value.parse().ok()).filter(|width| *width > 0).unwrap_or(80)
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|width| *width > 0)
+        .unwrap_or(80)
 }
 
 pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Result<i32> {
@@ -163,6 +274,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
     let snapshot = Arc::new(RwLock::new(session.ui_snapshot()));
     let completion_snapshot = Arc::new(RwLock::new(session.completion_snapshot()));
     let editor_mode = Arc::new(RwLock::new(EditorMode::Normal));
+    let multiline_paste_seen = Arc::new(AtomicBool::new(false));
     let mut editor = build_editor(
         session,
         color,
@@ -170,6 +282,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
         Arc::clone(&snapshot),
         Arc::clone(&completion_snapshot),
         Arc::clone(&editor_mode),
+        Arc::clone(&multiline_paste_seen),
     )?;
     let mut active_config_generation = session.config_generation();
     let mut git = GitProbe::new();
@@ -196,6 +309,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 Arc::clone(&snapshot),
                 Arc::clone(&completion_snapshot),
                 Arc::clone(&editor_mode),
+                Arc::clone(&multiline_paste_seen),
             )?;
             active_config_generation = session.config_generation();
         }
@@ -228,12 +342,17 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
             *shared = session.completion_snapshot();
         }
         let prompt_config = session.prompt_config();
-        let prompt_state = PromptState::new(Duration::from_millis(prompt_config.duration_threshold_ms));
+        let prompt_state =
+            PromptState::new(Duration::from_millis(prompt_config.duration_threshold_ms));
         let prompt = prompt_state.prompt(
             &PromptData {
                 cwd: current.cwd().to_path_buf(),
                 home: current.home().map(ToOwned::to_owned),
-                git: prompt_config.git.enabled.then(|| git.state(current.cwd())).flatten(),
+                git: prompt_config
+                    .git
+                    .enabled
+                    .then(|| git.state(current.cwd()))
+                    .flatten(),
                 projects: detect_projects(current.cwd()),
                 python_environment: active_python_environment(&current),
                 previous_status: session.last_status(),
@@ -250,6 +369,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
         let signal = editor
             .read_line(&prompt)
             .map_err(|error| io::Error::other(error.to_string()))?;
+        let saw_multiline_paste = multiline_paste_seen.swap(false, Ordering::AcqRel);
         match signal {
             Signal::Success(source) => {
                 let mode = editor_mode
@@ -257,7 +377,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                     .map(|mode| *mode)
                     .unwrap_or(EditorMode::Normal);
                 let reviewed_paste =
-                    mode == EditorMode::Normal && is_multiline_paste_candidate(&source);
+                    should_review_multiline_submission(mode, &source, saw_multiline_paste);
                 let source = if reviewed_paste {
                     match review_multiline_paste(&source, &current)? {
                         Some(source) => source,
@@ -320,12 +440,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                         }
                         Err(error) => {
                             let stderr = io::stderr();
-                            render_error(
-                                &error,
-                                Some(&submission),
-                                &theme,
-                                &mut stderr.lock(),
-                            )?;
+                            render_error(&error, Some(&submission), &theme, &mut stderr.lock())?;
                         }
                     }
                 }
@@ -358,13 +473,17 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        completion_menu_text_style, event_contains_multiline_paste_insert,
+        should_review_multiline_submission, sparsh_emacs_keybindings,
+    };
     use nu_ansi_term::{Color, Style};
-    use reedline::{KeyCode, KeyModifiers, ReedlineEvent};
-    use super::{completion_menu_text_style, sparsh_emacs_keybindings};
+    use reedline::{EditCommand, KeyCode, KeyModifiers, ReedlineEvent};
+    use sparsh_core::{EditorMode, KeyChord, KeybindingAction, KeybindingConfig};
 
     #[test]
     fn alt_e_opens_the_sparsh_owned_buffer_editor() {
-        let keybindings = sparsh_emacs_keybindings();
+        let keybindings = sparsh_emacs_keybindings(&[]);
 
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('e')),
@@ -374,7 +493,7 @@ mod tests {
 
     #[test]
     fn tab_opens_and_advances_completion_menu() {
-        let keybindings = sparsh_emacs_keybindings();
+        let keybindings = sparsh_emacs_keybindings(&[]);
 
         assert_eq!(
             keybindings.find_binding(KeyModifiers::NONE, KeyCode::Tab),
@@ -385,6 +504,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normal_enter_keeps_the_default_submit_behavior() {
+        let keybindings = sparsh_emacs_keybindings(&[]);
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Enter),
+            Some(ReedlineEvent::Enter)
+        );
+    }
+
+    #[test]
+    fn alt_shift_enter_inserts_a_literal_newline() {
+        let keybindings = sparsh_emacs_keybindings(&[]);
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT | KeyModifiers::SHIFT, KeyCode::Enter),
+            Some(ReedlineEvent::Edit(vec![EditCommand::InsertNewline]))
+        );
+    }
+
+    #[test]
+    fn literal_newline_is_not_treated_as_a_bracketed_paste() {
+        let event = ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
+
+        assert!(!event_contains_multiline_paste_insert(&event));
+        assert!(!should_review_multiline_submission(
+            EditorMode::Normal,
+            "printf x | from lines\n|> take(1)",
+            false,
+        ));
+    }
+
+    #[test]
+    fn multiline_bracketed_paste_still_requests_review() {
+        let event = ReedlineEvent::Edit(vec![EditCommand::InsertString(
+            "printf x | from lines\n|> take(1)".to_string(),
+        )]);
+
+        assert!(event_contains_multiline_paste_insert(&event));
+        assert!(should_review_multiline_submission(
+            EditorMode::Normal,
+            "printf x | from lines\n|> take(1)",
+            true,
+        ));
+    }
+
+    #[test]
+    fn insert_newline_action_can_be_bound_to_a_portable_alternate_chord() {
+        let overrides = vec![KeybindingConfig {
+            chord: KeyChord::parse("alt+n").unwrap(),
+            action: KeybindingAction::InsertNewline,
+        }];
+        let keybindings = sparsh_emacs_keybindings(&overrides);
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('n')),
+            Some(ReedlineEvent::Edit(vec![EditCommand::InsertNewline]))
+        );
+    }
+
+    #[test]
+    fn user_keybindings_override_defaults_without_discarding_other_defaults() {
+        let overrides = vec![
+            KeybindingConfig {
+                chord: KeyChord::parse("alt+e").unwrap(),
+                action: KeybindingAction::ClearScreen,
+            },
+            KeybindingConfig {
+                chord: KeyChord::parse("ctrl+r").unwrap(),
+                action: KeybindingAction::HistorySearch,
+            },
+        ];
+        let keybindings = sparsh_emacs_keybindings(&overrides);
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('e')),
+            Some(ReedlineEvent::ClearScreen)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::SearchHistory)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Tab),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu("completion_menu".to_string()),
+                ReedlineEvent::MenuNext,
+            ]))
+        );
+    }
 
     #[test]
     fn completion_menu_uses_high_contrast_option_styles() {
@@ -392,7 +601,10 @@ mod tests {
 
         assert_eq!(styles.text_style, Style::new().fg(Color::White));
         assert_eq!(styles.description_style, Style::new().fg(Color::LightBlue));
-        assert_eq!(styles.match_style, Style::new().fg(Color::LightYellow).bold());
+        assert_eq!(
+            styles.match_style,
+            Style::new().fg(Color::LightYellow).bold()
+        );
         assert_eq!(
             styles.selected_text_style,
             Style::new().fg(Color::Black).on(Color::LightCyan).bold()

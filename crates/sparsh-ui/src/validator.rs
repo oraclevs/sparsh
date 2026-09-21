@@ -15,7 +15,11 @@ impl SparshValidator {
 
 impl Validator for SparshValidator {
     fn validate(&self, line: &str) -> ValidationResult {
-        let mode = self.mode.read().map(|mode| *mode).unwrap_or(EditorMode::Normal);
+        let mode = self
+            .mode
+            .read()
+            .map(|mode| *mode)
+            .unwrap_or(EditorMode::Normal);
         if mode == EditorMode::Repl {
             return match input_completeness(line) {
                 InputCompleteness::Incomplete => ValidationResult::Incomplete,
@@ -37,9 +41,25 @@ impl Validator for SparshValidator {
 
 fn looks_like_spar_input(line: &str) -> bool {
     let line = line.trim_start();
+    if line.contains("|>") {
+        return true;
+    }
     const PREFIXES: &[&str] = &[
-        "var", "function", "private function", "functionGroup", "struct", "type", "enum",
-        "import", "export", "dynamic", "async", "if", "for", "shell", "exec",
+        "var",
+        "function",
+        "private function",
+        "functionGroup",
+        "struct",
+        "type",
+        "enum",
+        "import",
+        "export",
+        "dynamic",
+        "async",
+        "if",
+        "for",
+        "shell",
+        "exec",
     ];
     PREFIXES.iter().any(|prefix| {
         line == *prefix
@@ -91,6 +111,16 @@ mod tests {
         assert_incomplete(validator.validate("function build() -> int {"));
         assert_incomplete(validator.validate("shell {"));
         assert_incomplete(validator.validate("build("));
+    }
+
+    #[test]
+    fn structured_pipeline_continuation_is_parser_driven_in_normal_mode() {
+        let mode = Arc::new(RwLock::new(EditorMode::Normal));
+        let validator = SparshValidator::new(mode);
+
+        assert_incomplete(validator.validate("users |>"));
+        assert_complete(validator.validate("users |> take(2)"));
+        assert_complete(validator.validate("git log --oneline | head"));
     }
 
     #[test]

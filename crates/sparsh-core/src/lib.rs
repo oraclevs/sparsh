@@ -9,6 +9,7 @@ mod execute;
 mod function_pipeline;
 mod history;
 mod job;
+mod keybinding;
 mod path;
 mod prompt_config;
 mod resolver;
@@ -18,22 +19,27 @@ mod template;
 pub mod value;
 
 pub use builtin::{BuiltinError, BuiltinMetadata, BuiltinOutput, BuiltinRegistry};
-pub use completion::{complete, CompletionContext, CompletionItem, CompletionRequest, CompletionSnapshot};
+pub use completion::{
+    complete, CompletionContext, CompletionItem, CompletionRequest, CompletionSnapshot,
+};
 pub use config::{
     CompletionConfig, ConfigLoadError, EnvironmentVariableConfig, HistoryConfig, PromptConfig,
     PromptGitConfig, PromptPathConfig, PromptTimeConfig, SparshConfig,
 };
 pub use history::{HistoryAccess, HistorySettings};
-pub use spar::InputCompleteness;
 pub use job::{JobId, JobState, ShellJob};
-pub use session::{
-    CommandDiagnostic, CommandKind, EditorMode, SessionMode, ShellError, ShellResult, ShellSession,
-    ShellUiSnapshot, StartupMode,
+pub use keybinding::{
+    KeyChord, KeybindingAction, KeybindingConfig, KeybindingKey, KEYBINDING_ACTION_NAMES,
 };
 pub use prompt_config::{
     legacy_time_format_to_strftime, parse_color, ColorSpec, NeededWidgets, PromptIssue,
     RightPromptConfig, SlotConfig, SlotSpec, TextStyle, Threshold, Thresholds,
 };
+pub use session::{
+    CommandDiagnostic, CommandKind, EditorMode, SessionMode, ShellError, ShellResult, ShellSession,
+    ShellUiSnapshot, StartupMode,
+};
+pub use spar::InputCompleteness;
 pub use template::{suggest, Piece, Template, WidgetKind, WidgetRef};
 pub use value::render_value;
 

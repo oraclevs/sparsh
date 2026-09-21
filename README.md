@@ -375,6 +375,21 @@ Interactive editing uses Reedline with file-backed history, hints, completion,
 syntax highlighting, parser-aware multiline validation, and bracketed-paste
 review.
 
+### Keybindings
+
+Keybindings are configured in the same `~/.sparsh/sparsh.spar` file as the rest of Sparsh. User bindings are layered on top of Reedline/Sparsh defaults, so a matching chord overrides the default while unrelated defaults remain active. Actions are validated names rather than arbitrary closures.
+
+```spar
+keybindings: List<SparshKeybinding> = [
+    { key: "ctrl+r"; action: "historySearch"; },
+    { key: "alt+e"; action: "openEditor"; },
+    { key: "ctrl+l"; action: "clearScreen"; }
+];
+```
+
+Supported modifiers are `ctrl`, `alt`, and `shift`. Supported actions are `completion`, `historyMenu`, `historySearch`, `openEditor`, `clearScreen`, `submit`, `cancel`, `eof`, `previousHistory`, `nextHistory`, `up`, `down`, `left`, `right`, `toStart`, and `toEnd`.
+
+
 Default history location:
 
 ```text
@@ -473,6 +488,20 @@ disown %1
 
 The implementation is Linux-first. Use the PTY/manual checks in `VERIFY.md`
 before selecting Sparsh as a login shell.
+
+## Async functions and HTTP at the prompt
+
+`await` is a shell keyword. Async functions return a promise; put `await` in front of the call to wait for it:
+
+```
+import pkg { get } from "std/http";
+await get(url: "https://pokeapi.co/api/v2/pokemon/ditto")
+_.json()
+```
+
+The response is shown as a status line and the body: JSON becomes a table or tree, HTML/XML/text is shown as text. `_` holds the response, so `_.status`, `_.body`, `_.contentType` and `_.json()` work. `await` cannot be used inside a declaration; see `spar/docs/async-await.md`.
+
+The `std/data` functions (`where`, `map`, `take`, ...) are available at the interactive prompt without an import. Scripts still import them.
 
 ## Multiline Spar
 

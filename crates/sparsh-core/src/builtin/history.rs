@@ -1,6 +1,10 @@
 use super::{error, success, usage_error, BuiltinContext, BuiltinRegistry, BuiltinResult};
 
-pub(super) fn history(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+pub(super) fn history(
+    args: &[String],
+    context: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
     let Some(history) = context.services.history.as_ref() else {
         return Ok(success(None));
     };
@@ -10,7 +14,11 @@ pub(super) fn history(args: &[String], context: &mut BuiltinContext<'_>, _: &Bui
     }
     let limit = match args {
         [] => None,
-        [value] => Some(value.parse::<usize>().map_err(|_| usage_error("history [N|-c]"))?),
+        [value] => Some(
+            value
+                .parse::<usize>()
+                .map_err(|_| usage_error("history [N|-c]"))?,
+        ),
         _ => return Err(usage_error("history [N|-c]")),
     };
     let entries = history.list(limit).map_err(error)?;

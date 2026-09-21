@@ -13,12 +13,32 @@ pub struct HighlightSpan {
     pub role: SemanticRole,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorKind {
+    StructuredPipe,
+    ShellPipe,
+    CommandSeparator,
+    Expression,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixedHighlightState {
+    Shell,
+    AfterBytePipe,
+    DecoderFormat,
+    Structured,
+    AfterStructuredPipe,
+    EncoderFormat,
+    ByteOutput,
+}
+
 pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut index = 0;
     let mut command_position = true;
     let mut active_command: Option<String> = None;
     let mut paren_depth = 0usize;
+    let mut mixed_state = MixedHighlightState::Shell;
 
     while index < line.len() {
         let character = line[index..]
@@ -32,25 +52,42 @@ pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
 
         if matches!(character, '\'' | '"') {
             let end = quoted_end(line, index, character);
-            let role = if active_command.as_deref().is_some_and(command_takes_path) {
+            let role = if mixed_state == MixedHighlightState::Shell
+                && active_command.as_deref().is_some_and(command_takes_path)
+            {
                 SemanticRole::Path
             } else {
                 SemanticRole::QuotedString
             };
-            spans.push(HighlightSpan { range: index..end, role });
+            spans.push(HighlightSpan {
+                range: index..end,
+                role,
+            });
             command_position = false;
             index = end;
             continue;
         }
 
-        if let Some((length, starts_command)) = operator_at(line, index) {
+        if let Some((length, kind)) = operator_at(line, index) {
             spans.push(HighlightSpan {
                 range: index..index + length,
                 role: SemanticRole::Operator,
             });
-            if starts_command {
-                command_position = true;
-                active_command = None;
+            match kind {
+                OperatorKind::StructuredPipe => {
+                    mixed_state = MixedHighlightState::AfterStructuredPipe;
+                    active_command = None;
+                }
+                OperatorKind::ShellPipe => {
+                    mixed_state = MixedHighlightState::AfterBytePipe;
+                    active_command = None;
+                }
+                OperatorKind::CommandSeparator => {
+                    mixed_state = MixedHighlightState::Shell;
+                    command_position = true;
+                    active_command = None;
+                }
+                OperatorKind::Expression => {}
             }
             index += length;
             continue;
@@ -76,37 +113,112 @@ pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
         let function_call = next == Some('(') && snapshot.has_function(word);
         let named_parameter = paren_depth > 0 && next == Some(':');
 
-        let role = if function_call {
-            SemanticRole::Function
-        } else if named_parameter {
-            SemanticRole::Parameter
-        } else if command_position && is_spar_keyword(word) {
-            SemanticRole::SparSyntax
-        } else if command_position {
-            let kind = snapshot.classify_command(word);
-            active_command = Some(word.to_string());
-            match kind {
-                CommandKind::Builtin => SemanticRole::Builtin,
-                CommandKind::Alias => SemanticRole::Alias,
-                CommandKind::External => SemanticRole::ExternalCommand,
-                CommandKind::Unknown => SemanticRole::UnknownCommand,
+        let role = match mixed_state {
+            MixedHighlightState::AfterBytePipe if word == "from" => {
+                mixed_state = MixedHighlightState::DecoderFormat;
+                active_command = None;
+                SemanticRole::SparSyntax
             }
-        } else if active_command.as_deref().is_some_and(command_takes_path)
-            && !word.starts_with('-')
-        {
-            SemanticRole::Path
-        } else if word.starts_with('-') {
-            SemanticRole::Option
-        } else {
-            SemanticRole::Argument
+            MixedHighlightState::AfterBytePipe => {
+                mixed_state = MixedHighlightState::Shell;
+                let role = command_role(snapshot, word);
+                active_command = Some(word.to_string());
+                role
+            }
+            MixedHighlightState::DecoderFormat => {
+                mixed_state = MixedHighlightState::Structured;
+                if is_structured_codec(word) {
+                    SemanticRole::Argument
+                } else {
+                    SemanticRole::Warning
+                }
+            }
+            MixedHighlightState::AfterStructuredPipe if word == "to" => {
+                mixed_state = MixedHighlightState::EncoderFormat;
+                SemanticRole::SparSyntax
+            }
+            MixedHighlightState::AfterStructuredPipe => {
+                mixed_state = MixedHighlightState::Structured;
+                structured_word_role(word, function_call, named_parameter)
+            }
+            MixedHighlightState::Structured => {
+                structured_word_role(word, function_call, named_parameter)
+            }
+            MixedHighlightState::EncoderFormat => {
+                mixed_state = MixedHighlightState::ByteOutput;
+                if is_structured_codec(word) {
+                    SemanticRole::Argument
+                } else {
+                    SemanticRole::Warning
+                }
+            }
+            MixedHighlightState::ByteOutput => {
+                if word.starts_with('-') {
+                    SemanticRole::Option
+                } else {
+                    SemanticRole::Argument
+                }
+            }
+            MixedHighlightState::Shell if function_call => SemanticRole::Function,
+            MixedHighlightState::Shell if named_parameter => SemanticRole::Parameter,
+            MixedHighlightState::Shell if command_position && is_spar_keyword(word) => {
+                SemanticRole::SparSyntax
+            }
+            MixedHighlightState::Shell if command_position => {
+                let role = command_role(snapshot, word);
+                active_command = Some(word.to_string());
+                role
+            }
+            MixedHighlightState::Shell
+                if active_command.as_deref().is_some_and(command_takes_path)
+                    && !word.starts_with('-') =>
+            {
+                SemanticRole::Path
+            }
+            MixedHighlightState::Shell if word.starts_with('-') => SemanticRole::Option,
+            MixedHighlightState::Shell => SemanticRole::Argument,
         };
 
-        spans.push(HighlightSpan { range: index..end, role });
+        spans.push(HighlightSpan {
+            range: index..end,
+            role,
+        });
         command_position = false;
         index = end;
     }
 
     spans
+}
+
+fn command_role(snapshot: &ShellUiSnapshot, word: &str) -> SemanticRole {
+    match snapshot.classify_command(word) {
+        CommandKind::Builtin => SemanticRole::Builtin,
+        CommandKind::Alias => SemanticRole::Alias,
+        CommandKind::External => SemanticRole::ExternalCommand,
+        CommandKind::Unknown => SemanticRole::UnknownCommand,
+    }
+}
+
+fn structured_word_role(word: &str, function_call: bool, named_parameter: bool) -> SemanticRole {
+    if function_call {
+        SemanticRole::Function
+    } else if named_parameter {
+        SemanticRole::Parameter
+    } else {
+        match word {
+            "fn" | "if" | "else" | "for" | "return" | "mut" => SemanticRole::SparSyntax,
+            "true" | "false" => SemanticRole::DataBool,
+            "null" | "None" => SemanticRole::DataNull,
+            _ => SemanticRole::Argument,
+        }
+    }
+}
+
+fn is_structured_codec(word: &str) -> bool {
+    matches!(
+        word,
+        "json" | "jsonl" | "csv" | "tsv" | "yaml" | "toml" | "lines" | "text"
+    )
 }
 
 pub(crate) fn paint_range(
@@ -157,21 +269,27 @@ fn quoted_end(line: &str, start: usize, quote: char) -> usize {
     line.len()
 }
 
-fn operator_at(line: &str, index: usize) -> Option<(usize, bool)> {
-    for (operator, starts_command) in [
-        ("2>>", false),
-        ("&&", true),
-        ("||", true),
-        (">>", false),
-        ("2>", false),
-        ("|", true),
-        (";", true),
-        ("<", false),
-        (">", false),
-        ("=", false),
+fn operator_at(line: &str, index: usize) -> Option<(usize, OperatorKind)> {
+    for (operator, kind) in [
+        ("|>", OperatorKind::StructuredPipe),
+        ("2>>", OperatorKind::Expression),
+        ("&&", OperatorKind::CommandSeparator),
+        ("||", OperatorKind::CommandSeparator),
+        (">>", OperatorKind::Expression),
+        ("2>", OperatorKind::Expression),
+        ("=>", OperatorKind::Expression),
+        (">=", OperatorKind::Expression),
+        ("<=", OperatorKind::Expression),
+        ("==", OperatorKind::Expression),
+        ("!=", OperatorKind::Expression),
+        ("|", OperatorKind::ShellPipe),
+        (";", OperatorKind::CommandSeparator),
+        ("<", OperatorKind::Expression),
+        (">", OperatorKind::Expression),
+        ("=", OperatorKind::Expression),
     ] {
         if line[index..].starts_with(operator) {
-            return Some((operator.len(), starts_command));
+            return Some((operator.len(), kind));
         }
     }
     None
@@ -192,7 +310,9 @@ fn word_end(line: &str, start: usize) -> usize {
 }
 
 fn next_non_whitespace_char(line: &str, start: usize) -> Option<char> {
-    line[start..].chars().find(|character| !character.is_whitespace())
+    line[start..]
+        .chars()
+        .find(|character| !character.is_whitespace())
 }
 
 fn command_takes_path(command: &str) -> bool {
@@ -219,6 +339,8 @@ fn is_spar_keyword(word: &str) -> bool {
             | "shell"
             | "command"
             | "exec"
+            | "await"
+            | "async"
     )
 }
 
@@ -343,8 +465,180 @@ mod tests {
         let spans = scan("create(name: \"OCC\")", &snapshot);
 
         assert_eq!(spans[0].role, SemanticRole::Function);
-        assert!(spans.iter().any(|span| span.role == SemanticRole::Parameter));
-        assert!(spans.iter().all(|span| span.role != SemanticRole::UnknownCommand));
+        assert!(spans
+            .iter()
+            .any(|span| span.role == SemanticRole::Parameter));
+        assert!(spans
+            .iter()
+            .all(|span| span.role != SemanticRole::UnknownCommand));
+    }
+
+    fn role_of(
+        source: &str,
+        word: &str,
+        snapshot: &sparsh_core::ShellUiSnapshot,
+    ) -> Option<SemanticRole> {
+        scan(source, snapshot)
+            .into_iter()
+            .find(|span| &source[span.range.clone()] == word)
+            .map(|span| span.role)
+    }
+
+    #[test]
+    fn data_functions_are_green_at_the_prompt_without_an_import() {
+        let source = "printf 'a\\n1\\n' | from csv |> where(fn(r) => r.a > 0) |> take(1)";
+        let session = ShellSession::try_new_interactive().unwrap();
+        let snapshot = session.ui_snapshot();
+
+        assert_eq!(
+            role_of(source, "where", &snapshot),
+            Some(SemanticRole::Function)
+        );
+        assert_eq!(
+            role_of(source, "take", &snapshot),
+            Some(SemanticRole::Function)
+        );
+        assert_eq!(
+            role_of("where(x, fn(r) => true)", "where", &snapshot),
+            Some(SemanticRole::Function)
+        );
+
+        // Scripts (non-interactive sessions) still need the import, so the
+        // name is not highlighted as a function there.
+        let script = ShellSession::try_new().unwrap().ui_snapshot();
+        assert_ne!(
+            role_of(source, "where", &script),
+            Some(SemanticRole::Function)
+        );
+    }
+
+    #[test]
+    fn await_is_a_keyword_and_the_awaited_call_is_a_function() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("async function fetch(url: str) -> int { return 1; };")
+            .unwrap();
+        let snapshot = session.ui_snapshot();
+        let source = "await fetch(url: \"x\")";
+
+        assert_eq!(
+            role_of(source, "await", &snapshot),
+            Some(SemanticRole::SparSyntax)
+        );
+        assert_eq!(
+            role_of(source, "fetch", &snapshot),
+            Some(SemanticRole::Function)
+        );
+    }
+
+    #[test]
+    fn a_user_declared_name_stops_being_a_prelude_function() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session.submit("var mut count: int = 0;").unwrap();
+        let snapshot = session.ui_snapshot();
+
+        assert_ne!(
+            role_of("count(1)", "count", &snapshot),
+            Some(SemanticRole::Function)
+        );
+        assert_eq!(
+            role_of("take(1)", "take", &snapshot),
+            Some(SemanticRole::Function)
+        );
+    }
+
+    #[test]
+    fn mixed_pipeline_bridge_and_structured_stage_are_not_unknown_commands() {
+        let mut session = ShellSession::new();
+        session
+            .submit_spar(r#"import pkg { where } from "std/data";"#)
+            .unwrap();
+        let snapshot = session.ui_snapshot();
+        let source =
+            "printf 'name,age\\nObi,24\\n' | from csv |> where(fn(row) => row.age > 20) |> to json";
+        let spans = scan(source, &snapshot);
+
+        let slice = |span: &HighlightSpan| &source[span.range.clone()];
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "from" && span.role == SemanticRole::SparSyntax));
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "csv" && span.role != SemanticRole::UnknownCommand));
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "|>" && span.role == SemanticRole::Operator));
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "where" && span.role == SemanticRole::Function));
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "fn" && span.role == SemanticRole::SparSyntax));
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "to" && span.role == SemanticRole::SparSyntax));
+        assert!(spans
+            .iter()
+            .any(|span| slice(span) == "json" && span.role != SemanticRole::UnknownCommand));
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.role != SemanticRole::UnknownCommand),
+            "known mixed-pipeline syntax must not render as an unknown command: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn from_is_not_a_global_bridge_keyword() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let spans = scan("from something", &snapshot);
+        assert_ne!(spans[0].role, SemanticRole::SparSyntax);
+    }
+
+    #[test]
+    fn structured_pipe_is_one_span_not_pipe_plus_greater_than() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let source = "value |> take(2)";
+        let spans = scan(source, &snapshot);
+        let pipe = spans
+            .iter()
+            .find(|span| &source[span.range.clone()] == "|>")
+            .unwrap();
+        assert_eq!(pipe.role, SemanticRole::Operator);
+        assert_eq!(pipe.range.end - pipe.range.start, 2);
+    }
+
+    #[test]
+    fn mixed_highlighting_preserves_every_input_byte() {
+        let snapshot = Arc::new(RwLock::new(ShellSession::new().ui_snapshot()));
+        let highlighter = SparshHighlighter::new(snapshot, Theme::colored());
+        let source = "printf 'x\\n' | from lines |> to json";
+        let styled = highlighter.highlight(source, source.len());
+        let reconstructed = styled
+            .buffer
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<String>();
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
+    fn mixed_highlighter_recognizes_all_supported_codecs() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        for codec in [
+            "json", "jsonl", "csv", "tsv", "yaml", "toml", "lines", "text",
+        ] {
+            let source = format!("printf x | from {codec} |> to {codec}");
+            let spans = scan(&source, &snapshot);
+            let codec_spans = spans
+                .iter()
+                .filter(|span| &source[span.range.clone()] == codec)
+                .collect::<Vec<_>>();
+            assert_eq!(codec_spans.len(), 2, "{codec}: {spans:?}");
+            assert!(codec_spans
+                .iter()
+                .all(|span| span.role != SemanticRole::UnknownCommand));
+        }
     }
 
     #[test]

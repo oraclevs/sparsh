@@ -80,10 +80,16 @@ export type SparshCompletion {
     enabled?: bool;
 };
 
+export type SparshKeybinding {
+    key: str;
+    action: str;
+};
+
 export type SparshConfig {
     aliases?: List<SparshAlias>;
     environment?: List<SparshEnvironmentVariable>;
     prompt?: SparshPrompt;
     history?: SparshHistory;
     completion?: SparshCompletion;
+    keybindings?: List<SparshKeybinding>;
 };

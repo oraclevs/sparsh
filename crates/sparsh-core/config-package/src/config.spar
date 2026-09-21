@@ -55,10 +55,16 @@ export type CompletionConfig {
     enabled?: bool;
 };
 
+export type KeybindingConfig {
+    key: str;
+    action: str;
+};
+
 export type SparshConfig {
     aliases?: List<AliasConfig>;
     environment?: List<EnvironmentConfig>;
     prompt?: PromptConfig;
     history?: HistoryConfig;
     completion?: CompletionConfig;
+    keybindings?: List<KeybindingConfig>;
 };

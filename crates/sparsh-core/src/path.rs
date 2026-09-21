@@ -287,9 +287,13 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&executable, permissions).unwrap();
 
-        assert!(!path.executable_names(Path::new("/")).contains("new-command"));
+        assert!(!path
+            .executable_names(Path::new("/"))
+            .contains("new-command"));
         path.invalidate_executable_cache();
-        assert!(path.executable_names(Path::new("/")).contains("new-command"));
+        assert!(path
+            .executable_names(Path::new("/"))
+            .contains("new-command"));
     }
 
     #[test]

@@ -40,6 +40,17 @@ pub enum SemanticRole {
     ProjectDart,
     ProjectNode,
     ProjectGo,
+    /// Keys of records, JSON objects, YAML and TOML.
+    DataKey,
+    DataString,
+    DataNumber,
+    DataBool,
+    DataNull,
+    /// Brackets, commas, colons and other structure in rendered data.
+    DataPunct,
+    TableHeader,
+    TableIndex,
+    TableBorder,
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +102,9 @@ impl Theme {
         if !self.enabled {
             return text.to_string();
         }
-        apply_text_style(self.style(role), style).paint(text).to_string()
+        apply_text_style(self.style(role), style)
+            .paint(text)
+            .to_string()
     }
 
     pub(crate) fn style(&self, role: SemanticRole) -> Style {
@@ -101,9 +114,13 @@ impl Theme {
         match role {
             SemanticRole::Cwd => Style::new().fg(Color::LightBlue).bold(),
             SemanticRole::GitBranch => Style::new().fg(Color::LightMagenta),
-            SemanticRole::GitClean | SemanticRole::Success => Style::new().fg(Color::LightGreen).bold(),
+            SemanticRole::GitClean | SemanticRole::Success => {
+                Style::new().fg(Color::LightGreen).bold()
+            }
             SemanticRole::GitStaged => Style::new().fg(Color::LightGreen),
-            SemanticRole::GitModified | SemanticRole::GitDirty | SemanticRole::Warning => Style::new().fg(Color::Yellow),
+            SemanticRole::GitModified | SemanticRole::GitDirty | SemanticRole::Warning => {
+                Style::new().fg(Color::Yellow)
+            }
             SemanticRole::GitUntracked => Style::new().fg(Color::LightBlue),
             SemanticRole::GitConflict => Style::new().fg(Color::LightRed).bold(),
             SemanticRole::GitAhead => Style::new().fg(Color::LightCyan),
@@ -133,6 +150,14 @@ impl Theme {
                 Style::new().fg(Color::LightCyan).bold()
             }
             SemanticRole::ProjectNode => Style::new().fg(Color::LightGreen).bold(),
+            SemanticRole::DataKey => Style::new().fg(Color::LightBlue).bold(),
+            SemanticRole::DataString => Style::new().fg(Color::LightGreen),
+            SemanticRole::DataNumber => Style::new().fg(Color::LightCyan),
+            SemanticRole::DataBool => Style::new().fg(Color::LightMagenta).bold(),
+            SemanticRole::DataNull => Style::new().fg(Color::DarkGray).italic(),
+            SemanticRole::DataPunct | SemanticRole::TableBorder => Style::new().fg(Color::DarkGray),
+            SemanticRole::TableHeader => Style::new().fg(Color::LightGreen).bold(),
+            SemanticRole::TableIndex => Style::new().fg(Color::Green).bold(),
         }
     }
 }
@@ -185,17 +210,29 @@ mod tests {
     #[test]
     fn paint_spec_applies_color_and_style_or_nothing_when_plain() {
         let t = Theme::colored();
-        let bold = TextStyle { bold: true, ..Default::default() };
+        let bold = TextStyle {
+            bold: true,
+            ..Default::default()
+        };
         let bold_cyan = t.paint_spec(Some(ColorSpec::Indexed(6)), bold, "x");
         assert!(bold_cyan.contains("\x1b[") && bold_cyan.contains('x'));
         assert_ne!(
             bold_cyan,
             t.paint_spec(Some(ColorSpec::Indexed(6)), TextStyle::default(), "x")
         );
-        assert_eq!(Theme::plain().paint_spec(Some(ColorSpec::Indexed(6)), bold, "x"), "x");
+        assert_eq!(
+            Theme::plain().paint_spec(Some(ColorSpec::Indexed(6)), bold, "x"),
+            "x"
+        );
         assert_eq!(t.paint_spec(None, TextStyle::default(), "x"), "x");
-        assert_ne!(t.paint_role_styled(SemanticRole::Duration, bold, "x"), t.paint(SemanticRole::Duration, "x"));
-        assert_eq!(Theme::plain().paint_role_styled(SemanticRole::Duration, bold, "x"), "x");
+        assert_ne!(
+            t.paint_role_styled(SemanticRole::Duration, bold, "x"),
+            t.paint(SemanticRole::Duration, "x")
+        );
+        assert_eq!(
+            Theme::plain().paint_role_styled(SemanticRole::Duration, bold, "x"),
+            "x"
+        );
     }
 
     #[test]

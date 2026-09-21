@@ -40,13 +40,13 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<CliMode, St
         [flag] if flag == "--help" => Ok(CliMode::Help),
         [flag] if flag == "--version" => Ok(CliMode::Version),
         [flag] if flag == "--login" => Ok(CliMode::Startup(StartupMode::Login)),
-        [flag, path] if flag == "--edit-buffer" => Ok(CliMode::EditBuffer(PathBuf::from(path.as_str()))),
-        [flag, input] if flag == "-c" => {
-            Ok(CliMode::Startup(StartupMode::Command(input.clone())))
+        [flag, path] if flag == "--edit-buffer" => {
+            Ok(CliMode::EditBuffer(PathBuf::from(path.as_str())))
         }
-        [flag, input] if flag == "--remote-command" => Ok(CliMode::Startup(
-            StartupMode::RemoteCommand(input.clone()),
-        )),
+        [flag, input] if flag == "-c" => Ok(CliMode::Startup(StartupMode::Command(input.clone()))),
+        [flag, input] if flag == "--remote-command" => {
+            Ok(CliMode::Startup(StartupMode::RemoteCommand(input.clone())))
+        }
         _ => Err("invalid arguments".into()),
     }
 }
@@ -71,7 +71,7 @@ fn run_one_command(startup: StartupMode, input: String) -> i32 {
     let mut err = stderr.lock();
     load_config_or_report(&mut session, &mut err);
 
-    match session.submit(&input) {
+    match session.submit_script(&input) {
         Ok(result) => {
             let status = result_status(&result);
             if let Err(error) = render_result(&result, &Theme::plain(), false, &mut out) {
@@ -147,6 +147,7 @@ fn result_status(result: &ShellResult) -> i32 {
     match result {
         ShellResult::Empty
         | ShellResult::Value(_)
+        | ShellResult::Structured(_)
         | ShellResult::EditorMode(_)
         | ShellResult::ReloadConfig
         | ShellResult::ExecRequest { .. }
@@ -218,13 +219,16 @@ mod tests {
 
         assert!(matches!(
             mode,
-            CliMode::EditBuffer(path) if path == std::path::PathBuf::from("/tmp/sparsh-buffer.spar")
+            CliMode::EditBuffer(path) if path.as_path() == std::path::Path::new("/tmp/sparsh-buffer.spar")
         ));
     }
 
     #[test]
     fn cli_parser_distinguishes_login_remote_and_command_modes() {
-        assert!(matches!(parse_args(Vec::<String>::new()).unwrap(), CliMode::Default));
+        assert!(matches!(
+            parse_args(Vec::<String>::new()).unwrap(),
+            CliMode::Default
+        ));
         assert!(matches!(
             parse_args(["--login".to_string()]).unwrap(),
             CliMode::Startup(StartupMode::Login)
