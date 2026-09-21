@@ -2603,7 +2603,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         let root = home.path().join(".sparsh");
         spar::package::commands::add(
             &root,
-            "my-tools",
+            "myTools",
             &format!("path:{}", tools.path().display()),
             &spar::package::GitCommandProvider::default(),
             spar::package::NetworkPolicy::Offline,
@@ -2643,7 +2643,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         let _lock = PROCESS_STATE.lock().unwrap();
         let _cwd = CwdGuard::capture();
         let (home, _tools) = home_with_tools_dependency(
-            "import pkg { dismantler } from \"my-tools\";\nvar answer: int = dismantler();\n",
+            "import pkg { dismantler } from \"myTools\";\nvar answer: int = dismantler();\n",
         );
         let mut session = session_with_home(home.path());
 
@@ -2665,7 +2665,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         session.reload_config().unwrap();
 
         session
-            .submit_spar("import pkg { dismantler } from \"my-tools\";")
+            .submit_spar("import pkg { dismantler } from \"myTools\";")
             .unwrap();
         let result = session.submit_spar("dismantler()").unwrap();
 
@@ -2685,7 +2685,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
 
         let result = session
             .submit_script(
-                "import pkg { dismantler } from \"my-tools\";\nvar n: int = dismantler();\n",
+                "import pkg { dismantler } from \"myTools\";\nvar n: int = dismantler();\n",
             )
             .unwrap();
 
@@ -2755,5 +2755,29 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             .expect_err("bad lock must fail the reload");
 
         assert!(error.to_string().contains("pkg install"), "{error}");
+    }
+
+    #[test]
+    fn pkg_add_makes_the_dependency_importable_without_restart() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        write_tools_package(tools.path());
+        let mut session = session_with_home(home.path());
+        session.reload_config().unwrap();
+
+        session
+            .submit(&format!("pkg add myTools path:{}", tools.path().display()))
+            .unwrap();
+        session
+            .submit_spar("import pkg { dismantler } from \"myTools\";")
+            .unwrap();
+        let result = session.submit_spar("dismantler()").unwrap();
+
+        assert!(
+            matches!(result, ShellResult::Value(spar::ConfigValue::Int(42))),
+            "{result:?}"
+        );
     }
 }

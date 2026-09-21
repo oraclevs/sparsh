@@ -453,9 +453,7 @@ mod tests {
             "this is not a lockfile {{{",
         )
         .unwrap();
-        let message = locator_for(&root, &store)
-            .err()
-            .expect("malformed lock is an error");
+        let message = locator_for(&root, &store).expect_err("malformed lock is an error");
         assert!(message.contains("spar.package.lock.spar"), "{message}");
         assert!(message.contains("pkg install"), "{message}");
     }

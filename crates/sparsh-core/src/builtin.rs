@@ -5,6 +5,7 @@ use crate::services::ShellServices;
 
 mod history;
 mod io;
+mod pkg;
 mod session_extra;
 mod system;
 
@@ -391,6 +392,15 @@ impl BuiltinRegistry {
                     true,
                     false,
                     repl
+                ),
+                builtin!(
+                    "pkg",
+                    "Manage dependencies of the ~/.sparsh config package",
+                    "pkg add <alias> <request> | remove <alias> | install [--offline] | update [alias] | tree",
+                    "package",
+                    true,
+                    true,
+                    pkg::pkg
                 ),
                 builtin!(
                     "reload",
@@ -978,6 +988,7 @@ mod tests {
             "deactivate",
             "repl",
             "reload",
+            "pkg",
             "exit",
         ];
         for name in expected {
