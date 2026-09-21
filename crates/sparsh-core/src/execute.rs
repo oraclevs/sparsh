@@ -51,7 +51,14 @@ pub(crate) fn execute_plan(
         return Ok(ShellResult::EditorMode(mode));
     }
     if executor.requested_reload_config {
-        return Ok(ShellResult::ReloadConfig);
+        return Ok(match executor.last_result {
+            Some(ShellResult::Builtin(output))
+                if !output.stdout.is_empty() || !output.stderr.is_empty() =>
+            {
+                ShellResult::ReloadConfigWith(output)
+            }
+            _ => ShellResult::ReloadConfig,
+        });
     }
     if let Some((words, template)) = executor.requested_exec {
         return Ok(ShellResult::ExecRequest {

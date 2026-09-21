@@ -103,6 +103,7 @@ pub fn render_result<W: Write>(
         ShellResult::Empty
         | ShellResult::EditorMode(_)
         | ShellResult::ReloadConfig
+        | ShellResult::ReloadConfigWith(_)
         | ShellResult::ExecRequest { .. }
         | ShellResult::SourceRequest(_)
         | ShellResult::Process(_)

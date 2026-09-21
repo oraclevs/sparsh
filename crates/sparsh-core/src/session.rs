@@ -110,6 +110,10 @@ pub enum ShellResult {
     Structured(spar::InteractiveRuntimeValue),
     EditorMode(EditorMode),
     ReloadConfig,
+    /// A builtin that printed output and also requested a config reload;
+    /// the session reloads, then hands the output back as `Builtin`.
+    #[doc(hidden)]
+    ReloadConfigWith(BuiltinOutput),
     #[doc(hidden)]
     ExecRequest {
         words: Vec<String>,
@@ -445,6 +449,11 @@ impl ShellSession {
                 self.last_status = 0;
                 Ok(ShellResult::ReloadConfig)
             }
+            Ok(ShellResult::ReloadConfigWith(output)) => {
+                self.reload_config()?;
+                self.last_status = output.status;
+                Ok(ShellResult::Builtin(output))
+            }
             Ok(result) => {
                 self.remember_interactive_value(&result);
                 self.last_status = match &result {
@@ -453,6 +462,7 @@ impl ShellSession {
                     | ShellResult::Structured(_)
                     | ShellResult::EditorMode(_)
                     | ShellResult::ReloadConfig
+                    | ShellResult::ReloadConfigWith(_)
                     | ShellResult::ExecRequest { .. }
                     | ShellResult::SourceRequest(_) => 0,
                     ShellResult::Builtin(output) => output.status,
@@ -2767,9 +2777,16 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         let mut session = session_with_home(home.path());
         session.reload_config().unwrap();
 
-        session
+        let added = session
             .submit(&format!("pkg add myTools path:{}", tools.path().display()))
             .unwrap();
+        let ShellResult::Builtin(output) = added else {
+            panic!("pkg add should report its result, got {added:?}");
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("added 'myTools'"),
+            "{output:?}"
+        );
         session
             .submit_spar("import pkg { dismantler } from \"myTools\";")
             .unwrap();

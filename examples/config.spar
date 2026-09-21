@@ -1,4 +1,4 @@
-// Copy as ~/.sparsh/sparsh.spar and place sparsh-types.spar beside it.
+// Copy as ~/.sparsh/src/config.spar and place sparsh-types.spar beside it.
 import type {
     SparshAlias,
     SparshEnvironmentVariable,
