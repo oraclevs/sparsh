@@ -2,6 +2,7 @@ mod alias;
 pub mod builtin;
 mod completion;
 mod config;
+mod config_home;
 mod directory;
 mod dispatch;
 mod environment;

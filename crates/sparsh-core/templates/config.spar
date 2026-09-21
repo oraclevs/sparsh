@@ -1,0 +1,4 @@
+// Sparsh configuration. This file is the entry point of the ~/.sparsh Spar package.
+// Add dependencies with `pkg add <alias> <source>` and import them:
+//   import pkg { helper } from "my-tools";
+// Declare `struct Config: SparshConfig { ... };` to configure aliases, prompt, history and keybindings.
