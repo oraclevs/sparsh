@@ -9,13 +9,20 @@ license = "MIT"
 rust-version = "1.85"
 
 [package]
-name = "sparsh"
+name = "sparsh-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 description = "Sparsh - the Spar shell"
 repository = "https://github.com/oraclevs/sparsh"
+
+# crates.io package name differs from the installed binary name: `sparsh`
+# was already taken by an unrelated project. `cargo install sparsh-shell`
+# still puts a `sparsh` binary on PATH.
+[[bin]]
+name = "sparsh"
+path = "src/main.rs"
 
 [dependencies]
 sparsh-core = { path = "crates/sparsh-core", version = "0.1.0" }

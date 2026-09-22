@@ -1044,15 +1044,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sparsh"
-version = "0.1.0"
-dependencies = [
- "sparsh-core",
- "sparsh-ui",
- "tempfile",
-]
-
-[[package]]
 name = "sparsh-core"
 version = "0.1.0"
 dependencies = [
@@ -1061,6 +1052,15 @@ dependencies = [
  "spar",
  "spar-command",
  "spar-process",
+ "tempfile",
+]
+
+[[package]]
+name = "sparsh-shell"
+version = "0.1.0"
+dependencies = [
+ "sparsh-core",
+ "sparsh-ui",
  "tempfile",
 ]
 
