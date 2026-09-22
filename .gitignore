@@ -1,2 +1,9 @@
 /target/
 /.worktrees/
+
+# internal-only, never public
+/docs/
+/scripts/
+/PATCH_MANIFEST.md
+/SPARSH_TODO.md
+/VERIFY.md
