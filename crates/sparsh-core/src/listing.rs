@@ -165,6 +165,16 @@ impl Entry {
 
     fn into_row(self, long: bool) -> Value {
         let kind = kind_of(&self.metadata);
+        // A directory's own metadata is its inode size (a few KB, however
+        // much it holds), not what is stored under it. Nushell and `ls -la`
+        // both show that inode size; users expect `du`'s total instead, so
+        // that's what this reports. Symlinked directories are not descended
+        // into, matching `du`'s default and avoiding cycles through them.
+        let size = if kind == "dir" {
+            directory_size(&self.path)
+        } else {
+            self.metadata.len()
+        };
         let modified = self
             .metadata
             .modified()
@@ -176,7 +186,7 @@ impl Entry {
         fields.insert("type".to_string(), Value::String(kind.to_string()));
         fields.insert(
             "size".to_string(),
-            Value::Int(i64::try_from(self.metadata.len()).unwrap_or(i64::MAX)),
+            Value::Int(i64::try_from(size).unwrap_or(i64::MAX)),
         );
         fields.insert(
             "modified".to_string(),
@@ -203,6 +213,36 @@ impl Entry {
         }
         Value::Object(fields)
     }
+}
+
+/// Total size of everything under `root`, like `du -sb`: apparent file sizes
+/// (`metadata.len()`), not allocated blocks, summed depth-first. A directory
+/// entry that cannot be read (permissions, or removed mid-walk) contributes
+/// nothing rather than failing the whole listing. Symlinks are never
+/// followed, so shared caches and loops through a parent are never counted or
+/// walked twice.
+fn directory_size(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+    }
+    total
 }
 
 /// `dir`, `file`, `exe` (executable regular file), `symlink`, `fifo`,
@@ -484,6 +524,65 @@ mod tests {
             .map(|field| field.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["name", "type", "size", "modified"]);
+    }
+
+    #[test]
+    fn directory_size_is_the_total_of_everything_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), "12345").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/b"), "1234567").unwrap();
+        fs::create_dir(dir.path().join("sub/deeper")).unwrap();
+        fs::write(dir.path().join("sub/deeper/c"), "12").unwrap();
+        assert_eq!(directory_size(dir.path()), 5 + 7 + 2);
+
+        let Value::Table(table) = list(&ListRequest::default(), dir.path()).unwrap() else {
+            panic!("table expected")
+        };
+        let row = table
+            .rows()
+            .iter()
+            .find(|row| text(row, "name") == "sub")
+            .unwrap();
+        let Value::Object(fields) = row else {
+            panic!("record expected")
+        };
+        assert_eq!(fields["size"], Value::Int(9));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_reports_its_own_link_size_not_its_targets() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/big"), "0123456789").unwrap();
+        symlink("real", dir.path().join("link")).unwrap();
+
+        let Value::Table(table) = list(&ListRequest::default(), dir.path()).unwrap() else {
+            panic!("table expected")
+        };
+        let link = table
+            .rows()
+            .iter()
+            .find(|row| text(row, "name") == "link")
+            .unwrap();
+        assert_eq!(text(link, "type"), "symlink");
+        let Value::Object(fields) = link else {
+            panic!("record expected")
+        };
+        // A symlink's own size (the length of the path it stores), not 10.
+        assert!(matches!(fields["size"], Value::Int(n) if n < 10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cycle_inside_a_directory_does_not_hang_or_double_count() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("real"), "12345").unwrap();
+        symlink(dir.path(), dir.path().join("self")).unwrap();
+        assert_eq!(directory_size(dir.path()), 5);
     }
 
     #[cfg(unix)]

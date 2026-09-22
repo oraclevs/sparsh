@@ -2,6 +2,12 @@ use std::collections::{BTreeMap, HashSet};
 
 const MAX_ALIAS_DEPTH: usize = 64;
 
+/// The fallback `ls` alias Sparsh installs itself when no config defines one
+/// (see `install_color_ls_alias`). Native structured `ls` only runs while the
+/// current alias is exactly this: any alias the user wrote, in config or via
+/// the `alias` builtin, takes priority over it.
+pub(crate) const BUILTIN_LS_ALIAS: &[&str] = &["ls", "--color=auto"];
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AliasService {
     entries: BTreeMap<String, Vec<String>>,

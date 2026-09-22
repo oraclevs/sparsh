@@ -350,7 +350,7 @@ impl ShellSession {
             let result = self.submit_spar(input);
             return self.finish_submission(result);
         }
-        if self.mode == SessionMode::InteractiveTty {
+        if self.mode == SessionMode::InteractiveTty && !self.has_user_ls_alias() {
             if let Some(result) = self.value_pipeline_from_structured_source(input, &cwd) {
                 return self.finish_submission(result);
             }
@@ -760,6 +760,16 @@ impl ShellSession {
         })
     }
 
+    /// True once the user has their own `ls` alias, from config or the
+    /// `alias` builtin, rather than Sparsh's own `--color=auto` fallback (or
+    /// no alias at all). A user alias always wins over the native table.
+    fn has_user_ls_alias(&self) -> bool {
+        self.services
+            .aliases
+            .get("ls")
+            .is_some_and(|expansion| expansion != crate::alias::BUILTIN_LS_ALIAS)
+    }
+
     /// `ls |> stages` and `_ |> to FORMAT`: a structured source feeding a value
     /// pipeline. `to FORMAT` encodes the value for display; anything else runs
     /// as `_ |> stages` on the fresh listing.
@@ -1116,7 +1126,13 @@ fn install_color_ls_alias(
         .is_ok_and(|status| status.success());
     if supported {
         aliases
-            .define("ls", vec!["ls".into(), "--color=auto".into()])
+            .define(
+                crate::alias::BUILTIN_LS_ALIAS[0],
+                crate::alias::BUILTIN_LS_ALIAS
+                    .iter()
+                    .map(|word| (*word).to_string())
+                    .collect(),
+            )
             .expect("the built-in ls alias is valid");
     }
 }
@@ -2393,6 +2409,39 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
                 "String(\".env\")",
                 "String(\"Cargo.toml\")"
             ]
+        );
+    }
+
+    #[test]
+    fn a_user_ls_alias_always_wins_over_the_native_table() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit(&format!("cd {}", dir.path().display()))
+            .unwrap();
+        // Sparsh's own `--color=auto` fallback never blocks the native table.
+        assert!(matches!(
+            session.submit("ls").unwrap(),
+            ShellResult::Structured(_)
+        ));
+
+        session
+            .services
+            .aliases
+            .define("ls", vec!["eza".into(), "-la".into()])
+            .unwrap();
+        let result = session.submit("ls").unwrap();
+        assert!(
+            !matches!(result, ShellResult::Structured(_)),
+            "user alias should run instead of the native table: {result:?}"
+        );
+        // With a user alias in place, `ls` is an ordinary external command
+        // again: `|> to yaml` on raw bytes is the same parse error Spar gives
+        // without any of this feature, not a native listing shortcut.
+        assert!(
+            session.submit("ls |> to yaml").is_err(),
+            "the native `ls |> to FORMAT` shortcut must not survive a user alias"
         );
     }
 
