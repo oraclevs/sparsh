@@ -11,6 +11,7 @@ pub(crate) fn compose_function_pipeline(
     spar: &spar::Session,
     cwd: &Path,
     environment: &[(OsString, OsString)],
+    last_status: i32,
 ) -> Result<Option<ShellPlan>, ShellError> {
     let stages = split_top_level_pipeline(source);
     if stages.len() < 2 || !stages.iter().any(|stage| is_explicit_call(stage.trim())) {
@@ -33,7 +34,7 @@ pub(crate) fn compose_function_pipeline(
             commands.extend(flatten_single_pipeline(plan)?);
         } else {
             let plan = spar
-                .eval_shell_plan_with_context(stage, cwd, environment)
+                .eval_shell_plan_with_context(stage, cwd, environment, Some(last_status))
                 .map_err(|errors| ShellError::from_spar(errors, stage))?;
             commands.extend(flatten_single_pipeline(plan)?);
         }
@@ -161,6 +162,7 @@ mod tests {
             &session,
             Path::new("/"),
             &environment,
+            0,
         )
         .unwrap()
         .expect("explicit Spar call should trigger mixed-pipeline composition");
@@ -188,6 +190,7 @@ mod tests {
             &session,
             Path::new("/"),
             &environment,
+            0,
         )
         .unwrap_err();
 
@@ -210,9 +213,14 @@ mod tests {
             .unwrap();
         let environment: Vec<(OsString, OsString)> = Vec::new();
 
-        let error =
-            compose_function_pipeline("emit() | cat", &session, Path::new("/"), &environment)
-                .unwrap_err();
+        let error = compose_function_pipeline(
+            "emit() | cat",
+            &session,
+            Path::new("/"),
+            &environment,
+            0,
+        )
+        .unwrap_err();
 
         assert_eq!(error.status(), 2);
         assert!(error

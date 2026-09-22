@@ -372,6 +372,7 @@ impl ShellSession {
             &self.spar,
             &cwd,
             &environment,
+            self.last_status,
         )? {
             let result = execute_plan(
                 &plan,
@@ -425,7 +426,7 @@ impl ShellSession {
             )),
             Dispatch::Command(command) => self
                 .spar
-                .eval_shell_plan_with_context(command, &cwd, &environment)
+                .eval_shell_plan_with_context(command, &cwd, &environment, Some(self.last_status))
                 .map_err(|errors| ShellError::from_spar(errors, command))
                 .and_then(|plan| {
                     execute_plan(
@@ -1274,6 +1275,27 @@ mod tests {
             ShellResult::Exit(1)
         ));
         assert!(session.should_exit());
+    }
+
+    #[test]
+    fn dollar_question_reports_the_previous_command_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("status.txt");
+        let mut session = ShellSession::new();
+        session.submit("false").unwrap();
+        assert_eq!(session.last_status(), 1);
+
+        let result = session
+            .submit(&format!("printf '%s' $? | cat > {}", output.display()))
+            .unwrap();
+        assert!(
+            matches!(
+                result,
+                ShellResult::Process(spar::ShellPlanOutcome { success: true, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "1");
     }
 
     #[test]
