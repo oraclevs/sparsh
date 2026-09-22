@@ -1,19 +1,23 @@
 # Sparsh
 
-Sparsh is the interactive Unix shell for the Spar ecosystem.
+Sparsh is an interactive Unix shell built on [Spar](https://github.com/oraclevs/spar) — a real typed language for your rc file, functions, and pipelines instead of Bash string-splicing:
 
-- `spar` is the language/compiler/runtime.
+```spar
+function build(profile: str) -> shell {
+    return shell { cargo build --profile "${profile}"; };
+};
+
+build(profile: "release")
+```
+
+Bare words still run commands like any shell. The difference shows up the moment you want a function, a typed config, or a structured `ls` you can actually query.
+
+- `spar` is the language, compiler, and runtime.
 - `spar-command` is the neutral command-plan representation.
 - `spar-process` owns Unix process execution primitives.
-- `sparsh` is the interactive shell and persistent Spar session.
+- `sparsh` (this repo) is the interactive shell and persistent Spar session.
 
-Spar never depends on Sparsh. Sparsh uses Spar, `spar-command`, and
-`spar-process` as libraries; native Spar shell syntax is never silently
-translated to Bash/Zsh/Fish.
-
-> Verification note: this source tree was assembled in an environment without
-> `cargo`/`rustc`. Run the repository-root `VERIFY.md` checks before installing
-> Sparsh as a login shell.
+Spar never depends on Sparsh. Sparsh uses Spar, `spar-command`, and `spar-process` as libraries — native Spar shell syntax is never silently translated to Bash/Zsh/Fish.
 
 ## Build
 
@@ -283,16 +287,16 @@ while it fits the actual terminal and only abbreviates components when width is
 constrained. Explicit `parentLength`, `maxLastLength`, and `maxWidth` settings
 override that default behavior.
 
-Run the root bootstrap script to create a safe starter configuration:
+A ready-to-copy starting pair lives at `examples/config.spar` and
+`examples/sparsh-types.spar`:
 
 ```sh
-./setup-sparsh-config.sh
-# or back up and replace existing generated files:
-./setup-sparsh-config.sh --force
+mkdir -p ~/.sparsh/src
+cp examples/config.spar ~/.sparsh/src/
+cp examples/sparsh-types.spar ~/.sparsh/src/
 ```
 
-A copyable pair also lives at `examples/config.spar` and
-`examples/sparsh-types.spar`.
+Launch Sparsh and it migrates that into a proper package (manifest and lockfile) on first run.
 
 ## Prompt v2
 
