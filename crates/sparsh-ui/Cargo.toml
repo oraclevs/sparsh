@@ -4,14 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Terminal rendering (prompt, tables, pager) for the Sparsh shell"
+repository = "https://github.com/oraclevs/sparsh"
 
 [dependencies]
 crossterm = "0.29"
 indexmap = "2"
 nu-ansi-term = "0.50"
 reedline = { version = "0.49", default-features = false }
-spar = { path = "../../../spar" }
-sparsh-core = { path = "../sparsh-core" }
+spar = { path = "../../../spar", version = "0.6.0" }
+sparsh-core = { path = "../sparsh-core", version = "0.1.0" }
 unicode-width = "0.2"
 libc = "0.2"
 

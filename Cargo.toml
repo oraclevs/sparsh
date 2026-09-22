@@ -14,10 +14,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Sparsh - the Spar shell"
+repository = "https://github.com/oraclevs/sparsh"
 
 [dependencies]
-sparsh-core = { path = "crates/sparsh-core" }
-sparsh-ui = { path = "crates/sparsh-ui" }
+sparsh-core = { path = "crates/sparsh-core", version = "0.1.0" }
+sparsh-ui = { path = "crates/sparsh-ui", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"
