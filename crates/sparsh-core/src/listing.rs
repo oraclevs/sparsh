@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexMap;
+use rayon::prelude::*;
 use spar::{TableValue, Value};
 
 const COLUMN_ORDER: [&str; 8] = [
@@ -112,7 +113,7 @@ pub fn list(request: &ListRequest, cwd: &Path) -> Result<Value, String> {
             .then_with(|| a.name.cmp(&b.name))
     });
     let rows = entries
-        .into_iter()
+        .into_par_iter()
         .map(|entry| entry.into_row(request.long))
         .collect::<Vec<_>>();
     if rows.is_empty() {
@@ -222,27 +223,30 @@ impl Entry {
 /// followed, so shared caches and loops through a parent are never counted or
 /// walked twice.
 fn directory_size(root: &Path) -> u64 {
-    let mut total = 0u64;
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    // Fan out over rayon's shared work-stealing pool: siblings' subtrees are
+    // sized concurrently instead of one `fs::read_dir` + `symlink_metadata`
+    // pair at a time, which is what made this a multi-second walk on a home
+    // directory full of `.cargo`/`.rustup`/`target` trees.
+    entries
+        .flatten()
+        .par_bridge()
+        .map(|entry| {
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
-                continue;
+                return 0;
             };
             if metadata.file_type().is_symlink() {
-                continue;
+                return 0;
             }
             if metadata.is_dir() {
-                pending.push(entry.path());
+                directory_size(&entry.path())
             } else {
-                total += metadata.len();
+                metadata.len()
             }
-        }
-    }
-    total
+        })
+        .sum()
 }
 
 /// `dir`, `file`, `exe` (executable regular file), `symlink`, `fifo`,

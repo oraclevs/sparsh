@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 indexmap = "2"
+rayon = "1"
 spar = { path = "../../../spar" }
 spar-command = { path = "../../../spar-command" }
 spar-process = { path = "../../../spar-process" }
