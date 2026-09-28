@@ -1,14 +1,14 @@
-export function greet(prefix: str, name: str) -> str {
+fn greet(prefix: str, name: str) -> str {
     return "${prefix}, ${name}";
 };
 
-export function build(profile: str) -> shell {
+fn build(profile: str) -> shell {
     return shell {
         cargo build --profile "${profile}";
     };
 };
 
-export function showFile(file: str) -> shell {
+fn showFile(file: str) -> shell {
     return shell {
         cat "${file}";
     };

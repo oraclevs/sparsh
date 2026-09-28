@@ -113,7 +113,7 @@ mod tests {
         std::fs::create_dir_all(tools.path().join("src")).unwrap();
         std::fs::write(
             tools.path().join("spar.package.spar"),
-            "struct Package: SparPackage {\n    name = \"my-tools\";\n    version = \"1.0.0\";\n    kind = \"library\";\n};\n",
+            "struct Package {\n    name: str = \"my-tools\";\n    version: str = \"1.0.0\";\n    kind: str = \"library\";\n};\n",
         )
         .unwrap();
         std::fs::write(

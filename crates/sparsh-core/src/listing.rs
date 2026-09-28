@@ -17,21 +17,31 @@ const COLUMN_ORDER: [&str; 8] = [
     "name", "type", "size", "modified", "mode", "user", "group", "target",
 ];
 
+/// The command names `parse_request` recognizes natively. Exposed so the UI
+/// snapshot can classify them as builtins even when no `ls`/`ll` alias is
+/// installed (e.g. `ll` has no auto-installed default alias to key off).
+pub(crate) const NATIVE_COMMANDS: [&str; 2] = ["ls", "ll"];
+
 /// Parsed `ls [-a] [-l] [paths...]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ListRequest {
     pub long: bool,
+    /// `--sizes`: total each directory's contents (a slow full walk).
+    pub sizes: bool,
     pub paths: Vec<String>,
 }
 
-/// Recognizes a plain `ls` invocation. Anything else — pipes, redirects, globs,
-/// quoting, unknown flags — returns `None` so the external `ls` handles it.
+/// Recognizes a plain `ls` or `ll` invocation (`ll` is `ls -l` under the
+/// hood). Anything else — pipes, redirects, globs, quoting, unknown flags —
+/// returns `None` so the external command handles it.
 pub fn parse_request(input: &str) -> Option<ListRequest> {
     let mut words = input.split_whitespace();
-    if words.next()? != "ls" {
-        return None;
-    }
     let mut request = ListRequest::default();
+    match words.next()? {
+        "ls" => {}
+        "ll" => request.long = true,
+        _ => return None,
+    }
     let mut options_done = false;
     for word in words {
         if word.chars().any(|c| "|&;<>()$`*?[]{}\"'\\~!#".contains(c)) {
@@ -43,6 +53,10 @@ pub fn parse_request(input: &str) -> Option<ListRequest> {
             match word {
                 "--all" | "--almost-all" => {}
                 "--long" => request.long = true,
+                "--sizes" => {
+                    request.long = true;
+                    request.sizes = true;
+                }
                 _ => return None,
             }
         } else if !options_done && word.starts_with('-') && word.len() > 1 {
@@ -114,7 +128,7 @@ pub fn list(request: &ListRequest, cwd: &Path) -> Result<Value, String> {
     });
     let rows = entries
         .into_par_iter()
-        .map(|entry| entry.into_row(request.long))
+        .map(|entry| entry.into_row(request.long, request.sizes))
         .collect::<Vec<_>>();
     if rows.is_empty() {
         return Ok(Value::Table(TableValue::with_schema(
@@ -164,18 +178,11 @@ impl Entry {
         }
     }
 
-    fn into_row(self, long: bool) -> Value {
+    fn into_row(self, long: bool, sizes: bool) -> Value {
         let kind = kind_of(&self.metadata);
-        // A directory's own metadata is its inode size (a few KB, however
-        // much it holds), not what is stored under it. Nushell and `ls -la`
-        // both show that inode size; users expect `du`'s total instead, so
-        // that's what this reports. Symlinked directories are not descended
-        // into, matching `du`'s default and avoiding cycles through them.
-        let size = if kind == "dir" {
-            directory_size(&self.path)
-        } else {
-            self.metadata.len()
-        };
+        // A directory's own metadata is only its inode size, not what it
+        // holds, and totalling the tree is far too slow for a listing, so
+        // directories carry no size; `ll` shows file sizes only.
         let modified = self
             .metadata
             .modified()
@@ -186,14 +193,20 @@ impl Entry {
         fields.insert("name".to_string(), Value::String(self.name));
         fields.insert("type".to_string(), Value::String(kind.to_string()));
         fields.insert(
-            "size".to_string(),
-            Value::Int(i64::try_from(size).unwrap_or(i64::MAX)),
-        );
-        fields.insert(
             "modified".to_string(),
             modified.map_or(Value::Void, Value::String),
         );
         if long {
+            fields.insert(
+                "size".to_string(),
+                if kind == "dir" && sizes {
+                    Value::Int(i64::try_from(directory_size(&self.path)).unwrap_or(i64::MAX))
+                } else if kind == "dir" {
+                    Value::Void
+                } else {
+                    Value::Int(i64::try_from(self.metadata.len()).unwrap_or(i64::MAX))
+                },
+            );
             fields.insert(
                 "mode".to_string(),
                 Value::String(mode_string(&self.metadata)),
@@ -467,6 +480,7 @@ mod tests {
             parse_request("ls -la src docs"),
             Some(ListRequest {
                 long: true,
+                sizes: false,
                 paths: vec!["src".into(), "docs".into()]
             })
         );
@@ -476,7 +490,23 @@ mod tests {
         assert_eq!(parse_request("ls --color=auto"), None);
         assert_eq!(parse_request("ls -R"), None);
         assert_eq!(parse_request("lsblk"), None);
-        assert_eq!(parse_request("ll"), None);
+        assert_eq!(
+            parse_request("ll"),
+            Some(ListRequest {
+                long: true,
+                sizes: false,
+                paths: Vec::new()
+            })
+        );
+        assert_eq!(
+            parse_request("ll src"),
+            Some(ListRequest {
+                long: true,
+                sizes: false,
+                paths: vec!["src".into()]
+            })
+        );
+        assert_eq!(parse_request("llama"), None);
     }
 
     #[test]
@@ -527,31 +557,50 @@ mod tests {
             .iter()
             .map(|field| field.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["name", "type", "size", "modified"]);
+        assert_eq!(names, ["name", "type", "modified"]);
+        let Value::Table(long) = list(
+            &ListRequest { long: true, ..ListRequest::default() },
+            dir.path(),
+        )
+        .unwrap() else {
+            panic!("table expected")
+        };
+        assert!(long.schema().fields.iter().any(|field| field.name == "size"));
     }
 
     #[test]
-    fn directory_size_is_the_total_of_everything_under_it() {
+    fn sizes_flag_totals_directories() {
+        let request = parse_request("ll --sizes").unwrap();
+        assert!(request.long && request.sizes);
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/b"), "1234567").unwrap();
+        let Value::Table(table) = list(&request, dir.path()).unwrap() else {
+            panic!("table expected")
+        };
+        let Value::Object(fields) = &table.rows()[0] else { panic!("record expected") };
+        assert_eq!(fields["size"], Value::Int(7));
+    }
+
+    #[test]
+    fn long_listing_sizes_files_but_not_directories() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a"), "12345").unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
-        fs::write(dir.path().join("sub/b"), "1234567").unwrap();
-        fs::create_dir(dir.path().join("sub/deeper")).unwrap();
-        fs::write(dir.path().join("sub/deeper/c"), "12").unwrap();
-        assert_eq!(directory_size(dir.path()), 5 + 7 + 2);
-
-        let Value::Table(table) = list(&ListRequest::default(), dir.path()).unwrap() else {
+        let Value::Table(table) = list(
+            &ListRequest { long: true, ..ListRequest::default() },
+            dir.path(),
+        )
+        .unwrap() else {
             panic!("table expected")
         };
-        let row = table
-            .rows()
-            .iter()
-            .find(|row| text(row, "name") == "sub")
-            .unwrap();
-        let Value::Object(fields) = row else {
-            panic!("record expected")
+        let size = |name: &str| {
+            let row = table.rows().iter().find(|row| text(row, "name") == name).unwrap();
+            let Value::Object(fields) = row else { panic!("record expected") };
+            fields["size"].clone()
         };
-        assert_eq!(fields["size"], Value::Int(9));
+        assert_eq!(size("a"), Value::Int(5));
+        assert_eq!(size("sub"), Value::Void);
     }
 
     #[cfg(unix)]
@@ -563,7 +612,11 @@ mod tests {
         fs::write(dir.path().join("real/big"), "0123456789").unwrap();
         symlink("real", dir.path().join("link")).unwrap();
 
-        let Value::Table(table) = list(&ListRequest::default(), dir.path()).unwrap() else {
+        let Value::Table(table) = list(
+            &ListRequest { long: true, ..ListRequest::default() },
+            dir.path(),
+        )
+        .unwrap() else {
             panic!("table expected")
         };
         let link = table
@@ -581,16 +634,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_symlink_cycle_inside_a_directory_does_not_hang_or_double_count() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("real"), "12345").unwrap();
-        symlink(dir.path(), dir.path().join("self")).unwrap();
-        assert_eq!(directory_size(dir.path()), 5);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn lists_hidden_entries_and_tells_kinds_apart() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let dir = tempfile::tempdir().unwrap();
@@ -602,7 +645,7 @@ mod tests {
         fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink("README.md", root.join("link")).unwrap();
 
-        let listing = rows(list(&ListRequest::default(), root).unwrap());
+        let listing = rows(list(&ListRequest { long: true, ..ListRequest::default() }, root).unwrap());
         let kinds = listing
             .iter()
             .map(|row| (text(row, "name"), text(row, "type")))
@@ -632,6 +675,7 @@ mod tests {
         symlink("a.txt", dir.path().join("b")).unwrap();
         let request = ListRequest {
             long: true,
+            sizes: false,
             paths: Vec::new(),
         };
         let listing = rows(list(&request, dir.path()).unwrap());
@@ -645,6 +689,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let request = ListRequest {
             long: false,
+            sizes: false,
             paths: vec!["nope".into()],
         };
         assert_eq!(

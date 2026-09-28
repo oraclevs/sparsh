@@ -1,101 +1,101 @@
-export type SparshAlias {
+export struct SparshAlias {
     name: str;
     command: List<str>;
 };
 
-export type SparshEnvironmentVariable {
+export struct SparshEnvironmentVariable {
     name: str;
-    value?: str;
-    prepend?: List<str>;
-    append?: List<str>;
+    value: Option<str> = none();
+    prepend: Option<List<str>> = none();
+    append: Option<List<str>> = none();
 };
 
-export type SparshPromptPath {
-    enabled?: bool;
-    parentLength?: int;
-    maxLastLength?: int;
-    maxWidth?: int;
+export struct SparshPromptPath {
+    enabled: Option<bool> = none();
+    parentLength: Option<int> = none();
+    maxLastLength: Option<int> = none();
+    maxWidth: Option<int> = none();
 };
 
-export type SparshPromptGit {
-    enabled?: bool;
-    showBranch?: bool;
-    showAheadBehind?: bool;
-    showStaged?: bool;
-    showModified?: bool;
-    showUntracked?: bool;
-    showConflicts?: bool;
+export struct SparshPromptGit {
+    enabled: Option<bool> = none();
+    showBranch: Option<bool> = none();
+    showAheadBehind: Option<bool> = none();
+    showStaged: Option<bool> = none();
+    showModified: Option<bool> = none();
+    showUntracked: Option<bool> = none();
+    showConflicts: Option<bool> = none();
 };
 
-export type SparshPromptTime {
-    enabled?: bool;
-    format?: str;
+export struct SparshPromptTime {
+    enabled: Option<bool> = none();
+    format: Option<str> = none();
 };
 
-export type SparshPromptSlot {
+export struct SparshPromptSlot {
     text: str;
-    color?: str;
-    style?: List<str>;
+    color: Option<str> = none();
+    style: Option<List<str>> = none();
 };
 
-export type SparshPromptThreshold {
-    warn?: int;
-    critical?: int;
+export struct SparshPromptThreshold {
+    warn: Option<int> = none();
+    critical: Option<int> = none();
 };
 
-export type SparshPromptThresholds {
-    cpu?: SparshPromptThreshold;
-    ram?: SparshPromptThreshold;
-    disk?: SparshPromptThreshold;
-    battery?: SparshPromptThreshold;
-    load?: SparshPromptThreshold;
+export struct SparshPromptThresholds {
+    cpu: Option<SparshPromptThreshold> = none();
+    ram: Option<SparshPromptThreshold> = none();
+    disk: Option<SparshPromptThreshold> = none();
+    battery: Option<SparshPromptThreshold> = none();
+    load: Option<SparshPromptThreshold> = none();
 };
 
-export type SparshPromptRight {
-    slot1?: SparshPromptSlot;
-    slot2?: SparshPromptSlot;
-    slot3?: SparshPromptSlot;
-    separator?: str;
-    glyphWidth?: int;
-    thresholds?: SparshPromptThresholds;
+export struct SparshPromptRight {
+    slot1: Option<SparshPromptSlot> = none();
+    slot2: Option<SparshPromptSlot> = none();
+    slot3: Option<SparshPromptSlot> = none();
+    separator: Option<str> = none();
+    glyphWidth: Option<int> = none();
+    thresholds: Option<SparshPromptThresholds> = none();
 };
 
-export type SparshPrompt {
-    showStatus?: bool;
-    showDuration?: bool;
-    durationThresholdMs?: int;
-    path?: SparshPromptPath;
-    git?: SparshPromptGit;
-    time?: SparshPromptTime;
-    right?: SparshPromptRight;
+export struct SparshPrompt {
+    showStatus: Option<bool> = none();
+    showDuration: Option<bool> = none();
+    durationThresholdMs: Option<int> = none();
+    path: Option<SparshPromptPath> = none();
+    git: Option<SparshPromptGit> = none();
+    time: Option<SparshPromptTime> = none();
+    right: Option<SparshPromptRight> = none();
 };
 
-export type SparshHistory {
-    path?: str;
-    maxEntries?: int;
-    dedupeConsecutive?: bool;
+export struct SparshHistory {
+    path: Option<str> = none();
+    maxEntries: Option<int> = none();
+    dedupeConsecutive: Option<bool> = none();
 };
 
-export type SparshCompletion {
-    enabled?: bool;
+export struct SparshCompletion {
+    enabled: Option<bool> = none();
 };
 
-export type SparshKeybinding {
+export struct SparshKeybinding {
     key: str;
     action: str;
 };
 
-export type SparshPagerKeybinding {
+export struct SparshPagerKeybinding {
     key: str;
     action: str;
 };
 
-export type SparshConfig {
-    aliases?: List<SparshAlias>;
-    environment?: List<SparshEnvironmentVariable>;
-    prompt?: SparshPrompt;
-    history?: SparshHistory;
-    completion?: SparshCompletion;
-    keybindings?: List<SparshKeybinding>;
-    pagerKeybindings?: List<SparshPagerKeybinding>;
+export struct SparshConfig {
+    aliases: Option<List<SparshAlias>> = none();
+    environment: Option<List<SparshEnvironmentVariable>> = none();
+    prompt: Option<SparshPrompt> = none();
+    history: Option<SparshHistory> = none();
+    completion: Option<SparshCompletion> = none();
+    keybindings: Option<List<SparshKeybinding>> = none();
+    pagerKeybindings: Option<List<SparshPagerKeybinding>> = none();
 };

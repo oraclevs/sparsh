@@ -261,7 +261,7 @@ pub(crate) fn evaluate_source_in_session(
         session.eval(source).map_err(ConfigLoadError::Spar)?;
     }
 
-    let config = match session.section("Config") {
+    let config = match session.construct_default("Config").map_err(ConfigLoadError::Spar)? {
         Some(value) => config_from_value(&value).map_err(ConfigLoadError::Invalid)?,
         None => SparshConfig::default(),
     };
@@ -278,7 +278,8 @@ pub fn load_candidate(path: &Path) -> Result<SparshConfig, ConfigLoadError> {
 }
 
 fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
-    let root = expect_section(value, "config")?;
+    let value = normalize_optional_config(value.clone());
+    let root = expect_section(&value, "config")?;
     if root.contains_key("startup") {
         return Err(
             "config.startup has been removed; define `function startup() -> shell { ... };` instead"
@@ -436,6 +437,60 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
     Ok(config)
 }
 
+// Configuration readers use missing fields for defaults. Preserve that
+// boundary while accepting canonical Option fields from typed Spar values.
+fn normalize_optional_config(value: ConfigValue) -> ConfigValue {
+    match value {
+        ConfigValue::Option(Some(value)) => normalize_optional_config(*value),
+        ConfigValue::Object(fields) => ConfigValue::Object(
+            fields
+                .into_iter()
+                .filter(|(_, value)| !matches!(value, ConfigValue::Option(None)))
+                .map(|(name, value)| (name, normalize_optional_config(value)))
+                .collect(),
+        ),
+        ConfigValue::List(values) => {
+            ConfigValue::List(values.into_iter().map(normalize_optional_config).collect())
+        }
+        value => value,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn option_fields_preserve_absent_environment_values_and_nested_prompt_settings() {
+    let mut session = spar::Engine::default().session();
+    let config = evaluate_source_in_session(&mut session, r#"
+        struct Entry {
+            name: str = "";
+            value: Option<str> = none();
+            prepend: Option<List<str>> = none();
+        };
+        struct Slot { text: str = ""; color: Option<str> = none(); };
+        struct Right { slot1: Option<Slot> = none(); };
+        struct Prompt { right: Option<Right> = none(); };
+        struct Config {
+            environment: List<Entry> = [
+                Entry(name: "EDITOR", value: some(value: "nvim")),
+                Entry(name: "PATH", prepend: some(value: ["/tools"]))
+            ];
+            prompt: Prompt = Prompt(right: some(value: Right(slot1: some(value: Slot(text: "{cpu}")))));
+        };
+    "#).unwrap();
+    assert_eq!(config.environment[0].value.as_deref(), Some("nvim"));
+    assert_eq!(config.environment[1].value, None);
+    assert_eq!(config.environment[1].prepend, vec!["/tools"]);
+    assert!(
+        config.prompt_issues.is_empty(),
+        "{:?}",
+        config.prompt_issues
+    );
+    assert!(matches!(
+        config.prompt.right.slots[0],
+        Some(crate::prompt_config::SlotConfig::Ok(_))
+    ));
+}
+
 fn ensure_allowed_fields(
     section: &IndexMap<String, ConfigValue>,
     path: &str,
@@ -464,7 +519,7 @@ fn expect_section<'a>(
     path: &str,
 ) -> Result<&'a IndexMap<String, ConfigValue>, String> {
     match value {
-        ConfigValue::Section(value) => Ok(value),
+        ConfigValue::Object(value) => Ok(value),
         other => Err(format!(
             "{path} must be a section, got {}",
             other.type_name()
@@ -519,30 +574,11 @@ mod tests {
     use crate::environment::EnvironmentService;
 
     fn wrapped_config(body: &str) -> String {
-        format!(
-            r#"type SparshAlias {{ name: str; command: List<str>; }};
-type SparshEnvironmentVariable {{ name: str; value?: str; prepend?: List<str>; append?: List<str>; }};
-type SparshPromptPath {{ enabled?: bool; parentLength?: int; maxLastLength?: int; maxWidth?: int; }};
-type SparshPromptGit {{ enabled?: bool; showBranch?: bool; showAheadBehind?: bool; showStaged?: bool; showModified?: bool; showUntracked?: bool; showConflicts?: bool; }};
-type SparshPromptTime {{ enabled?: bool; format?: str; }};
-type SparshPrompt {{ showStatus?: bool; showDuration?: bool; durationThresholdMs?: int; path?: SparshPromptPath; git?: SparshPromptGit; time?: SparshPromptTime; }};
-type SparshHistory {{ path?: str; maxEntries?: int; dedupeConsecutive?: bool; }};
-type SparshCompletion {{ enabled?: bool; }};
-type SparshKeybinding {{ key: str; action: str; }};
-struct Config {{
-{body}
-}};
-"#
-        )
+        format!("{}\nstruct Config {{\n{body}\n}};\n", include_str!("../../../examples/sparsh-types.spar"))
     }
 
-    /// A config file in the current syntax: the shipped example types plus a
-    /// `struct Config: SparshConfig { ... }` body.
     fn example_typed_config(body: &str) -> String {
-        format!(
-            "{}\nstruct Config: SparshConfig {{\n{body}\n}};\n",
-            include_str!("../../../examples/sparsh-types.spar")
-        )
+        wrapped_config(body)
     }
 
     #[test]
@@ -551,12 +587,8 @@ struct Config {{
         let file = dir.path().join("sparsh.spar");
         fs::write(
             &file,
-            example_typed_config(
-                r#"    aliases = [{ name: "gs"; command: ["git", "status"]; }];
-    prompt = {
-        path: { parentLength: 0; };
-        right: { slot2: { text: "{cpuu}"; }; };
-    };"#,
+            example_typed_config(r#"    aliases: Option<List<SparshAlias>> = some(value: [SparshAlias(name: "gs", command: ["git", "status"])]);
+    prompt: Option<SparshPrompt> = some(value: SparshPrompt(path: some(value: SparshPromptPath(parentLength: some(value: 0))), right: some(value: SparshPromptRight(slot2: some(value: SparshPromptSlot(text: "{cpuu}"))))));"#,
             ),
         )
         .unwrap();
@@ -587,7 +619,7 @@ struct Config {{
         let file = dir.path().join("sparsh.spar");
         fs::write(
             &file,
-            example_typed_config(r#"    history = { maxEntries: 0; };"#),
+            example_typed_config(r#"    history: Option<SparshHistory> = some(value: SparshHistory(maxEntries: some(value: 0)));"#),
         )
         .unwrap();
         assert!(load_candidate(&file).is_err());
@@ -621,21 +653,12 @@ struct Config {{
         let path = dir.path().join("sparsh.spar");
         fs::write(
             &path,
-            wrapped_config(
-                r#"    aliases: List<SparshAlias> = [
-        { name: "ll"; command: ["ls", "-la"]; }
-    ];
-    environment: List<SparshEnvironmentVariable> = [
-        { name: "EDITOR"; value: "nvim"; },
-        { name: "PATH"; prepend: ["$HOME/.local/bin", "$HOME/.cargo/bin"]; append: ["$HOME/.pub-cache/bin"]; }
-    ];
-    prompt: SparshPrompt = { showDuration: false; };
-    history: SparshHistory = { path: "/tmp/sparsh-history"; maxEntries: 5000; dedupeConsecutive: false; };
-    completion: SparshCompletion = { enabled: false; };
-    keybindings: List<SparshKeybinding> = [
-        { key: "ctrl+r"; action: "historySearch"; },
-        { key: "alt+e"; action: "openEditor"; }
-    ];"#,
+            wrapped_config(r#"    aliases: List<SparshAlias> = [SparshAlias(name: "ll", command: ["ls", "-la"])];
+    environment: List<SparshEnvironmentVariable> = [SparshEnvironmentVariable(name: "EDITOR", value: some(value: "nvim")), SparshEnvironmentVariable(name: "PATH", prepend: some(value: ["$HOME/.local/bin", "$HOME/.cargo/bin"]), append: some(value: ["$HOME/.pub-cache/bin"]))];
+    prompt: SparshPrompt = SparshPrompt(showDuration: some(value: false));
+    history: SparshHistory = SparshHistory(path: some(value: "/tmp/sparsh-history"), maxEntries: some(value: 5000), dedupeConsecutive: some(value: false));
+    completion: SparshCompletion = SparshCompletion(enabled: some(value: false));
+    keybindings: List<SparshKeybinding> = [SparshKeybinding(key: "ctrl+r", action: "historySearch"), SparshKeybinding(key: "alt+e", action: "openEditor")];"#,
             ),
         )
         .unwrap();
@@ -697,15 +720,7 @@ struct Config {{
         let path = dir.path().join("sparsh.spar");
         fs::write(
             &path,
-            wrapped_config(
-                r#"    prompt: SparshPrompt = {
-        showStatus: false;
-        showDuration: true;
-        durationThresholdMs: 125;
-        path: { enabled: true; parentLength: 1; maxLastLength: 18; maxWidth: 40; };
-        git: { enabled: true; showBranch: false; showAheadBehind: false; showStaged: false; showModified: false; showUntracked: false; showConflicts: false; };
-        time: { enabled: true; format: "HH:mm"; };
-    };"#,
+            wrapped_config(r#"    prompt: SparshPrompt = SparshPrompt(showStatus: some(value: false), showDuration: some(value: true), durationThresholdMs: some(value: 125), path: some(value: SparshPromptPath(enabled: some(value: true), parentLength: some(value: 1), maxLastLength: some(value: 18), maxWidth: some(value: 40))), git: some(value: SparshPromptGit(enabled: some(value: true), showBranch: some(value: false), showAheadBehind: some(value: false), showStaged: some(value: false), showModified: some(value: false), showUntracked: some(value: false), showConflicts: some(value: false))), time: some(value: SparshPromptTime(enabled: some(value: true), format: some(value: "HH:mm"))));"#,
             ),
         )
         .unwrap();
@@ -733,8 +748,7 @@ struct Config {{
         let path = dir.path().join("sparsh.spar");
         fs::write(
             &path,
-            wrapped_config(
-                r#"    aliases: List<SparshAlias> = [{ name: "g"; command: ["git"]; }];"#,
+            wrapped_config(r#"    aliases: List<SparshAlias> = [SparshAlias(name: "g", command: ["git"])];"#,
             ),
         )
         .unwrap();
@@ -754,7 +768,7 @@ struct Config {{
         let path = dir.path().join("sparsh.spar");
         fs::write(
             &path,
-            wrapped_config(r#"    aliases: List<SparshAlias> = [{ name: "ll"; command: ["eza", "--icons"]; }];"#),
+            wrapped_config(r#"    aliases: List<SparshAlias> = [SparshAlias(name: "ll", command: ["eza", "--icons"])];"#),
         )
         .unwrap();
         let config = load_candidate(&path).unwrap();
@@ -808,20 +822,20 @@ struct Config {{
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("sparsh-types.spar"),
-            r#"export type SparshAlias {
+            r#"export struct SparshAlias {
     name: str;
     command: List<str>;
 };
-export type SparshPromptPath {
-    enabled?: bool;
+export struct SparshPromptPath {
+    enabled: Option<bool> = none();
 };
-export type SparshPrompt {
-    showDuration?: bool;
-    path?: SparshPromptPath;
+export struct SparshPrompt {
+    showDuration: Option<bool> = none();
+    path: Option<SparshPromptPath> = none();
 };
-export type SparshConfig {
-    aliases?: List<SparshAlias>;
-    prompt?: SparshPrompt;
+export struct SparshConfig {
+    aliases: Option<List<SparshAlias>> = none();
+    prompt: Option<SparshPrompt> = none();
 };
 "#,
         )
@@ -829,15 +843,10 @@ export type SparshConfig {
         let path = dir.path().join("sparsh.spar");
         fs::write(
             &path,
-            r#"import type { SparshAlias, SparshPromptPath, SparshPrompt, SparshConfig } from "./sparsh-types";
-struct Config: SparshConfig {
-    aliases = [
-        { name: "ll"; command: ["eza", "--icons"]; }
-    ];
-    prompt = {
-        showDuration: false;
-        path: { enabled: true; };
-    };
+            r#"import { SparshAlias, SparshPromptPath, SparshPrompt, SparshConfig } from "./sparsh-types";
+struct Config {
+    aliases: Option<List<SparshAlias>> = some(value: [SparshAlias(name: "ll", command: ["eza", "--icons"])]);
+    prompt: Option<SparshPrompt> = some(value: SparshPrompt(showDuration: some(value: false), path: some(value: SparshPromptPath(enabled: some(value: true)))));
 };
 "#,
         )
@@ -854,9 +863,9 @@ struct Config: SparshConfig {
 
     #[test]
     fn startup_config_field_is_rejected_in_favor_of_startup_function() {
-        let value = ConfigValue::Section(IndexMap::from([(
+        let value = ConfigValue::Object(IndexMap::from([(
             "startup".into(),
-            ConfigValue::Section(IndexMap::from([(
+            ConfigValue::Object(IndexMap::from([(
                 "commands".into(),
                 ConfigValue::List(vec![ConfigValue::Str("nitch".into())]),
             )])),
@@ -900,7 +909,7 @@ struct Config: SparshConfig {
 
     #[test]
     fn config_rejects_fields_sparsh_does_not_implement() {
-        let value = ConfigValue::Section(IndexMap::from([
+        let value = ConfigValue::Object(IndexMap::from([
             ("aliases".into(), ConfigValue::List(Vec::new())),
             (
                 "futureField".into(),
@@ -931,12 +940,8 @@ struct Config: SparshConfig {
 
         fs::write(
             &path,
-            wrapped_config(
-                r#"    keybindings: List<SparshKeybinding> = [{ key: "alt+v"; action: "pager"; }];
-    pagerKeybindings: List<SparshKeybinding> = [
-        { key: "ctrl+n"; action: "lineDown"; },
-        { key: "j"; action: "pageDown"; }
-    ];"#,
+            wrapped_config(r#"    keybindings: List<SparshKeybinding> = [SparshKeybinding(key: "alt+v", action: "pager")];
+    pagerKeybindings: List<SparshKeybinding> = [SparshKeybinding(key: "ctrl+n", action: "lineDown"), SparshKeybinding(key: "j", action: "pageDown")];"#,
             ),
         )
         .unwrap();
@@ -950,8 +955,7 @@ struct Config: SparshConfig {
 
         fs::write(
             &path,
-            wrapped_config(
-                r#"    pagerKeybindings: List<SparshKeybinding> = [{ key: "x"; action: "explode"; }];"#,
+            wrapped_config(r#"    pagerKeybindings: List<SparshKeybinding> = [SparshKeybinding(key: "x", action: "explode")];"#,
             ),
         )
         .unwrap();
@@ -960,11 +964,7 @@ struct Config: SparshConfig {
 
         fs::write(
             &path,
-            wrapped_config(
-                r#"    pagerKeybindings: List<SparshKeybinding> = [
-        { key: "x"; action: "quit"; },
-        { key: "x"; action: "top"; }
-    ];"#,
+            wrapped_config(r#"    pagerKeybindings: List<SparshKeybinding> = [SparshKeybinding(key: "x", action: "quit"), SparshKeybinding(key: "x", action: "top")];"#,
             ),
         )
         .unwrap();
@@ -982,8 +982,7 @@ struct Config: SparshConfig {
 
         fs::write(
             &path,
-            wrapped_config(
-                r#"    keybindings: List<SparshKeybinding> = [{ key: "ctrl+r"; action: "runClosure"; }];"#,
+            wrapped_config(r#"    keybindings: List<SparshKeybinding> = [SparshKeybinding(key: "ctrl+r", action: "runClosure")];"#,
             ),
         )
         .unwrap();
@@ -992,8 +991,7 @@ struct Config: SparshConfig {
 
         fs::write(
             &path,
-            wrapped_config(
-                r#"    keybindings: List<SparshKeybinding> = [{ key: "meta+wat"; action: "historySearch"; }];"#,
+            wrapped_config(r#"    keybindings: List<SparshKeybinding> = [SparshKeybinding(key: "meta+wat", action: "historySearch")];"#,
             ),
         )
         .unwrap();
@@ -1005,11 +1003,7 @@ struct Config: SparshConfig {
 
         fs::write(
             &path,
-            wrapped_config(
-                r#"    keybindings: List<SparshKeybinding> = [
-        { key: "ctrl+r"; action: "historySearch"; },
-        { key: "control+r"; action: "clearScreen"; }
-    ];"#,
+            wrapped_config(r#"    keybindings: List<SparshKeybinding> = [SparshKeybinding(key: "ctrl+r", action: "historySearch"), SparshKeybinding(key: "control+r", action: "clearScreen")];"#,
             ),
         )
         .unwrap();

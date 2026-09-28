@@ -6,6 +6,33 @@ use spar_command::{Join, PipelinePlan, ShellPlan, Step};
 use crate::dispatch::is_explicit_call;
 use crate::session::ShellError;
 
+/// `f(args) &` or `f(args) & disown`: the call text and whether to disown.
+pub(crate) fn split_background_call(input: &str) -> Option<(&str, bool)> {
+    let input = input.trim();
+    let input = input.strip_suffix(';').unwrap_or(input).trim_end();
+    let (head, disown) = match input.strip_suffix("disown") {
+        Some(rest) if rest.trim_end().ends_with('&') => (rest.trim_end(), true),
+        _ => (input, false),
+    };
+    let call = head.strip_suffix('&')?.trim_end();
+    if call.ends_with('&') || !is_explicit_call(call) || split_top_level_pipeline(call).len() > 1 {
+        return None;
+    }
+    Some((call, disown))
+}
+
+pub(crate) fn mark_background(plan: &mut ShellPlan) {
+    match plan.steps.last_mut() {
+        Some((_, Step::Command(command))) => command.background = true,
+        Some((_, Step::Pipeline(pipeline))) => {
+            if let Some(last) = pipeline.commands.last_mut() {
+                last.background = true;
+            }
+        }
+        None => {}
+    }
+}
+
 pub(crate) fn compose_function_pipeline(
     source: &str,
     spar: &spar::Session,
@@ -213,14 +240,9 @@ mod tests {
             .unwrap();
         let environment: Vec<(OsString, OsString)> = Vec::new();
 
-        let error = compose_function_pipeline(
-            "emit() | cat",
-            &session,
-            Path::new("/"),
-            &environment,
-            0,
-        )
-        .unwrap_err();
+        let error =
+            compose_function_pipeline("emit() | cat", &session, Path::new("/"), &environment, 0)
+                .unwrap_err();
 
         assert_eq!(error.status(), 2);
         assert!(error

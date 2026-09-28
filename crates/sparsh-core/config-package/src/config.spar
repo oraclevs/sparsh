@@ -2,75 +2,75 @@
 // New configurations should keep these normal Spar types in
 // ~/.sparsh/sparsh-types.spar rather than importing a native package.
 
-export type AliasConfig {
+export struct AliasConfig {
     name: str;
     command: List<str>;
 };
 
-export type EnvironmentConfig {
+export struct EnvironmentConfig {
     name: str;
-    value?: str;
-    prepend?: List<str>;
-    append?: List<str>;
+    value: Option<str> = none();
+    prepend: Option<List<str>> = none();
+    append: Option<List<str>> = none();
 };
 
-export type PromptPathConfig {
-    enabled?: bool;
-    parentLength?: int;
-    maxLastLength?: int;
-    maxWidth?: int;
+export struct PromptPathConfig {
+    enabled: Option<bool> = none();
+    parentLength: Option<int> = none();
+    maxLastLength: Option<int> = none();
+    maxWidth: Option<int> = none();
 };
 
-export type PromptGitConfig {
-    enabled?: bool;
-    showBranch?: bool;
-    showAheadBehind?: bool;
-    showStaged?: bool;
-    showModified?: bool;
-    showUntracked?: bool;
-    showConflicts?: bool;
+export struct PromptGitConfig {
+    enabled: Option<bool> = none();
+    showBranch: Option<bool> = none();
+    showAheadBehind: Option<bool> = none();
+    showStaged: Option<bool> = none();
+    showModified: Option<bool> = none();
+    showUntracked: Option<bool> = none();
+    showConflicts: Option<bool> = none();
 };
 
-export type PromptTimeConfig {
-    enabled?: bool;
-    format?: str;
+export struct PromptTimeConfig {
+    enabled: Option<bool> = none();
+    format: Option<str> = none();
 };
 
-export type PromptConfig {
-    showStatus?: bool;
-    showDuration?: bool;
-    durationThresholdMs?: int;
-    path?: PromptPathConfig;
-    git?: PromptGitConfig;
-    time?: PromptTimeConfig;
+export struct PromptConfig {
+    showStatus: Option<bool> = none();
+    showDuration: Option<bool> = none();
+    durationThresholdMs: Option<int> = none();
+    path: Option<PromptPathConfig> = none();
+    git: Option<PromptGitConfig> = none();
+    time: Option<PromptTimeConfig> = none();
 };
 
-export type HistoryConfig {
-    path?: str;
-    maxEntries?: int;
-    dedupeConsecutive?: bool;
+export struct HistoryConfig {
+    path: Option<str> = none();
+    maxEntries: Option<int> = none();
+    dedupeConsecutive: Option<bool> = none();
 };
 
-export type CompletionConfig {
-    enabled?: bool;
+export struct CompletionConfig {
+    enabled: Option<bool> = none();
 };
 
-export type KeybindingConfig {
+export struct KeybindingConfig {
     key: str;
     action: str;
 };
 
-export type PagerKeybindingConfig {
+export struct PagerKeybindingConfig {
     key: str;
     action: str;
 };
 
-export type SparshConfig {
-    aliases?: List<AliasConfig>;
-    environment?: List<EnvironmentConfig>;
-    prompt?: PromptConfig;
-    history?: HistoryConfig;
-    completion?: CompletionConfig;
-    keybindings?: List<KeybindingConfig>;
-    pagerKeybindings?: List<PagerKeybindingConfig>;
+export struct SparshConfig {
+    aliases: Option<List<AliasConfig>> = none();
+    environment: Option<List<EnvironmentConfig>> = none();
+    prompt: Option<PromptConfig> = none();
+    history: Option<HistoryConfig> = none();
+    completion: Option<CompletionConfig> = none();
+    keybindings: Option<List<KeybindingConfig>> = none();
+    pagerKeybindings: Option<List<PagerKeybindingConfig>> = none();
 };

@@ -8,6 +8,11 @@ const MAX_ALIAS_DEPTH: usize = 64;
 /// the `alias` builtin, takes priority over it.
 pub(crate) const BUILTIN_LS_ALIAS: &[&str] = &["ls", "--color=auto"];
 
+/// The fallback `ll` alias Sparsh recognizes natively (see `BUILTIN_LS_ALIAS`
+/// above): native structured `ll` runs while the current alias is unset or
+/// exactly this; any other user-defined `ll` alias takes priority over it.
+pub(crate) const BUILTIN_LL_ALIAS: &[&str] = &["ls", "-la"];
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AliasService {
     entries: BTreeMap<String, Vec<String>>,
@@ -64,6 +69,14 @@ impl AliasService {
 
         for _ in 0..MAX_ALIAS_DEPTH {
             let Some(expansion) = self.entries.get(&words[0]) else {
+                // `ll` works inside chains (`ll && ls`) even with no alias.
+                if words[0] == "ll" && chain.is_empty() {
+                    let mut expanded: Vec<String> =
+                        BUILTIN_LL_ALIAS.iter().map(|word| word.to_string()).collect();
+                    expanded.push("--color=auto".into());
+                    expanded.extend(words.into_iter().skip(1));
+                    return Ok(expanded);
+                }
                 return Ok(words);
             };
             let name = words[0].clone();

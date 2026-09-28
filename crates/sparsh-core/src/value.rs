@@ -6,6 +6,9 @@ pub fn render_value(value: &spar::ConfigValue) -> String {
         spar::ConfigValue::Int(value) => value.to_string(),
         spar::ConfigValue::Float(value) => value.to_string(),
         spar::ConfigValue::Bool(value) => value.to_string(),
+        spar::ConfigValue::Map(_) | spar::ConfigValue::Option(_) | spar::ConfigValue::Result(_) => {
+            spar::Value::from_config(value.clone()).render_display()
+        }
         spar::ConfigValue::List(values) => format!(
             "[{}]",
             values
@@ -14,7 +17,7 @@ pub fn render_value(value: &spar::ConfigValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        spar::ConfigValue::Section(fields) => {
+        spar::ConfigValue::Object(fields) => {
             let mut fields = fields.iter().collect::<Vec<_>>();
             fields.sort_by_key(|(name, _)| *name);
             let body = fields
@@ -179,7 +182,7 @@ mod tests {
 
     #[test]
     fn renders_sections_in_stable_key_order() {
-        let value = ConfigValue::Section(IndexMap::from([
+        let value = ConfigValue::Object(IndexMap::from([
             ("z".into(), ConfigValue::Int(2)),
             ("a".into(), ConfigValue::Int(1)),
         ]));

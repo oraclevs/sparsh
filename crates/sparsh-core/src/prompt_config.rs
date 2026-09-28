@@ -196,7 +196,7 @@ impl Issues {
 
 fn as_section<'a>(value: &'a ConfigValue, path: &str, issues: &mut Issues) -> Option<&'a Section> {
     match value {
-        ConfigValue::Section(section) => Some(section),
+        ConfigValue::Object(section) => Some(section),
         other => {
             issues.push(
                 path,
@@ -553,7 +553,7 @@ fn parse_slot(value: &ConfigValue, number: u8, issues: &mut Issues) -> SlotConfi
         SlotConfig::Broken { message }
     };
 
-    let ConfigValue::Section(section) = value else {
+    let ConfigValue::Object(section) = value else {
         return broken(
             issues,
             path,
@@ -640,7 +640,7 @@ mod tests {
     use super::*;
 
     fn sec(entries: &[(&str, ConfigValue)]) -> ConfigValue {
-        ConfigValue::Section(
+        ConfigValue::Object(
             entries
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.clone()))
