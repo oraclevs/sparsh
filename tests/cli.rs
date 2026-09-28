@@ -20,9 +20,9 @@ fn write_config_rc(home: &Path, fields: &str) {
     write_rc(
         home,
         &format!(
-            r#"type TestAlias {{ name: str; command: List<str>; }};
-type TestEnvironment {{ name: str; value: str; }};
-type TestCompletion {{ enabled?: bool; }};
+            r#"struct TestAlias {{ name: str; command: List<str>; }};
+struct TestEnvironment {{ name: str; value: str; }};
+struct TestCompletion {{ enabled: bool = false; }};
 struct Config {{
 {fields}
 }};
@@ -215,8 +215,8 @@ fn canonical_home_rc_alias_and_environment_are_visible_to_dash_c() {
     let home = tempfile::tempdir().unwrap();
     write_config_rc(
         home.path(),
-        r#"    aliases: List<TestAlias> = [{ name: "configured"; command: ["printf", "alias-ok"]; }];
-    environment: List<TestEnvironment> = [{ name: "SPARSH_CONFIG_VALUE"; value: "env-ok"; }];"#,
+        r#"    aliases: List<TestAlias> = [TestAlias(name: "configured", command: ["printf", "alias-ok"])];
+    environment: List<TestEnvironment> = [TestEnvironment(name: "SPARSH_CONFIG_VALUE", value: "env-ok")];"#,
     );
 
     let alias = sparsh()
@@ -273,7 +273,7 @@ fn remote_command_uses_noninteractive_execution_and_canonical_rc() {
     let home = tempfile::tempdir().unwrap();
     write_config_rc(
         home.path(),
-        r#"    environment: List<TestEnvironment> = [{ name: "SPARSH_REMOTE_VALUE"; value: "remote-ok"; }];"#,
+        r#"    environment: List<TestEnvironment> = [TestEnvironment(name: "SPARSH_REMOTE_VALUE", value: "remote-ok")];"#,
     );
 
     let output = sparsh()
@@ -300,7 +300,7 @@ fn rc_can_alias_ls_to_external_eza_without_touching_ansi_or_icons() {
     std::fs::set_permissions(&eza, std::fs::Permissions::from_mode(0o755)).unwrap();
     write_config_rc(
         home.path(),
-        r#"    aliases: List<TestAlias> = [{ name: "ls"; command: ["eza", "--icons"]; }];"#,
+        r#"    aliases: List<TestAlias> = [TestAlias(name: "ls", command: ["eza", "--icons"])];"#,
     );
     let inherited_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{inherited_path}", bin.path().display());
@@ -354,7 +354,7 @@ fn executable_spar_without_shebang_runs_through_sparsh_not_bin_sh() {
     let script = directory.path().join("main.spar");
     std::fs::write(
         &script,
-        r#"function main() -> int { println(message: "from-spar"); return 0; };"#,
+        r#"function main() -> int { println(value: "from-spar"); return 0; };"#,
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -607,7 +607,7 @@ fn executable_spar_program_can_feed_an_external_pipeline_from_cli() {
     let script = directory.path().join("main.spar");
     std::fs::write(
         &script,
-        r#"function main() -> int { println(message: "info ready"); println(message: "error found"); return 0; };"#,
+        r#"function main() -> int { println(value: "info ready"); println(value: "error found"); return 0; };"#,
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -663,7 +663,7 @@ fn piped_structured_results_are_plain_data_not_decorated_tables() {
         .take()
         .unwrap()
         .write_all(
-            b"import pkg { collectTable, take } from \"std/data\";\nstruct User { name: str = \"\"; age: int = 0; };\nvar people: [User] = [User(name: \"Obi\", age: 24), User(name: \"Ada\", age: 31)];\npeople |> collectTable() |> take(1)\n_ |> take(2)\n",
+            b"import pkg { collectTable, take } from \"std/data\";\nstruct User { name: str = \"\"; age: int = 0; };\nvar people: [User] = [User(name: \"Obi\", age: 24), User(name: \"Ada\", age: 31)];\npeople |> collectTable() |> take(count: 1)\n_ |> take(count: 2)\n",
         )
         .unwrap();
     let output = child.wait_with_output().unwrap();
@@ -740,7 +740,7 @@ fn mixed_byte_and_value_pipeline_can_be_typed_directly() {
         .take()
         .unwrap()
         .write_all(
-            b"import pkg { where } from \"std/data\";\nprintf '%s\\n' '{\"n\":\"web\",\"s\":\"up\"}' '{\"n\":\"db\",\"s\":\"down\"}' | from jsonl |> where(fn(c) => c.s == \"up\") |> to jsonl\n",
+            b"import pkg { where } from \"std/data\";\nprintf '%s\\n' '{\"n\":\"web\",\"s\":\"up\"}' '{\"n\":\"db\",\"s\":\"down\"}' | from jsonl |> where(predicate: fn(value) => value.s == \"up\") |> to jsonl\n",
         )
         .unwrap();
     let output = child.wait_with_output().unwrap();
@@ -761,9 +761,9 @@ fn spar_script_output_appears_while_the_script_is_still_running() {
         &script,
         r#"import pkg { run } from "std/process";
 function main() -> int {
-    println(message: "first");
+    println(value: "first");
     run(program: "sleep", args: ["3"]);
-    println(message: "second");
+    println(value: "second");
     return 0;
 };"#,
     )
@@ -814,7 +814,7 @@ fn a_missing_data_import_in_a_script_says_what_to_import() {
     let output = sparsh()
         .args([
             "-c",
-            "printf 'a\\n1\\n' | from csv |> where(fn(r) => r.a > 0)",
+            "printf 'a\\n1\\n' | from csv |> where(predicate: fn(value) => value.a > 0)",
         ])
         .output()
         .unwrap();

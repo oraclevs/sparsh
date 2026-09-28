@@ -164,6 +164,7 @@ fn render_inspect(value: &Value, theme: &Theme, options: &RenderOptions) -> Stri
 /// nested summaries, error fallbacks).
 pub(crate) fn plain_text(value: &Value) -> String {
     match value {
+        Value::Args(_) => value.render_display(),
         Value::Void => "void".into(),
         Value::Int(value) => value.to_string(),
         Value::Float(value) => value.to_string(),
@@ -190,7 +191,7 @@ pub(crate) fn plain_text(value: &Value) -> String {
             "Map{{{}}}",
             entries
                 .iter()
-                .map(|(key, value)| format!("{}: {}", plain_text(key), plain_text(value)))
+                .map(|(key, value)| format!("{}: {}", plain_text(&key), plain_text(value)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

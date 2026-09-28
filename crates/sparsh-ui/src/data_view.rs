@@ -186,7 +186,7 @@ fn value_lines(value: &Value, depth: usize) -> Vec<Line> {
             entries_lines(
                 entries
                     .iter()
-                    .map(|(key, value)| (crate::structured::plain_text(key), value)),
+                    .map(|(key, value)| (crate::structured::plain_text(&key), value)),
                 depth,
             )
         }
@@ -588,10 +588,10 @@ const LISTING_KINDS: [&str; 8] = [
     "dir", "file", "exe", "symlink", "fifo", "socket", "block", "char",
 ];
 
-/// A table shaped like the output of the native `ls`: `name`, `type` and
-/// `size` columns whose `type` values are file kinds.
+/// A table shaped like the output of the native `ls`: `name` and `type`
+/// columns whose `type` values are file kinds.
 fn is_listing(names: &[String], rows: &[Value]) -> bool {
-    ["name", "type", "size"]
+    ["name", "type"]
         .iter()
         .all(|required| names.iter().any(|name| name == required))
         && !rows.is_empty()
@@ -612,6 +612,50 @@ fn kind_role(kind: &str) -> Role {
         "fifo" | "socket" | "block" | "char" => Some(SemanticRole::FileSpecial),
         _ => None,
     }
+}
+
+/// A Nerd Font glyph for a listing row, `eza --icons`-style: the file name
+/// (or, for a handful of exact dotfile/lockfile names, the whole name) wins
+/// over the entry kind, so an executable script still shows its language
+/// rather than a bare gear.
+fn file_icon(name: &str, kind: &str) -> char {
+    if let Some(icon) = name_icon(name) {
+        return icon;
+    }
+    match kind {
+        "dir" => '\u{f07b}',                                // nf-fa-folder
+        "symlink" => '\u{f0c1}',                            // nf-fa-link
+        "exe" => '\u{f013}',                                // nf-fa-cog
+        "fifo" | "socket" | "block" | "char" => '\u{f1e6}', // nf-fa-plug
+        _ => '\u{f016}',                                    // nf-fa-file-o
+    }
+}
+
+fn name_icon(name: &str) -> Option<char> {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        ".gitignore" | ".gitattributes" | ".gitmodules" | ".git" => return Some('\u{f1d3}'), // nf-fa-git
+        "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" => {
+            return Some('\u{f023}'); // nf-fa-lock
+        }
+        _ => {}
+    }
+    let extension = lower.rsplit_once('.').map(|(_, extension)| extension)?;
+    Some(match extension {
+        "rs" => '\u{e7a8}',                                                 // nf-dev-rust
+        "py" => '\u{e73c}',                                                 // nf-dev-python
+        "go" => '\u{e627}',                                                 // nf-dev-go
+        "dart" => '\u{e798}',                                               // nf-dev-dart
+        "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" | "json" => '\u{e718}', // nf-dev-nodejs
+        "spar" => '\u{f1c9}',                                               // nf-fa-file-code-o
+        "md" | "markdown" | "txt" => '\u{f0f6}',                            // nf-fa-file-text-o
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "ico" => '\u{f1c5}', // nf-fa-file-image-o
+        "zip" | "tar" | "gz" | "xz" | "7z" | "bz2" | "rar" => '\u{f1c6}', // nf-fa-file-archive-o
+        "toml" | "yaml" | "yml" | "ini" | "env" | "cfg" | "conf" => '\u{f085}', // nf-fa-cogs
+        "lock" => '\u{f023}',                                             // nf-fa-lock
+        "sh" | "bash" | "zsh" | "fish" => '\u{f120}',                     // nf-fa-terminal
+        _ => return None,
+    })
 }
 
 /// Decimal units, like `ls -l --si`: 4096 bytes is "4.1 KB".
@@ -640,7 +684,10 @@ fn listing_cell(column: &str, fields: &indexmap::IndexMap<String, Value>) -> Opt
         _ => return None,
     };
     match (column, fields.get(column)?) {
-        ("name", Value::String(name)) => Some(Cell::text(kind_role(kind), name.clone())),
+        ("name", Value::String(name)) => Some(Cell::text(
+            kind_role(kind),
+            format!("{} {name}", file_icon(name, kind)),
+        )),
         ("type", Value::String(kind)) => Some(Cell::text(None, kind.clone())),
         ("size", Value::Int(bytes)) => Some(Cell::text(
             Some(SemanticRole::DataNumber),
@@ -780,7 +827,7 @@ mod tests {
     use spar::{TableValue, Value};
     use unicode_width::UnicodeWidthStr;
 
-    use super::{render_table, render_value_view, RenderOptions};
+    use super::{file_icon, render_table, render_value_view, RenderOptions};
     use crate::{SemanticRole, Theme};
 
     fn sample_table() -> TableValue {
@@ -879,15 +926,39 @@ mod tests {
     fn listing_names_are_colored_by_kind() {
         let theme = Theme::colored();
         let output = render_table(&listing_table(), &theme, &RenderOptions::new(100));
-        for (name, role) in [
-            ("assets", Some(SemanticRole::FileDirectory)),
-            ("tauon.py", Some(SemanticRole::FileExecutable)),
-            ("link", Some(SemanticRole::FileSymlink)),
-            ("LICENSE", None),
+        for (name, kind, role) in [
+            ("assets", "dir", Some(SemanticRole::FileDirectory)),
+            ("tauon.py", "exe", Some(SemanticRole::FileExecutable)),
+            ("link", "symlink", Some(SemanticRole::FileSymlink)),
+            ("LICENSE", "file", None),
         ] {
-            let painted = role.map_or_else(|| name.to_string(), |role| theme.paint(role, name));
+            let text = format!("{} {name}", file_icon(name, kind));
+            let painted = role.map_or_else(|| text.clone(), |role| theme.paint(role, &text));
             assert!(output.contains(&painted), "{name}: {output:?}");
         }
+    }
+
+    #[test]
+    fn listing_names_get_a_nerd_font_icon() {
+        let output = render_table(&listing_table(), &Theme::plain(), &RenderOptions::new(100));
+        assert!(
+            output.contains(&format!("{} assets", file_icon("assets", "dir"))),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("{} tauon.py", file_icon("tauon.py", "exe"))),
+            "{output}"
+        );
+        assert_eq!(
+            file_icon("tauon.py", "exe"),
+            '\u{e73c}',
+            "extension wins over exe kind"
+        );
+        assert_eq!(
+            file_icon("README", "file"),
+            '\u{f016}',
+            "no extension falls back to a generic file icon"
+        );
     }
 
     #[test]

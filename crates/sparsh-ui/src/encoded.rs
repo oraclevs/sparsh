@@ -232,7 +232,7 @@ impl Emitter {
             Value::Map(entries) => {
                 let entries = entries
                     .iter()
-                    .map(|(key, value)| (crate::structured::plain_text(key), value))
+                    .map(|(key, value)| (crate::structured::plain_text(&key), value))
                     .collect();
                 self.object(entries, depth);
             }

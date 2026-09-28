@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn structured_pipeline_stays_grouped_by_parser_completeness() {
-        let source = "users |>\n    take(2) |>\n    inspect()";
+        let source = "users |>\n    take(count: 2) |>\n    inspect()";
 
         assert_eq!(multiline_submissions(source), vec![source.to_string()]);
     }
