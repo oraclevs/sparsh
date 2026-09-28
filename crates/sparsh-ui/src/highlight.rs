@@ -411,6 +411,14 @@ mod tests {
     }
 
     #[test]
+    fn ll_is_highlighted_as_a_builtin_not_an_unknown_command() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let spans = scan("ll -la src", &snapshot);
+
+        assert_eq!(spans[0].role, SemanticRole::Builtin);
+    }
+
+    #[test]
     fn unknown_command_is_only_a_visual_warning() {
         let snapshot = ShellSession::new().ui_snapshot();
         let spans = scan("sparsh-command-that-cannot-exist test", &snapshot);
