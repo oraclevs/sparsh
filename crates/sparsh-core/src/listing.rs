@@ -131,10 +131,9 @@ pub fn list(request: &ListRequest, cwd: &Path) -> Result<Value, String> {
         .map(|entry| entry.into_row(request.long, request.sizes))
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return Ok(Value::Table(TableValue::with_schema(
-            Vec::new(),
-            spar::Schema::default(),
-        )));
+        return Ok(Value::Table(
+            TableValue::with_schema(Vec::new(), spar::Schema::default()).into(),
+        ));
     }
     let mut schema = spar::Schema::infer_records(&rows)
         .map_err(|error| format!("ls: cannot build table: {error:?}"))?;
@@ -146,7 +145,7 @@ pub fn list(request: &ListRequest, cwd: &Path) -> Result<Value, String> {
             .unwrap_or(COLUMN_ORDER.len())
     };
     schema.fields.sort_by_key(|field| rank(&field.name));
-    Ok(Value::Table(TableValue::with_schema(rows, schema)))
+    Ok(Value::Table(TableValue::with_schema(rows, schema).into()))
 }
 
 fn reason(error: &std::io::Error) -> String {
@@ -225,7 +224,7 @@ impl Entry {
                 },
             );
         }
-        Value::Object(fields)
+        Value::Object(fields.into())
     }
 }
 

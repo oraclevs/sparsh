@@ -214,12 +214,7 @@ pub(crate) fn plain_text(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Value::Error {
-            message,
-            kind,
-            code,
-            ..
-        } => format!("error[{kind}:{code}] {message}"),
+        Value::Error(error) => format!("error[{}:{}] {}", error.kind, error.code, error.message),
         Value::Shell(_) => "<shell plan>".into(),
         Value::MixedShell(_) => "<mixed shell plan>".into(),
         Value::ShellProgram(_) => "<shell program>".into(),

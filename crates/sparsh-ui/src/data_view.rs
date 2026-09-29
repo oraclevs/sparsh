@@ -92,14 +92,9 @@ fn leaf(value: &Value) -> Option<Line> {
             Some(SemanticRole::Error),
             format!("Err({})", crate::structured::plain_text(inner)),
         ),
-        Value::Error {
-            message,
-            kind,
-            code,
-            ..
-        } => Line::of(
+        Value::Error(error) => Line::of(
             Some(SemanticRole::Error),
-            sanitize(&format!("error[{kind}:{code}] {message}")),
+            sanitize(&format!("error[{}:{}] {}", error.kind, error.code, error.message)),
         ),
         Value::Object(_) | Value::List(_) | Value::Map(_) | Value::Table(_) => return None,
         other => Line::of(null, sanitize(&crate::structured::plain_text(other))),

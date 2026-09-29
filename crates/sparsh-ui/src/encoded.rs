@@ -19,14 +19,14 @@ pub(crate) fn render_encoded(
 ) -> String {
     let elements = match value {
         Value::Table(table) => table.rows().to_vec(),
-        Value::List(items) => items.clone(),
+        Value::List(items) => items.to_vec(),
         other => vec![other.clone()],
     };
     let (lines, total) = match format {
         "json" => {
             let document = match elements.len() {
                 1 => elements[0].clone(),
-                _ => Value::List(elements),
+                _ => Value::List(elements.into()),
             };
             let mut emitter = Emitter::new(true, options.max_lines);
             emitter.write_value(&document, 0);
