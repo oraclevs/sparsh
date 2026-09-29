@@ -248,15 +248,15 @@ mod tests {
             spar::Value::Object(IndexMap::from([
                 ("name".into(), spar::Value::String("Obi".into())),
                 ("age".into(), spar::Value::Int(24)),
-            ])),
+            ]).into()),
             spar::Value::Object(IndexMap::from([
                 ("name".into(), spar::Value::String("Ada".into())),
                 ("age".into(), spar::Value::Int(31)),
-            ])),
+            ]).into()),
         ])
         .unwrap();
         let result = ShellResult::Structured(spar::InteractiveRuntimeValue {
-            value: spar::Value::Table(table),
+            value: spar::Value::Table(table.into()),
             stream_preview: true,
             truncated: true,
             presentation: spar::InteractivePresentation::Value,
@@ -282,11 +282,11 @@ mod tests {
         let table = spar::TableValue::from_records(vec![spar::Value::Object(IndexMap::from([
             ("name".into(), spar::Value::String("Obi".into())),
             ("age".into(), spar::Value::Int(24)),
-        ]))])
+        ]).into())])
         .unwrap();
 
         let schema_result = ShellResult::Structured(spar::InteractiveRuntimeValue {
-            value: spar::Value::Schema(table.schema().clone()),
+            value: spar::Value::Schema(table.schema().clone().into()),
             stream_preview: false,
             truncated: false,
             presentation: spar::InteractivePresentation::Schema,
@@ -302,7 +302,7 @@ mod tests {
         assert!(schema_output.contains("str"));
 
         let inspect_result = ShellResult::Structured(spar::InteractiveRuntimeValue {
-            value: spar::Value::Table(table),
+            value: spar::Value::Table(table.into()),
             stream_preview: false,
             truncated: false,
             presentation: spar::InteractivePresentation::Inspect,
@@ -335,10 +335,10 @@ mod tests {
         let table = spar::TableValue::from_records(vec![spar::Value::Object(IndexMap::from([
             ("name".into(), spar::Value::String("Obi".into())),
             ("age".into(), spar::Value::Int(24)),
-        ]))])
+        ]).into())])
         .unwrap();
         let result = ShellResult::Structured(spar::InteractiveRuntimeValue {
-            value: spar::Value::Table(table),
+            value: spar::Value::Table(table.into()),
             stream_preview: false,
             truncated: false,
             presentation: spar::InteractivePresentation::Pipeline,

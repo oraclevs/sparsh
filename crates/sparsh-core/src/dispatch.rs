@@ -41,6 +41,7 @@ fn is_previous_value_access(input: &str) -> bool {
 fn is_explicit_spar_construct(input: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "var",
+        "const",
         "function",
         "functionGroup",
         "struct",
@@ -51,6 +52,8 @@ fn is_explicit_spar_construct(input: &str) -> bool {
         "async",
         "if",
         "for",
+        "while",
+        "loop",
         "shell",
         "await",
     ];
@@ -88,7 +91,7 @@ fn is_explicit_spar_construct(input: &str) -> bool {
         return false;
     }
     let rest = rest.trim_start();
-    ["var", "function", "type", "enum"]
+    ["var", "const", "function", "type", "enum"]
         .iter()
         .any(|keyword| begins_with_word(rest, keyword))
 }
@@ -223,6 +226,10 @@ mod tests {
             "enum Mode { Fast; }",
             "import \"tools.spar\" as tools;",
             "export var public: int = 1;",
+            "const LIMIT: int = 4 % 3;",
+            "export const LIMIT: int = 4;",
+            "while count < 3 { count = count + 1; }",
+            "loop { break; }",
             "build()",
             "Rust::build();",
             "shell { echo hello; }",

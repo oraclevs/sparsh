@@ -46,6 +46,7 @@ fn looks_like_spar_input(line: &str) -> bool {
     }
     const PREFIXES: &[&str] = &[
         "var",
+        "const",
         "function",
         "private function",
         "functionGroup",
@@ -58,6 +59,8 @@ fn looks_like_spar_input(line: &str) -> bool {
         "async",
         "if",
         "for",
+        "while",
+        "loop",
         "shell",
         "exec",
     ];
@@ -110,6 +113,10 @@ mod tests {
         assert_complete(validator.validate("build()"));
         assert_incomplete(validator.validate("function build() -> int {"));
         assert_incomplete(validator.validate("shell {"));
+        assert_incomplete(validator.validate("while i < 3 {"));
+        assert_incomplete(validator.validate("loop {"));
+        assert_incomplete(validator.validate("for item in items {"));
+        assert_complete(validator.validate("const LIMIT: int = 10 % 4;"));
         assert_incomplete(validator.validate("build("));
     }
 

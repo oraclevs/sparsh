@@ -206,7 +206,8 @@ fn structured_word_role(word: &str, function_call: bool, named_parameter: bool) 
         SemanticRole::Parameter
     } else {
         match word {
-            "fn" | "if" | "else" | "for" | "return" | "mut" => SemanticRole::SparSyntax,
+            "fn" | "if" | "else" | "for" | "while" | "loop" | "break" | "continue" | "const"
+            | "return" | "mut" => SemanticRole::SparSyntax,
             "true" | "false" => SemanticRole::DataBool,
             "null" | "None" => SemanticRole::DataNull,
             _ => SemanticRole::Argument,
@@ -323,6 +324,7 @@ fn is_spar_keyword(word: &str) -> bool {
     matches!(
         word,
         "var"
+            | "const"
             | "mut"
             | "export"
             | "function"
@@ -335,6 +337,10 @@ fn is_spar_keyword(word: &str) -> bool {
             | "if"
             | "else"
             | "for"
+            | "while"
+            | "loop"
+            | "break"
+            | "continue"
             | "return"
             | "shell"
             | "command"
@@ -424,6 +430,26 @@ mod tests {
         let spans = scan("sparsh-command-that-cannot-exist test", &snapshot);
 
         assert_eq!(spans[0].role, SemanticRole::UnknownCommand);
+    }
+
+    #[test]
+    fn new_language_keywords_are_highlighted_as_spar_syntax() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        for (input, word) in [
+            ("while count < 3 {", "while"),
+            ("loop {", "loop"),
+            ("const LIMIT: int = 4 % 3;", "const"),
+        ] {
+            let spans = scan(input, &snapshot);
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| &input[span.range.clone()] == word
+                        && span.role == SemanticRole::SparSyntax),
+                "{input}: {:?}",
+                roles(&spans)
+            );
+        }
     }
 
     #[test]

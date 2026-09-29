@@ -467,7 +467,7 @@ mod tests {
 
     fn rows(value: Value) -> Vec<Value> {
         match value {
-            Value::Table(table) => table.into_rows(),
+            Value::Table(table) => (*table).clone().into_rows(),
             other => panic!("expected table, got {other:?}"),
         }
     }

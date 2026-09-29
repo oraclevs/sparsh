@@ -423,7 +423,7 @@ mod tests {
         Value::Object(IndexMap::from([
             ("name".into(), Value::String(name.into())),
             ("age".into(), Value::Int(age)),
-        ]))
+        ]).into())
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
             ("age".into(), Value::Int(24)),
             ("active".into(), Value::Bool(true)),
             ("missing".into(), Value::Option(None)),
-        ]));
+        ]).into());
         let options = RenderOptions::new(100);
 
         let plain = render_encoded("json", &value, &Theme::plain(), &options);
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn jsonl_stays_one_json_value_per_physical_line() {
-        let value = Value::List(vec![record("Obi", 24), record("Ada", 31)]);
+        let value = Value::List(vec![record("Obi", 24), record("Ada", 31)].into());
         let output = render_encoded("jsonl", &value, &Theme::plain(), &RenderOptions::new(100));
         let lines = output.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 2, "{output}");
@@ -485,7 +485,7 @@ mod tests {
             ("active".into(), Value::Bool(true)),
             ("age".into(), Value::Int(24)),
             ("name".into(), Value::String("Obi".into())),
-        ]));
+        ]).into());
         let options = RenderOptions::new(100);
 
         for format in ["yaml", "toml"] {
@@ -513,13 +513,13 @@ mod tests {
                 ("age".into(), Value::Int(24)),
                 ("name".into(), Value::String("Obi".into())),
                 ("team".into(), Value::String("core".into())),
-            ])),
+            ]).into()),
             Value::Object(IndexMap::from([
                 ("age".into(), Value::Int(31)),
                 ("name".into(), Value::String("Ada".into())),
                 ("team".into(), Value::String("ops".into())),
-            ])),
-        ]);
+            ]).into()),
+        ].into());
         let options = RenderOptions::new(100);
 
         for (format, delimiter) in [("csv", ','), ("tsv", '\t')] {
@@ -551,7 +551,7 @@ mod tests {
     fn default_preview_bounds_a_two_hundred_line_json_document() {
         let value = Value::List(
             (0..75)
-                .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))])))
+                .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))]).into()))
                 .collect(),
         );
         let options = RenderOptions::new(100);
@@ -566,7 +566,7 @@ mod tests {
     fn encoded_document_has_a_bounded_line_preview() {
         let value = Value::List(
             (0..200)
-                .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))])))
+                .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))]).into()))
                 .collect(),
         );
         let output = render_encoded(

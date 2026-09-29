@@ -831,7 +831,7 @@ mod tests {
             ("age".into(), Value::Int(24)),
             ("active".into(), Value::Bool(true)),
             ("note".into(), Value::Option(None)),
-        ]))])
+        ]).into())])
         .unwrap()
     }
 
@@ -842,7 +842,7 @@ mod tests {
                 ("type".into(), Value::String(kind.into())),
                 ("size".into(), Value::Int(size)),
                 ("modified".into(), Value::String(modified.into())),
-            ]))
+            ]).into())
         };
         let mut table = TableValue::from_records(vec![
             row("assets", "dir", 4096, "2020-01-01T00:00:00Z"),
@@ -868,7 +868,7 @@ mod tests {
                 Value::Object(IndexMap::from([
                     ("id".into(), Value::Int(n)),
                     ("wide".into(), Value::String("x".repeat(200))),
-                ]))
+                ]).into())
             })
             .collect::<Vec<_>>();
         let table = TableValue::from_records(rows).unwrap();
@@ -883,7 +883,7 @@ mod tests {
     #[test]
     fn truncated_tables_point_at_the_pager_not_at_underscore() {
         let rows = (0..60)
-            .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))])))
+            .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))]).into()))
             .collect::<Vec<_>>();
         let table = TableValue::from_records(rows).unwrap();
         let output = render_table(&table, &Theme::plain(), &RenderOptions::new(80));
@@ -984,7 +984,7 @@ mod tests {
         let record = Value::Object(IndexMap::from([
             ("id".into(), Value::Int(5)),
             ("meta".into(), Value::Void),
-        ]));
+        ]).into());
         let output = render_value_view(&record, &Theme::plain(), &RenderOptions::new(60));
         assert!(output.contains("null"), "{output}");
     }
@@ -1034,7 +1034,7 @@ mod tests {
         let table = TableValue::from_records(vec![Value::Object(IndexMap::from([(
             "name".into(),
             Value::String("猫🙂東京🙂猫".repeat(8)),
-        )]))])
+        )]).into())])
         .unwrap();
         let output = render_table(
             &table,
@@ -1062,10 +1062,10 @@ mod tests {
                     Value::List(vec![
                         Value::String("rust".into()),
                         Value::String("flutter".into()),
-                    ]),
+                    ].into()),
                 ),
-            ])),
-        )]));
+            ]).into()),
+        )]).into());
         let output = render_value_view(&value, &Theme::plain(), &RenderOptions::new(80));
         assert!(output.lines().count() > 3, "{output}");
         assert!(output.contains("user"));
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn large_table_is_bounded_and_reports_remaining_rows() {
         let rows = (0..225)
-            .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))])))
+            .map(|n| Value::Object(IndexMap::from([("n".into(), Value::Int(n))]).into()))
             .collect();
         let table = TableValue::from_records(rows).unwrap();
         let output = render_table(
@@ -1100,7 +1100,7 @@ mod tests {
         let table = TableValue::from_records(vec![Value::Object(IndexMap::from([(
             "message".into(),
             Value::String("hello\nworld".into()),
-        )]))])
+        )]).into())])
         .unwrap();
         let theme = Theme::colored();
         let output = render_table(&table, &theme, &RenderOptions::new(80));

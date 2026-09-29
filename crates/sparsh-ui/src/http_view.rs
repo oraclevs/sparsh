@@ -131,19 +131,17 @@ pub(crate) fn render_http_response(
 
 #[cfg(test)]
 mod tests {
-    use indexmap::IndexMap;
-
-    use spar::Value;
+    use spar::{Record, Value};
 
     use super::{is_http_response, render_http_response};
     use crate::data_view::RenderOptions;
     use crate::Theme;
 
-    fn response(status: i64, content_type: &str, body: &str) -> IndexMap<String, Value> {
-        IndexMap::from([
-            ("status".into(), Value::Int(status)),
-            ("contentType".into(), Value::String(content_type.into())),
-            ("body".into(), Value::String(body.into())),
+    fn response(status: i64, content_type: &str, body: &str) -> Record {
+        Record::from([
+            ("status", Value::Int(status)),
+            ("contentType", Value::String(content_type.into())),
+            ("body", Value::String(body.into())),
         ])
     }
 
@@ -151,10 +149,10 @@ mod tests {
     fn only_the_exact_http_response_shape_is_recognized() {
         assert!(is_http_response(&response(200, "", "")));
         let mut extra = response(200, "", "");
-        extra.insert("headers".into(), Value::Int(1));
+        extra.insert("headers", Value::Int(1));
         assert!(!is_http_response(&extra));
-        assert!(!is_http_response(&IndexMap::from([(
-            "status".into(),
+        assert!(!is_http_response(&Record::from([(
+            "status",
             Value::Int(1)
         )])));
     }
