@@ -10,7 +10,7 @@ use crate::styled::sanitize;
 use crate::{SemanticRole, Theme};
 
 /// A record with exactly the fields of `std/http`'s `HttpResponse`.
-pub(crate) fn is_http_response(fields: &IndexMap<String, Value>) -> bool {
+pub(crate) fn is_http_response(fields: &spar::Record) -> bool {
     fields.len() == 3
         && matches!(fields.get("status"), Some(Value::Int(_)))
         && matches!(fields.get("body"), Some(Value::String(_)))
@@ -67,7 +67,7 @@ fn decode_json(body: &str, content_type: &str) -> Option<Value> {
 }
 
 pub(crate) fn render_http_response(
-    fields: &IndexMap<String, Value>,
+    fields: &spar::Record,
     theme: &Theme,
     options: &RenderOptions,
 ) -> String {

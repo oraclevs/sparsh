@@ -224,7 +224,7 @@ impl Emitter {
             Value::Object(fields) => {
                 let mut entries = fields
                     .iter()
-                    .map(|(key, value)| (key.clone(), value))
+                    .map(|(key, value)| (key.to_string(), value))
                     .collect::<Vec<_>>();
                 entries.sort_by(|left, right| left.0.cmp(&right.0));
                 self.object(entries, depth);

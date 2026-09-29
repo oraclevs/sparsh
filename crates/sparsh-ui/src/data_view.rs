@@ -167,7 +167,7 @@ fn value_lines(value: &Value, depth: usize) -> Vec<Line> {
             let mut entries = fields.iter().collect::<Vec<_>>();
             entries.sort_by_key(|(name, _)| *name);
             entries_lines(
-                entries.into_iter().map(|(key, value)| (key.clone(), value)),
+                entries.into_iter().map(|(key, value)| (key.to_string(), value)),
                 depth,
             )
         }
@@ -673,7 +673,7 @@ fn human_size(bytes: i64) -> String {
 
 /// Type-aware cell for a directory-listing column, or `None` to render the
 /// stored value as-is.
-fn listing_cell(column: &str, fields: &indexmap::IndexMap<String, Value>) -> Option<Cell> {
+fn listing_cell(column: &str, fields: &spar::Record) -> Option<Cell> {
     let kind = match fields.get("type") {
         Some(Value::String(kind)) => kind.as_str(),
         _ => return None,
@@ -707,7 +707,7 @@ fn list_view(items: &[Value], theme: &Theme, options: &RenderOptions) -> String 
         let mut names = BTreeSet::new();
         for item in items {
             if let Value::Object(fields) = item {
-                names.extend(fields.keys().cloned());
+                names.extend(fields.keys().map(|key| key.to_string()));
             }
         }
         return records_view(
@@ -738,7 +738,7 @@ fn list_view(items: &[Value], theme: &Theme, options: &RenderOptions) -> String 
 }
 
 fn record_view(
-    fields: &indexmap::IndexMap<String, Value>,
+    fields: &spar::Record,
     theme: &Theme,
     options: &RenderOptions,
 ) -> String {
@@ -753,7 +753,7 @@ fn record_view(
             header: None,
             cells: entries[..shown]
                 .iter()
-                .map(|(name, _)| Cell::text(Some(SemanticRole::DataKey), name.as_str()))
+                .map(|(name, _)| Cell::text(Some(SemanticRole::DataKey), &***name))
                 .collect(),
             index: false,
         },
