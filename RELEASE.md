@@ -14,9 +14,11 @@ The installer uses the `beta` branches of Spar, Sparsh, spar-ls, and spar-proces
 Package sources are available locally under the Spar data directory. Spar's package manager still owns project dependencies and its global store. To use a package from GitHub, run `spar add` in a project, for example:
 
 ```sh
-spar add tcp github:oraclevs/spar-libraries#spar-tcp
+spar add args github:oraclevs/spar-libraries#spar-args
 spar install
 ```
+
+The GitHub `spar-tcp` branch contains source only. The beta installer builds its native module in the installed library copy; add TCP from that local path when you need it (for example, `spar add tcp "path:$HOME/.local/share/spar/libraries/spar-tcp"` with the default data directory).
 
 The source installer needs Rust and a C compiler during the beta. It currently targets Unix hosts supported by the TCP build script. A separate prebuilt archive is available for Linux x86_64 GNU; its installer requires no compiler.
 
