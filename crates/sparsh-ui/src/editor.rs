@@ -411,7 +411,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 let reviewed_paste =
                     should_review_multiline_submission(mode, &source, saw_multiline_paste);
                 let source = if reviewed_paste {
-                    match review_multiline_paste(&source, &current)? {
+                    match review_multiline_paste(&source, &current, session)? {
                         Some(source) => source,
                         None => continue,
                     }

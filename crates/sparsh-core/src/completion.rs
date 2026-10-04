@@ -205,10 +205,17 @@ fn looks_like_spar(trimmed: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "var ",
         "var mut ",
+        "fn ",
         "function ",
+        "private fn ",
         "private function ",
+        "async fn ",
+        "const ",
+        "while ",
+        "loop ",
         "functionGroup ",
         "struct ",
+        "impl ",
         "type ",
         "enum ",
         "if ",
@@ -556,6 +563,15 @@ mod tests {
         assert_eq!(classify("./to", 4).0, CompletionContext::Path);
         assert_eq!(classify("import pkg { bu", 15).0, CompletionContext::Import);
         assert_eq!(classify("build(", 6).0, CompletionContext::SparIdentifier);
+        assert_eq!(classify("fn greet", 9).0, CompletionContext::SparIdentifier);
+        assert_eq!(
+            classify("const LIM", 9).0,
+            CompletionContext::SparIdentifier
+        );
+        assert_eq!(
+            classify("while count", 11).0,
+            CompletionContext::SparIdentifier
+        );
         assert_eq!(classify("echo foo(bar)", 13).0, CompletionContext::Argument);
     }
 

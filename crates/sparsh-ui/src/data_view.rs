@@ -467,7 +467,7 @@ fn index_column(rows: usize, offset: usize) -> Column {
     Column {
         header: Some(Line::of(Some(SemanticRole::TableHeader), "#")),
         cells: (0..rows)
-            .map(|row| Cell::text(Some(SemanticRole::TableIndex), (offset + row).to_string()))
+            .map(|row| Cell::text(Some(SemanticRole::TableIndex), (offset + row + 1).to_string()))
             .collect(),
         index: true,
     }
@@ -975,7 +975,7 @@ mod tests {
         let name = output.find("name").unwrap();
         let note = output.find("note").unwrap();
         assert!(active < age && age < name && name < note, "{output}");
-        assert!(output.contains("│ 0 "), "{output}");
+        assert!(output.contains("│ 1 "), "{output}");
         assert!(!output.contains("\x1b["));
     }
 
@@ -1092,7 +1092,7 @@ mod tests {
             output.contains("… 175 more rows (225 total), type `view` to page through all of them"),
             "{output}"
         );
-        assert!(!output.contains("│ 50 "), "{output}");
+        assert!(!output.contains("│ 51 "), "{output}");
     }
 
     #[test]

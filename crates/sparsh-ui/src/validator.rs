@@ -47,10 +47,13 @@ fn looks_like_spar_input(line: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "var",
         "const",
+        "fn",
         "function",
+        "private fn",
         "private function",
         "functionGroup",
         "struct",
+        "impl",
         "type",
         "enum",
         "import",

@@ -19,6 +19,10 @@ Bare words still run commands like any shell. The difference shows up the moment
 
 Spar never depends on Sparsh. Sparsh uses Spar, `spar-command`, and `spar-process` as libraries — native Spar shell syntax is never silently translated to Bash/Zsh/Fish.
 
+## Beta source installer
+
+The [source installer](install-from-source.sh) checks for Rust, Cargo, Git, and a C compiler, clones the toolchain and [Spar libraries](https://github.com/oraclevs/spar-libraries), then builds and installs the binaries and libraries. See [release instructions](RELEASE.md) for the command and install paths.
+
 ## Build
 
 Keep the sibling repositories together because the workspaces use path

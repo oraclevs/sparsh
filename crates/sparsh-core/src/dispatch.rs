@@ -42,9 +42,11 @@ fn is_explicit_spar_construct(input: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "var",
         "const",
+        "fn",
         "function",
         "functionGroup",
         "struct",
+        "impl",
         "type",
         "enum",
         "import",
@@ -74,7 +76,7 @@ fn is_explicit_spar_construct(input: &str) -> bool {
     if let Some(rest) = input.strip_prefix("private") {
         if rest.starts_with(char::is_whitespace) {
             let rest = rest.trim_start();
-            if ["function", "functionGroup", "struct"]
+            if ["fn", "function", "functionGroup", "struct"]
                 .iter()
                 .any(|keyword| begins_with_word(rest, keyword))
                 || rest.starts_with('[')
@@ -91,7 +93,7 @@ fn is_explicit_spar_construct(input: &str) -> bool {
         return false;
     }
     let rest = rest.trim_start();
-    ["var", "const", "function", "type", "enum"]
+    ["var", "const", "fn", "function", "struct", "type", "enum"]
         .iter()
         .any(|keyword| begins_with_word(rest, keyword))
 }
@@ -112,7 +114,9 @@ pub(crate) fn is_explicit_call(input: &str) -> bool {
         return false;
     }
     let name = input[..open].trim();
-    !name.is_empty() && name.split("::").all(is_identifier)
+    let name = name.split_once('<').map_or(name, |(base, _)| base);
+    !name.is_empty()
+        && name.split("::").all(|part| part.split('.').all(is_identifier))
 }
 
 /// A real shell byte pipe feeding Spar's explicit decoder (`... | from FORMAT`).
@@ -219,9 +223,16 @@ mod tests {
         for input in [
             "var project: str = \"spar\";",
             "function build() -> int { return 0; };",
+            "fn build() -> int { return 0; };",
+            "private fn hidden() -> int { return 0; };",
+            "export fn public() -> int { return 0; };",
             "private function hidden() -> int { return 0; };",
             "functionGroup Rust {}",
             "struct Human { name: str = \"OCC\"; };",
+            "export struct Human { name: str = \"OCC\"; };",
+            "impl Human { fn greet(self) -> str { return self.name; }; };",
+            "person.greet()",
+            "response.json<Record>()",
             "type Human = { name: str; };",
             "enum Mode { Fast; }",
             "import \"tools.spar\" as tools;",

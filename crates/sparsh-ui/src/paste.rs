@@ -58,6 +58,7 @@ pub fn multiline_submissions(source: &str) -> Vec<String> {
 pub fn review_multiline_paste(
     source: &str,
     snapshot: &ShellUiSnapshot,
+    session: &sparsh_core::ShellSession,
 ) -> io::Result<Option<String>> {
     let stderr = io::stderr();
     let mut err = stderr.lock();
@@ -78,7 +79,7 @@ pub fn review_multiline_paste(
     match parse_decision(&answer) {
         PasteDecision::Execute => Ok(Some(source.to_string())),
         PasteDecision::Cancel => Ok(None),
-        PasteDecision::Edit => match edit_paste(source, snapshot)? {
+        PasteDecision::Edit => match edit_paste(source, snapshot, session)? {
             PasteEditOutcome::Execute(source) => Ok(Some(source)),
             PasteEditOutcome::Save(source) => {
                 let path = save_paste_draft(&source)?;
@@ -102,8 +103,8 @@ fn parse_decision(input: &str) -> PasteDecision {
     }
 }
 
-fn edit_paste(source: &str, snapshot: &ShellUiSnapshot) -> io::Result<PasteEditOutcome> {
-    Ok(classify_editor_result(edit_text(source, true, snapshot)?))
+fn edit_paste(source: &str, snapshot: &ShellUiSnapshot, session: &sparsh_core::ShellSession) -> io::Result<PasteEditOutcome> {
+    Ok(classify_editor_result(edit_text(source, true, snapshot, session)?))
 }
 
 fn classify_editor_result(result: Option<EditorResult>) -> PasteEditOutcome {

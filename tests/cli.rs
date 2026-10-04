@@ -826,3 +826,69 @@ fn a_missing_data_import_in_a_script_says_what_to_import() {
         "{stderr}"
     );
 }
+
+#[test]
+fn piped_stdin_accepts_canonical_fn_and_const() {
+    let mut child = sparsh()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(
+        b"const DIVISOR: int = 3;\nfn remainder(value: int) -> int { return value % DIVISOR; };\nremainder(value: 8)\n"
+    ).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"2\n");
+}
+
+#[test]
+fn piped_stdin_runs_while_and_loop_in_spar_session() {
+    let mut child = sparsh()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(
+        b"var mut total: int = 0;\nwhile total < 3 { total = total + 1; }\nloop { total = total + 2; break; }\ntotal\n"
+    ).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"5\n");
+}
+
+#[test]
+fn piped_stdin_builds_a_program_with_struct_impl_and_method_calls() {
+    let mut child = sparsh()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(
+        b"export struct Counter { value: int = 2; };\nimpl Counter { fn inc(self) -> int { return self.value + 1; }; };\nvar counter: Counter = Counter();\ncounter.inc()\n"
+    ).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"3\n");
+}

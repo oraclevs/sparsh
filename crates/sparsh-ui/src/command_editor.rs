@@ -146,6 +146,36 @@ impl TextBuffer {
         }
     }
 
+    fn complete(&mut self, session: &ShellSession) -> Vec<String> {
+        let line = self.current_line().iter().collect::<String>();
+        let cursor = char_index_to_byte(&line, self.column);
+        let snapshot = session.completion_snapshot();
+        let items = sparsh_core::complete(
+            &snapshot,
+            sparsh_core::CompletionRequest { line: &line, cursor },
+        );
+        if items.len() == 1 {
+            let item = &items[0];
+            if item.span.end <= line.len()
+                && line.is_char_boundary(item.span.start)
+                && line.is_char_boundary(item.span.end)
+            {
+                let start = line[..item.span.start].chars().count();
+                let end = line[..item.span.end].chars().count();
+                self.current_line_mut()
+                    .splice(start..end, item.replacement.chars());
+                self.column = start + item.replacement.chars().count();
+            }
+            Vec::new()
+        } else {
+            items
+                .iter()
+                .take(5)
+                .map(|item| item.replacement.clone())
+                .collect()
+        }
+    }
+
     fn move_home(&mut self) {
         self.column = 0;
     }
@@ -192,11 +222,13 @@ pub(crate) fn edit_text(
     initial: &str,
     allow_execute: bool,
     snapshot: &ShellUiSnapshot,
+    session: &ShellSession,
 ) -> io::Result<Option<EditorResult>> {
     let mut buffer = TextBuffer::from(initial);
     let mut output = io::stdout();
     let _guard = TerminalGuard::enter(&mut output)?;
     let mut viewport_row = 0usize;
+    let mut completion_hints = Vec::<String>::new();
     let colors_enabled = std::env::var_os("NO_COLOR").is_none();
     let theme = if colors_enabled {
         Theme::colored()
@@ -210,6 +242,8 @@ pub(crate) fn edit_text(
             &buffer,
             allow_execute,
             snapshot,
+            session,
+            &completion_hints,
             &theme,
             &mut viewport_row,
         )?;
@@ -217,6 +251,9 @@ pub(crate) fn edit_text(
             Event::Key(key) => {
                 if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     continue;
+                }
+                if key.code != KeyCode::Tab {
+                    completion_hints.clear();
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     match key.code {
@@ -237,7 +274,7 @@ pub(crate) fn edit_text(
 
                 match key.code {
                     KeyCode::Esc => return Ok(None),
-                    KeyCode::F(5) if allow_execute => {
+                    KeyCode::Char('e' | 'E') if allow_execute && key.modifiers.contains(KeyModifiers::ALT) => {
                         return Ok(finalize_editor_result(
                             initial,
                             &buffer.to_string(),
@@ -254,11 +291,7 @@ pub(crate) fn edit_text(
                     KeyCode::Down => buffer.move_down(),
                     KeyCode::Home => buffer.move_home(),
                     KeyCode::End => buffer.move_end(),
-                    KeyCode::Tab => {
-                        for _ in 0..4 {
-                            buffer.insert_char(' ');
-                        }
-                    }
+                    KeyCode::Tab => completion_hints = buffer.complete(session),
                     _ => {}
                 }
             }
@@ -272,7 +305,7 @@ pub fn edit_buffer_file(path: &Path) -> io::Result<()> {
     let original = fs::read_to_string(path)?;
     let session = ShellSession::try_new().map_err(|error| io::Error::other(error.to_string()))?;
     let snapshot = session.ui_snapshot();
-    if let Some(result) = edit_text(&original, false, &snapshot)? {
+    if let Some(result) = edit_text(&original, false, &snapshot, &session)? {
         if result.action == EditorAction::Save {
             fs::write(path, result.text)?;
         }
@@ -285,6 +318,8 @@ fn render(
     buffer: &TextBuffer,
     allow_execute: bool,
     snapshot: &ShellUiSnapshot,
+    session: &ShellSession,
+    completion_hints: &[String],
     theme: &Theme,
     viewport_row: &mut usize,
 ) -> io::Result<()> {
@@ -352,9 +387,22 @@ fn render(
         }
     }
 
+    let diagnostics = session.editor_diagnostics(&buffer.to_string());
+    let diagnostic_row = height.saturating_sub(2);
+    queue!(output, MoveTo(0, diagnostic_row), Clear(ClearType::CurrentLine))?;
+    if let Some(error) = diagnostics.first() {
+        let message = format!("{}", error);
+        let text = truncate_to_width(&message, width);
+        queue!(output, Print(theme.paint(crate::theme::SemanticRole::Error, &text)))?;
+    } else if !completion_hints.is_empty() {
+        let message = completion_hints.join("  ");
+        let text = truncate_to_width(&message, width);
+        queue!(output, Print(theme.paint(crate::theme::SemanticRole::Secondary, &text)))?;
+    }
+
     let status_row = height.saturating_sub(1);
     let help = if allow_execute {
-        "Ctrl+S save draft  ·  F5 execute  ·  Esc cancel"
+        "Ctrl+S save draft  ·  Alt+E execute  ·  Esc cancel"
     } else {
         "Ctrl+S save to prompt  ·  Esc cancel"
     };
@@ -463,6 +511,16 @@ mod tests {
         buffer.insert_char('界');
 
         assert_eq!(buffer.to_string(), "echo hello\n界\nworld!");
+    }
+
+    #[test]
+    fn tab_completion_uses_live_spar_identifiers() {
+        let mut session = ShellSession::new();
+        session.submit("var balance: int = 4;").unwrap();
+        let mut buffer = TextBuffer::from("var result: int = balan");
+        buffer.move_end();
+        assert!(buffer.complete(&session).is_empty());
+        assert_eq!(buffer.to_string(), "var result: int = balance");
     }
 
     #[test]

@@ -330,6 +330,20 @@ impl ShellSession {
         Ok(result)
     }
 
+    /// Check a draft with Spar's compiler and the declarations already in
+    /// this shell. External commands are left to the shell parser on submit.
+    pub fn editor_diagnostics(&self, source: &str) -> Vec<spar::SparError> {
+        if !matches!(classify(source, &self.spar), Dispatch::SparFragment(_))
+            || spar::input_completeness(source) == spar::InputCompleteness::Incomplete
+        {
+            return Vec::new();
+        }
+        self.spar
+            .check_interactive_fragment(source, self.last_interactive_value.as_ref())
+            .err()
+            .unwrap_or_default()
+    }
+
     pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
         self.poll_jobs()?;
         let cwd = self.services.directories.current().to_path_buf();
@@ -1505,6 +1519,17 @@ mod tests {
         session.reload_config().unwrap();
 
         assert_eq!(session.prompt_config(), &crate::PromptConfig::default());
+    }
+
+    #[test]
+    fn editor_diagnostics_use_committed_declarations_without_running_draft() {
+        let mut session = ShellSession::new();
+        session.submit("var base: int = 4;").unwrap();
+        assert!(session.editor_diagnostics("base + 1").is_empty());
+        let errors = session.editor_diagnostics("var result: int = missing; ");
+        assert!(!errors.is_empty());
+        assert!(matches!(session.submit("base").unwrap(), ShellResult::Value(spar::ConfigValue::Int(4))));
+        assert!(session.editor_diagnostics("echo hello").is_empty());
     }
 
     #[test]
@@ -2798,26 +2823,6 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
     }
 
     #[test]
-    #[ignore = "the transitive-type-mangling bug this was tracking is now FIXED in spar's \
-                loader (see spar_transitive_type_mangling_bug.md) — `_` correctly resolves to \
-                `HttpResponse` and `.json()` is found. Remaining blocker is a different, deeper \
-                gap: `HttpResponse.json<T>()` called bare (`_.json()`, no explicit type \
-                argument, nothing to unify T against) infers T as an unresolved \
-                `SparType::TypeParameter` in spar's typechecker. `spar/src/session.rs`'s \
-                interactive-preview path now defaults an unresolved T to `Record` for the \
-                synthetic wrapper function's *declared* return type (see \
-                `default_unresolved_type_parameters`), which fixed the crash \
-                (\"undefined type: `T` is not declared\") — but the wrapper's `return` \
-                statement re-infers `_.json()`'s type independently during real compilation, \
-                gets `T` again (return-position calls don't get expected-type-directed \
-                inference for generics in this language, confirmed consistent with `len()`'s \
-                \"cannot infer type parameter\" error elsewhere), and now fails with \"function \
-                declares return type 'Record' but this 'return' provides 'T'\". A full fix \
-                needs either AST-level surgery to inject an explicit `<Record>` type argument \
-                into the synthesized wrapper's source text, or return-type-directed generic \
-                inference in the typechecker generally (a bigger, riskier change — risks \
-                changing `len()`-style \"be explicit\" diagnostics elsewhere). Not attempted; \
-                see spar_transitive_type_mangling_bug.md for the full chain."]
     fn await_at_the_prompt_fetches_and_keeps_the_response_for_underscore() {
         let url = serve_once("application/json", r#"{"name":"ditto","cry":null}"#);
         let mut session = ShellSession::try_new_interactive().unwrap();
@@ -2884,6 +2889,22 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             matches!(&status, ShellResult::Value(spar::ConfigValue::Int(200))),
             "{status:?}"
         );
+    }
+
+    #[test]
+    fn typed_http_json_can_be_filtered_in_one_prompt_expression() {
+        let url = serve_once(
+            "application/json",
+            r#"{"stats":[{"stat":"hp","base":48},{"stat":"speed","base":12}]}"#,
+        );
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session.submit("import pkg { get } from \"std/http\";").unwrap();
+        session.submit("struct Stat { stat: str; base: int; };").unwrap();
+        session.submit("struct Payload { stats: List<Stat>; };").unwrap();
+        let result = session.submit(&format!(
+            "(await get(url: \"{url}\")).json<Payload>().stats |> where(predicate: fn(value) => value.base > 40) |> count()"
+        )).unwrap();
+        assert!(matches!(result, ShellResult::Value(spar::ConfigValue::Int(1))), "{result:?}");
     }
 
     const STATS: &str = r#"{"name":"ditto","stats":[{"stat":"hp","base":48},{"stat":"attack","base":48},{"stat":"speed","base":48},{"stat":"special","base":10}],"meta":{"id":1}}"#;
