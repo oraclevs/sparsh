@@ -13,9 +13,18 @@ rustc --version
 source_root=$(mktemp -d)
 trap 'rm -rf "$source_root"' EXIT
 clone() {
-  local name=$1 url=$2 ref=$3
-  echo "Cloning $name ($ref)"
-  git clone --quiet --depth 1 --branch "$ref" "$url" "$source_root/$name"
+  local name=$1 url=$2 ref=$3 attempt
+  for attempt in 1 2 3; do
+    echo "Cloning $name ($ref), attempt $attempt"
+    if GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=45 \
+      clone --quiet --depth 1 --branch "$ref" "$url" "$source_root/$name.attempt.$attempt"; then
+      mv "$source_root/$name.attempt.$attempt" "$source_root/$name"
+      return 0
+    fi
+    echo "Clone of $name failed on attempt $attempt" >&2
+  done
+  echo "Unable to clone $name from $url at $ref" >&2
+  return 1
 }
 clone spar "${SPAR_SOURCE_URL:-https://github.com/oraclevs/spar.git}" "${SPAR_SOURCE_REF:-beta}"
 clone spar-command "${SPAR_COMMAND_SOURCE_URL:-https://github.com/oraclevs/spar-command.git}" "${SPAR_COMMAND_SOURCE_REF:-main}"
