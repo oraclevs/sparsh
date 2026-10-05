@@ -10,6 +10,7 @@ pub(crate) struct SparshHistory {
     inner: FileBackedHistory,
     dedupe_consecutive: bool,
     last_saved: Option<HistoryItem>,
+    stealth_mode: bool,
 }
 
 impl SparshHistory {
@@ -18,6 +19,7 @@ impl SparshHistory {
             inner,
             dedupe_consecutive,
             last_saved: None,
+            stealth_mode: false,
         }
     }
 }
@@ -36,6 +38,15 @@ impl SharedHistory {
 }
 
 impl sparsh_core::HistoryAccess for SharedHistory {
+    fn stealth_mode(&self) -> Result<bool, String> {
+        Ok(self.inner.lock().map_err(|_| "history lock poisoned")?.stealth_mode)
+    }
+
+    fn set_stealth_mode(&self, enabled: bool) -> Result<(), String> {
+        self.inner.lock().map_err(|_| "history lock poisoned")?.stealth_mode = enabled;
+        Ok(())
+    }
+
     fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String> {
         let history = self
             .inner
@@ -97,6 +108,27 @@ impl History for SharedHistory {
 
 impl History for SparshHistory {
     fn save(&mut self, item: HistoryItem) -> ReedlineResult<HistoryItem> {
+        // Reedline saves before returning the submitted line to the shell.
+        // A paste is one history item even when the shell runs it line by line.
+        let private_before = self.stealth_mode;
+        let mut mode_command = false;
+        for line in item.command_line.lines() {
+            match line.trim().trim_end_matches(';').trim() {
+                "stealth on" => {
+                    self.stealth_mode = true;
+                    mode_command = true;
+                }
+                "stealth off" => {
+                    self.stealth_mode = false;
+                    mode_command = true;
+                }
+                "stealth" | "stealth status" => mode_command = true,
+                _ => {}
+            }
+        }
+        if private_before || mode_command || self.stealth_mode {
+            return Ok(item);
+        }
         if self.dedupe_consecutive
             && item.id.is_none()
             && self
@@ -158,6 +190,52 @@ mod tests {
     use tempfile::TempDir;
 
     use super::SparshHistory;
+
+    #[test]
+    fn stealth_excludes_every_private_line_and_both_mode_switches() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("history");
+        let inner = reedline::FileBackedHistory::with_file(100, path.clone()).unwrap();
+        let mut history = SparshHistory::new(inner, false);
+        for command in [
+            "echo public-before",
+            "stealth on",
+            "echo secret-token",
+            "var password: str = \"secret-token\";",
+            "stealth status",
+            "stealth off",
+            "echo public-after",
+        ] {
+            history.save(HistoryItem::from_command_line(command)).unwrap();
+        }
+        history.sync().unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("public-before"));
+        assert!(contents.contains("public-after"));
+        assert!(!contents.contains("secret-token"));
+        assert!(!contents.contains("stealth"));
+        assert_eq!(history.count_all().unwrap(), 2);
+    }
+
+    #[test]
+    fn paste_entering_stealth_is_never_written_to_history() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("history");
+        let inner = reedline::FileBackedHistory::with_file(100, path.clone()).unwrap();
+        let mut history = SparshHistory::new(inner, false);
+        history.save(HistoryItem::from_command_line(
+            "stealth on\nvar secret: str = \"sensitive\";"
+        )).unwrap();
+        history.save(HistoryItem::from_command_line("echo also-sensitive")).unwrap();
+        history.save(HistoryItem::from_command_line("stealth off")).unwrap();
+        history.save(HistoryItem::from_command_line("echo visible")).unwrap();
+        history.sync().unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("echo visible"));
+        assert!(!contents.contains("sensitive"));
+        assert!(!contents.contains("stealth"));
+        assert_eq!(history.count_all().unwrap(), 1);
+    }
 
     #[test]
     fn consecutive_duplicates_are_not_inserted_twice_when_enabled() {

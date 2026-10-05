@@ -15,6 +15,7 @@ pub(crate) fn classify<'a>(input: &'a str, session: &spar::Session) -> Dispatch<
         || is_explicit_spar_construct(input)
         || is_explicit_call(input)
         || is_previous_value_access(input)
+        || is_existing_value_access(input, session)
         || input.starts_with("(await")
     {
         return Dispatch::SparFragment(input);
@@ -36,6 +37,14 @@ fn is_previous_value_access(input: &str) -> bool {
     input
         .strip_prefix('_')
         .is_some_and(|rest| rest.starts_with(['.', '[']))
+}
+
+fn is_existing_value_access(input: &str, session: &spar::Session) -> bool {
+    let Some(index) = input.find(['.', '[']) else {
+        return false;
+    };
+    let name = &input[..index];
+    is_identifier(name) && session.value(name).is_some()
 }
 
 fn is_explicit_spar_construct(input: &str) -> bool {

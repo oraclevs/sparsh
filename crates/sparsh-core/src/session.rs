@@ -941,6 +941,12 @@ impl ShellSession {
         }
     }
 
+    pub fn stealth_mode(&self) -> bool {
+        self.services.history.as_ref()
+            .and_then(|history| history.stealth_mode().ok())
+            .unwrap_or(false)
+    }
+
     pub fn history_settings(&self) -> crate::HistorySettings {
         crate::HistorySettings::from_config(&self.services.environment, &self.config.history)
     }
@@ -1200,6 +1206,7 @@ fn install_color_ls_alias(
 mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use spar::ConfigValue;
@@ -1213,9 +1220,19 @@ mod tests {
     #[derive(Default)]
     struct MemoryHistory {
         entries: Mutex<Vec<String>>,
+        stealth: AtomicBool,
     }
 
     impl crate::HistoryAccess for MemoryHistory {
+        fn stealth_mode(&self) -> Result<bool, String> {
+            Ok(self.stealth.load(Ordering::Relaxed))
+        }
+
+        fn set_stealth_mode(&self, enabled: bool) -> Result<(), String> {
+            self.stealth.store(enabled, Ordering::Relaxed);
+            Ok(())
+        }
+
         fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String> {
             let entries = self
                 .entries
@@ -2151,6 +2168,19 @@ mod tests {
     }
 
     #[test]
+    fn stealth_builtin_changes_history_mode_and_reports_status() {
+        let history = Arc::new(MemoryHistory::default());
+        let mut session = ShellSession::new();
+        session.set_history_access(history);
+
+        assert_eq!(builtin_stdout(session.submit("stealth status").unwrap()), "stealth mode: off\n");
+        assert_eq!(builtin_stdout(session.submit("stealth on").unwrap()), "stealth mode: on\n");
+        assert!(session.stealth_mode());
+        assert_eq!(builtin_stdout(session.submit("stealth off").unwrap()), "stealth mode: off\n");
+        assert!(!session.stealth_mode());
+    }
+
+    #[test]
     fn logout_requires_login_mode() {
         let mut session = ShellSession::new();
         let error = session.submit("logout").unwrap_err();
@@ -2820,6 +2850,30 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
 
     fn serve_once(content_type: &'static str, body: &'static str) -> String {
         serve(1, content_type, body)
+    }
+
+    #[test]
+    fn awaited_http_declaration_persists_without_refetching() {
+        let url = serve_once("text/plain", "hello ${world}");
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("import pkg { get } from \"std/http\";")
+            .unwrap();
+        session
+            .submit(&format!(
+                "var res: HttpResponse = await get(url: \"{url}\");"
+            ))
+            .unwrap();
+        let status = session.submit("res.status").unwrap();
+        assert!(matches!(status, ShellResult::Value(spar::ConfigValue::Int(200))), "{status:?}");
+        assert!(matches!(
+            session.submit("res.body").unwrap(),
+            ShellResult::Value(spar::ConfigValue::Str(body)) if body == "hello ${world}"
+        ));
+        assert!(matches!(
+            session.submit("res.headers.get(key: \"content-type\").unwrap()").unwrap(),
+            ShellResult::Value(spar::ConfigValue::Str(value)) if value == "text/plain"
+        ));
     }
 
     #[test]

@@ -290,6 +290,15 @@ impl BuiltinRegistry {
                     history::history
                 ),
                 builtin!(
+                    "stealth",
+                    "Control private command-history mode",
+                    "stealth [on|off|status]",
+                    "history",
+                    true,
+                    true,
+                    history::stealth
+                ),
+                builtin!(
                     "echo",
                     "Write arguments separated by spaces",
                     "echo [-n] [argument ...]",
@@ -976,6 +985,7 @@ mod tests {
             "disown",
             "kill",
             "history",
+            "stealth",
             "echo",
             "printf",
             "read",

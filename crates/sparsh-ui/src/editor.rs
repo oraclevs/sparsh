@@ -199,6 +199,7 @@ fn build_editor(
     multiline_paste_seen: Arc<AtomicBool>,
 ) -> io::Result<Reedline> {
     let history_settings = session.history_settings();
+    let was_stealth = session.stealth_mode();
     if let Some(parent) = history_settings.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -209,6 +210,8 @@ fn build_editor(
         history,
         history_settings.ignore_consecutive_duplicates,
     ));
+    sparsh_core::HistoryAccess::set_stealth_mode(&history, was_stealth)
+        .map_err(io::Error::other)?;
     session.set_history_access(Arc::new(history.clone()));
 
     let highlighter = SparshHighlighter::new(snapshot, theme.clone());
@@ -431,7 +434,11 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                         open_pager(last_view.as_ref(), session, &theme)?;
                         continue;
                     }
-                    let result = if mode == EditorMode::Repl {
+                    let stealth_control = matches!(
+                        submission.trim().trim_end_matches(';').trim(),
+                        "stealth" | "stealth on" | "stealth off" | "stealth status"
+                    );
+                    let result = if mode == EditorMode::Repl && !stealth_control {
                         session.submit_spar(&submission)
                     } else {
                         session.submit(&submission)

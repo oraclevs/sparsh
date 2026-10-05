@@ -28,3 +28,22 @@ pub(super) fn history(
     }
     Ok(success(Some(text)))
 }
+
+pub(super) fn stealth(
+    args: &[String],
+    context: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
+    let Some(history) = context.services.history.as_ref() else {
+        return Err(error("stealth is available in interactive sessions"));
+    };
+    match args {
+        [value] if value == "on" => history.set_stealth_mode(true).map_err(error)?,
+        [value] if value == "off" => history.set_stealth_mode(false).map_err(error)?,
+        [] => {}
+        [value] if value == "status" => {}
+        _ => return Err(usage_error("stealth [on|off|status]")),
+    }
+    let state = if history.stealth_mode().map_err(error)? { "on" } else { "off" };
+    Ok(success(Some(format!("stealth mode: {state}\n"))))
+}

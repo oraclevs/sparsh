@@ -88,7 +88,7 @@ alias unalias
 export unset path hash
 type which command builtin
 jobs fg bg wait disown kill
-history
+history stealth
 echo printf read
 umask ulimit
 source . deactivate reload
@@ -463,6 +463,11 @@ or:
 $HOME/.local/state/sparsh/history
 ```
 
+Use `stealth on` to stop saving submitted lines to Sparsh history. `stealth status`
+shows the current setting, and `stealth off` resumes recording. The mode
+switch commands are skipped too. Stealth affects Sparsh history only; external
+programs and editors may still write their own files.
+
 Completion combines builtins, aliases, cached PATH executables, filesystem
 paths, and identifiers from the persistent Spar session. Filesystem completion
 works in ordinary command arguments (`ls Pro<Tab>`), `cd`, after pipelines, and
@@ -560,7 +565,18 @@ await get(url: "https://pokeapi.co/api/v2/pokemon/ditto")
 _.json()
 ```
 
-The response is shown as a status line and the body: JSON becomes a table or tree, HTML/XML/text is shown as text. `_` holds the response, so `_.status`, `_.body`, `_.contentType` and `_.json()` work. `await` cannot be used inside a declaration; see `spar/docs/async-await.md`.
+The response is shown as a status line and the body: JSON becomes a table or tree, HTML/XML/text is shown as text. `_` holds the response, so `_.status`, `_.body`, `_.contentType` and `_.json()` work.
+
+You can also keep an HTTP response for later prompt lines:
+
+```spar
+import pkg { get } from "std/http";
+var res: HttpResponse = await get(url: "https://pokeapi.co/api/v2/pokemon/ditto");
+res.status
+res.json()
+```
+
+Sparsh makes this request once and stores the response data in the session. Other awaited declarations should go inside an async function.
 
 The `std/data` functions (`where`, `map`, `take`, ...) are available at the interactive prompt without an import. Scripts still import them.
 
