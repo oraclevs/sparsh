@@ -282,8 +282,8 @@ impl BuiltinRegistry {
                 ),
                 builtin!(
                     "history",
-                    "List or clear command history",
-                    "history [N|-c]",
+                    "List, search, or remove command history",
+                    "history [N|--search TEXT|--delete LINE|--delete-matching TEXT|--delete-exact COMMAND|--clear]",
                     "history",
                     true,
                     true,

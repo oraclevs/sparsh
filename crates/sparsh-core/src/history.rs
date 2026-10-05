@@ -36,7 +36,9 @@ pub(crate) fn default_history_path(environment: &EnvironmentService) -> PathBuf 
 }
 
 pub trait HistoryAccess: Send + Sync {
-    fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String>;
+    fn list(&self, limit: Option<usize>) -> Result<Vec<(usize, String)>, String>;
+    fn delete_line(&self, line: usize) -> Result<usize, String>;
+    fn delete_matching(&self, text: &str, exact: bool) -> Result<usize, String>;
     fn clear(&self) -> Result<(), String>;
     fn stealth_mode(&self) -> Result<bool, String>;
     fn set_stealth_mode(&self, enabled: bool) -> Result<(), String>;

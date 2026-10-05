@@ -28,6 +28,7 @@ pub struct PromptData {
     pub git: Option<GitState>,
     pub projects: Vec<ProjectKind>,
     pub python_environment: Option<String>,
+    pub stealth: bool,
     pub previous_status: i32,
     pub previous_duration: Option<Duration>,
     pub terminal_width: usize,
@@ -165,6 +166,14 @@ impl PromptState {
         }
 
         first_line.push_str("\n╰─ ");
+        if data.stealth {
+            let label = if width >= 20 {
+                "🔒 stealth "
+            } else {
+                "🔒 "
+            };
+            first_line.push_str(&theme.paint(SemanticRole::Warning, label));
+        }
         SparshPrompt {
             left: first_line,
             right: String::new(),
@@ -500,6 +509,7 @@ mod tests {
             }),
             projects: vec![ProjectKind::Rust],
             python_environment: None,
+            stealth: false,
             previous_status: 7,
             previous_duration: Some(Duration::from_secs(3)),
             terminal_width: width,
@@ -526,6 +536,18 @@ mod tests {
         for token in ["+1", "~2", "?3", "!1", "↑4", "↓5", "✕ 7", "3s", "05:31:46"] {
             assert!(first.contains(token), "missing {token} in {first}");
         }
+    }
+
+    #[test]
+    fn stealth_indicator_is_visible_only_while_enabled() {
+        let state = PromptState::new(Duration::from_secs(2));
+        let mut data = data(80);
+        let normal = state.prompt(&data, &PromptConfig::default(), &Theme::plain());
+        assert!(!normal.left.contains("stealth"));
+        data.stealth = true;
+        let private = state.prompt(&data, &PromptConfig::default(), &Theme::plain());
+        assert!(private.left.contains("🔒 stealth "));
+        assert!(private.left.lines().last().unwrap().contains("🔒 stealth"));
     }
 
     #[test]

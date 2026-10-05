@@ -25,16 +25,24 @@ use crate::{
     PromptState, SparshCompleter, SparshHighlighter, SparshValidator, SystemSampler, Theme,
 };
 
+const PRIVATE_EDITOR_BLOCKED: &str = "sparsh:private-editor-blocked";
+
 struct PasteTrackingEmacs {
     inner: Emacs,
     multiline_paste_seen: Arc<AtomicBool>,
+    history: SharedHistory,
 }
 
 impl PasteTrackingEmacs {
-    fn new(keybindings: Keybindings, multiline_paste_seen: Arc<AtomicBool>) -> Self {
+    fn new(
+        keybindings: Keybindings,
+        multiline_paste_seen: Arc<AtomicBool>,
+        history: SharedHistory,
+    ) -> Self {
         Self {
             inner: Emacs::new(keybindings),
             multiline_paste_seen,
+            history,
         }
     }
 }
@@ -42,6 +50,11 @@ impl PasteTrackingEmacs {
 impl EditMode for PasteTrackingEmacs {
     fn parse_event(&mut self, raw: ReedlineRawEvent) -> ReedlineEvent {
         let event = self.inner.parse_event(raw);
+        if matches!(event, ReedlineEvent::OpenEditor)
+            && sparsh_core::HistoryAccess::stealth_mode(&self.history).unwrap_or(true)
+        {
+            return ReedlineEvent::ExecuteHostCommand(PRIVATE_EDITOR_BLOCKED.into());
+        }
         if event_contains_multiline_paste_insert(&event) {
             self.multiline_paste_seen.store(true, Ordering::Release);
         }
@@ -189,6 +202,63 @@ fn completion_menu() -> ColumnarMenu {
         .with_selected_match_text_style(styles.selected_match_style)
 }
 
+fn secure_editor_buffer(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("editor buffer path is not a regular file"));
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+    }
+    Ok(())
+}
+
+fn secure_history_file(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("history path is not a regular file"));
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("history path is not a regular file"));
+        }
+    }
+    Ok(())
+}
+
 fn build_editor(
     session: &mut ShellSession,
     color: ColorPolicy,
@@ -197,19 +267,21 @@ fn build_editor(
     completion_snapshot: Arc<RwLock<CompletionSnapshot>>,
     editor_mode: Arc<RwLock<EditorMode>>,
     multiline_paste_seen: Arc<AtomicBool>,
+    buffer_file: &std::path::Path,
 ) -> io::Result<Reedline> {
     let history_settings = session.history_settings();
     let was_stealth = session.stealth_mode();
     if let Some(parent) = history_settings.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    secure_history_file(&history_settings.path)?;
     let history =
         FileBackedHistory::with_file(history_settings.max_entries, history_settings.path.clone())
             .map_err(|error| io::Error::other(error.to_string()))?;
-    let history = SharedHistory::new(SparshHistory::new(
-        history,
-        history_settings.ignore_consecutive_duplicates,
-    ));
+    let history = SharedHistory::new(
+        SparshHistory::new(history, history_settings.ignore_consecutive_duplicates)
+            .with_file_path(history_settings.path.clone(), history_settings.max_entries),
+    );
     sparsh_core::HistoryAccess::set_stealth_mode(&history, was_stealth)
         .map_err(io::Error::other)?;
     session.set_history_access(Arc::new(history.clone()));
@@ -218,10 +290,9 @@ fn build_editor(
     let completer = SparshCompleter::new(completion_snapshot);
     let mut buffer_editor = Command::new(std::env::current_exe()?);
     buffer_editor.arg("--edit-buffer");
-    let buffer_file =
-        std::env::temp_dir().join(format!("sparsh-buffer-{}.spar", std::process::id()));
+    secure_editor_buffer(buffer_file)?;
     Ok(Reedline::create()
-        .with_history(Box::new(history))
+        .with_history(Box::new(history.clone()))
         .with_history_exclusion_prefix(Some(" ".into()))
         .with_completer(Box::new(completer))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu())))
@@ -236,8 +307,9 @@ fn build_editor(
         .with_edit_mode(Box::new(PasteTrackingEmacs::new(
             sparsh_emacs_keybindings(session.keybindings()),
             multiline_paste_seen,
+            history,
         )))
-        .with_buffer_editor(buffer_editor, buffer_file)
+        .with_buffer_editor(buffer_editor, buffer_file.to_path_buf())
         .use_bracketed_paste(true)
         .with_validator(Box::new(SparshValidator::new(editor_mode)))
         .with_ansi_colors(color == ColorPolicy::Auto)
@@ -308,6 +380,8 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
     let completion_snapshot = Arc::new(RwLock::new(session.completion_snapshot()));
     let editor_mode = Arc::new(RwLock::new(EditorMode::Normal));
     let multiline_paste_seen = Arc::new(AtomicBool::new(false));
+    let private_buffer_dir = tempfile::tempdir()?;
+    let buffer_file = private_buffer_dir.path().join("buffer.spar");
     let mut editor = build_editor(
         session,
         color,
@@ -316,6 +390,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
         Arc::clone(&completion_snapshot),
         Arc::clone(&editor_mode),
         Arc::clone(&multiline_paste_seen),
+        &buffer_file,
     )?;
     let mut active_config_generation = session.config_generation();
     let mut git = GitProbe::new();
@@ -345,6 +420,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 Arc::clone(&completion_snapshot),
                 Arc::clone(&editor_mode),
                 Arc::clone(&multiline_paste_seen),
+                &buffer_file,
             )?;
             active_config_generation = session.config_generation();
         }
@@ -390,6 +466,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                     .flatten(),
                 projects: detect_projects(current.cwd()),
                 python_environment: active_python_environment(&current),
+                stealth: session.stealth_mode(),
                 previous_status: session.last_status(),
                 previous_duration,
                 terminal_width: terminal_width(),
@@ -401,9 +478,9 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
             &theme,
         );
 
-        let signal = editor
-            .read_line(&prompt)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let signal = editor.read_line(&prompt);
+        let _ = std::fs::remove_file(&buffer_file);
+        let signal = signal.map_err(|error| io::Error::other(error.to_string()))?;
         let saw_multiline_paste = multiline_paste_seen.swap(false, Ordering::AcqRel);
         match signal {
             Signal::Success(source) => {
@@ -499,6 +576,11 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 // Key bindings such as `alt+v` arrive here, not as a submission.
                 if command == VIEW_COMMAND {
                     open_pager(last_view.as_ref(), session, &theme)?;
+                } else if command == PRIVATE_EDITOR_BLOCKED {
+                    writeln!(
+                        io::stderr().lock(),
+                        "Alt+E is unavailable while stealth is on"
+                    )?;
                 }
             }
             Signal::CtrlC | Signal::ExternalBreak(_) => {
@@ -526,12 +608,38 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::{
-        completion_menu_text_style, event_contains_multiline_paste_insert,
-        should_review_multiline_submission, sparsh_emacs_keybindings,
+        completion_menu_text_style, event_contains_multiline_paste_insert, secure_editor_buffer,
+        secure_history_file, should_review_multiline_submission, sparsh_emacs_keybindings,
+        PasteTrackingEmacs, PRIVATE_EDITOR_BLOCKED,
     };
+    use crate::history::{SharedHistory, SparshHistory};
+    use crossterm::event::{Event, KeyEvent};
     use nu_ansi_term::{Color, Style};
-    use reedline::{EditCommand, KeyCode, KeyModifiers, ReedlineEvent};
+    use reedline::{EditCommand, EditMode, KeyCode, KeyModifiers, ReedlineEvent, ReedlineRawEvent};
     use sparsh_core::{EditorMode, KeyChord, KeybindingAction, KeybindingConfig};
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    #[cfg(unix)]
+    #[test]
+    fn history_file_is_private_and_symlinks_are_rejected() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        secure_history_file(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        secure_history_file(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = temp.path().join("history-link");
+        symlink(&path, &link).unwrap();
+        assert!(secure_history_file(&link).is_err());
+    }
 
     #[test]
     fn alt_e_opens_the_sparsh_owned_buffer_editor() {
@@ -540,6 +648,48 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('e')),
             Some(ReedlineEvent::OpenEditor)
+        );
+    }
+
+    #[test]
+    fn stealth_blocks_disk_backed_editor_without_changing_normal_binding() {
+        let history = SharedHistory::new(SparshHistory::new(
+            reedline::FileBackedHistory::new(10).unwrap(),
+            false,
+        ));
+        let mut editor = PasteTrackingEmacs::new(
+            sparsh_emacs_keybindings(&[]),
+            Arc::new(AtomicBool::new(false)),
+            history.clone(),
+        );
+        let key = || {
+            ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+                KeyCode::Char('e'),
+                KeyModifiers::ALT,
+            )))
+            .unwrap()
+        };
+        assert!(matches!(
+            editor.parse_event(key()),
+            ReedlineEvent::OpenEditor
+        ));
+        sparsh_core::HistoryAccess::set_stealth_mode(&history, true).unwrap();
+        assert!(matches!(editor.parse_event(key()),
+            ReedlineEvent::ExecuteHostCommand(command) if command == PRIVATE_EDITOR_BLOCKED));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_buffer_is_private_and_truncated_before_use() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("buffer");
+        std::fs::write(&path, b"old-secret").unwrap();
+        secure_editor_buffer(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 

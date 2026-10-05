@@ -1405,6 +1405,7 @@ name = "sparsh-ui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "fd-lock",
  "indexmap",
  "libc",
  "nu-ansi-term",

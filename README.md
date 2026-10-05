@@ -463,10 +463,19 @@ or:
 $HOME/.local/state/sparsh/history
 ```
 
-Use `stealth on` to stop saving submitted lines to Sparsh history. `stealth status`
-shows the current setting, and `stealth off` resumes recording. The mode
-switch commands are skipped too. Stealth affects Sparsh history only; external
-programs and editors may still write their own files.
+Use `stealth on` to stop saving submitted lines to Sparsh history. The prompt
+shows `🔒 stealth` while it is active. `stealth status` checks the mode and
+`stealth off` resumes recording. Private commands are not written to a second
+history file. Alt+E is unavailable while stealth is on because its editor
+uses a temporary file. External programs and editors may still write their own files.
+
+Use `history --search TEXT` to find line numbers, `history --delete LINE` to
+remove one entry, `history --delete-matching TEXT` to remove every entry
+containing a string, `history --delete-exact COMMAND` for exact matches, or
+`history --clear` to clear all entries (`history -c` still works). History
+management commands are not saved. The normal history file is owner-readable
+only on Unix. Search results appear in terminal scrollback; deleting a file
+entry cannot erase copies in backups, snapshots, or another running shell.
 
 Completion combines builtins, aliases, cached PATH executables, filesystem
 paths, and identifiers from the persistent Spar session. Filesystem completion

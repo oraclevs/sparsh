@@ -942,7 +942,9 @@ impl ShellSession {
     }
 
     pub fn stealth_mode(&self) -> bool {
-        self.services.history.as_ref()
+        self.services
+            .history
+            .as_ref()
             .and_then(|history| history.stealth_mode().ok())
             .unwrap_or(false)
     }
@@ -1233,15 +1235,39 @@ mod tests {
             Ok(())
         }
 
-        fn list(&self, limit: Option<usize>) -> Result<Vec<String>, String> {
-            let entries = self
-                .entries
-                .lock()
-                .map_err(|_| "history lock poisoned".to_string())?;
+        fn list(&self, limit: Option<usize>) -> Result<Vec<(usize, String)>, String> {
+            let entries = self.entries.lock().map_err(|_| "history lock poisoned")?;
             let start = limit
                 .map(|limit| entries.len().saturating_sub(limit))
                 .unwrap_or(0);
-            Ok(entries[start..].to_vec())
+            Ok(entries
+                .iter()
+                .enumerate()
+                .skip(start)
+                .map(|(index, entry)| (index + 1, entry.clone()))
+                .collect())
+        }
+
+        fn delete_line(&self, line: usize) -> Result<usize, String> {
+            let mut entries = self.entries.lock().map_err(|_| "history lock poisoned")?;
+            if line == 0 || line > entries.len() {
+                return Ok(0);
+            }
+            entries.remove(line - 1);
+            Ok(1)
+        }
+
+        fn delete_matching(&self, text: &str, exact: bool) -> Result<usize, String> {
+            let mut entries = self.entries.lock().map_err(|_| "history lock poisoned")?;
+            let before = entries.len();
+            entries.retain(|entry| {
+                if exact {
+                    entry != text
+                } else {
+                    !entry.contains(text)
+                }
+            });
+            Ok(before - entries.len())
         }
 
         fn clear(&self) -> Result<(), String> {
@@ -1545,7 +1571,10 @@ mod tests {
         assert!(session.editor_diagnostics("base + 1").is_empty());
         let errors = session.editor_diagnostics("var result: int = missing; ");
         assert!(!errors.is_empty());
-        assert!(matches!(session.submit("base").unwrap(), ShellResult::Value(spar::ConfigValue::Int(4))));
+        assert!(matches!(
+            session.submit("base").unwrap(),
+            ShellResult::Value(spar::ConfigValue::Int(4))
+        ));
         assert!(session.editor_diagnostics("echo hello").is_empty());
     }
 
@@ -2163,7 +2192,18 @@ mod tests {
         assert!(output.contains("echo three"), "{output}");
         assert!(!output.contains("echo one"), "{output}");
 
-        session.submit("history -c").unwrap();
+        let found = builtin_stdout(session.submit("history --search two").unwrap());
+        assert!(found.contains("2  echo two"), "{found}");
+        session.submit("history --delete 2").unwrap();
+        assert_eq!(
+            history.entries.lock().unwrap().as_slice(),
+            ["echo one", "echo three"]
+        );
+        session
+            .submit("history --delete-exact 'echo three'")
+            .unwrap();
+        assert_eq!(history.entries.lock().unwrap().as_slice(), ["echo one"]);
+        session.submit("history --clear").unwrap();
         assert!(history.entries.lock().unwrap().is_empty());
     }
 
@@ -2173,10 +2213,19 @@ mod tests {
         let mut session = ShellSession::new();
         session.set_history_access(history);
 
-        assert_eq!(builtin_stdout(session.submit("stealth status").unwrap()), "stealth mode: off\n");
-        assert_eq!(builtin_stdout(session.submit("stealth on").unwrap()), "stealth mode: on\n");
+        assert_eq!(
+            builtin_stdout(session.submit("stealth status").unwrap()),
+            "stealth mode: off\n"
+        );
+        assert_eq!(
+            builtin_stdout(session.submit("stealth on").unwrap()),
+            "stealth mode: on\n"
+        );
         assert!(session.stealth_mode());
-        assert_eq!(builtin_stdout(session.submit("stealth off").unwrap()), "stealth mode: off\n");
+        assert_eq!(
+            builtin_stdout(session.submit("stealth off").unwrap()),
+            "stealth mode: off\n"
+        );
         assert!(!session.stealth_mode());
     }
 
@@ -2821,7 +2870,8 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
     #[test]
     fn scripts_still_need_an_explicit_data_import() {
         let mut session = ShellSession::try_new().unwrap();
-        let result = session.submit("printf 'a\\n1\\n' | from csv |> where(predicate: fn(value) => value.a > 0)");
+        let result = session
+            .submit("printf 'a\\n1\\n' | from csv |> where(predicate: fn(value) => value.a > 0)");
         assert!(result.is_err(), "{result:?}");
     }
 
@@ -2865,7 +2915,10 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             ))
             .unwrap();
         let status = session.submit("res.status").unwrap();
-        assert!(matches!(status, ShellResult::Value(spar::ConfigValue::Int(200))), "{status:?}");
+        assert!(
+            matches!(status, ShellResult::Value(spar::ConfigValue::Int(200))),
+            "{status:?}"
+        );
         assert!(matches!(
             session.submit("res.body").unwrap(),
             ShellResult::Value(spar::ConfigValue::Str(body)) if body == "hello ${world}"
@@ -2952,13 +3005,22 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             r#"{"stats":[{"stat":"hp","base":48},{"stat":"speed","base":12}]}"#,
         );
         let mut session = ShellSession::try_new_interactive().unwrap();
-        session.submit("import pkg { get } from \"std/http\";").unwrap();
-        session.submit("struct Stat { stat: str; base: int; };").unwrap();
-        session.submit("struct Payload { stats: List<Stat>; };").unwrap();
+        session
+            .submit("import pkg { get } from \"std/http\";")
+            .unwrap();
+        session
+            .submit("struct Stat { stat: str; base: int; };")
+            .unwrap();
+        session
+            .submit("struct Payload { stats: List<Stat>; };")
+            .unwrap();
         let result = session.submit(&format!(
             "(await get(url: \"{url}\")).json<Payload>().stats |> where(predicate: fn(value) => value.base > 40) |> count()"
         )).unwrap();
-        assert!(matches!(result, ShellResult::Value(spar::ConfigValue::Int(1))), "{result:?}");
+        assert!(
+            matches!(result, ShellResult::Value(spar::ConfigValue::Int(1))),
+            "{result:?}"
+        );
     }
 
     const STATS: &str = r#"{"name":"ditto","stats":[{"stat":"hp","base":48},{"stat":"attack","base":48},{"stat":"speed","base":48},{"stat":"special","base":10}],"meta":{"id":1}}"#;
