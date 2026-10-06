@@ -1344,6 +1344,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "crossterm",
  "getrandom 0.2.17",
  "indexmap",
  "libloading",
