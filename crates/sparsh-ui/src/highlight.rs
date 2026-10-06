@@ -33,6 +33,236 @@ enum MixedHighlightState {
 }
 
 pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
+    if looks_like_spar(line) {
+        if let Some(spans) = spar_scan(line, snapshot) {
+            return spans;
+        }
+    }
+    shell_scan(line, snapshot)
+}
+
+/// Spar source typed at the prompt: a declaration or control-flow keyword, a
+/// call like `name(`, an assignment, or a comment. Shell command lines and
+/// mixed `|>` pipelines stay on the shell scanner.
+fn looks_like_spar(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return true;
+    }
+    let first: String = trimmed
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    if first.is_empty() {
+        return false;
+    }
+    if is_spar_keyword(&first) {
+        return true;
+    }
+    let rest = &trimmed[first.len()..];
+    if rest.starts_with('(') {
+        return true;
+    }
+    let rest = rest.trim_start();
+    rest.starts_with('=') && !rest.starts_with("==")
+}
+
+/// Highlights a line from the real Spar token stream. `None` means the lexer
+/// could not read the line (a half-typed string, say) and the caller should
+/// fall back to the word scanner.
+fn spar_scan(line: &str, snapshot: &ShellUiSnapshot) -> Option<Vec<HighlightSpan>> {
+    use spar::token::Token;
+
+    let (tokens, comments) = spar::Lexer::new(line).tokenize_with_comments().ok()?;
+    let mut spans: Vec<HighlightSpan> = Vec::new();
+    let mut paren_depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        let (start, end) = (token.span.start, token.span.end);
+        if end <= start || end > line.len() || !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+            continue;
+        }
+        let text = &line[start..end];
+        let next = tokens.get(index + 1).map(|next| &next.token);
+        let role = match &token.token {
+            Token::IntLit(_) | Token::FloatLit(_) => SemanticRole::DataNumber,
+            Token::True | Token::False => SemanticRole::DataBool,
+            // The lexer's spans for string pieces are not reliable; strings
+            // are painted from their regions below.
+            Token::StringStart
+            | Token::StringFragment(_)
+            | Token::StringEnd
+            | Token::InterpolStart
+            | Token::InterpolEnd
+            | Token::CommandSubStart
+            | Token::CommandSubEnd => continue,
+            Token::TypeStr
+            | Token::TypeInt
+            | Token::TypeFloat
+            | Token::TypeBool
+            | Token::TypeVoid
+            | Token::TypeShell => SemanticRole::TypeName,
+            Token::Ident(name) => {
+                let called = matches!(next, Some(Token::LParen));
+                let named = paren_depth > 0 && matches!(next, Some(Token::Colon));
+                if matches!(name.as_str(), "null" | "None") {
+                    SemanticRole::DataNull
+                } else if called && snapshot.has_function(name) {
+                    SemanticRole::Function
+                } else if named {
+                    SemanticRole::Parameter
+                } else if name.chars().next().is_some_and(char::is_uppercase) {
+                    SemanticRole::TypeName
+                } else {
+                    SemanticRole::Argument
+                }
+            }
+            _ if text.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') => {
+                if matches!(
+                    spar::token::keyword_or_ident(text.to_string()),
+                    Token::Ident(_)
+                ) {
+                    SemanticRole::Argument
+                } else {
+                    SemanticRole::SparSyntax
+                }
+            }
+            _ => SemanticRole::Operator,
+        };
+        match text {
+            "(" => paren_depth += 1,
+            ")" => paren_depth = paren_depth.saturating_sub(1),
+            _ => {}
+        }
+        spans.push(HighlightSpan {
+            range: start..end,
+            role,
+        });
+    }
+    for comment in comments {
+        let end = comment.start + comment.text.len();
+        if end <= line.len() && line.is_char_boundary(comment.start) && line.is_char_boundary(end)
+        {
+            spans.push(HighlightSpan {
+                range: comment.start..end,
+                role: SemanticRole::Comment,
+            });
+        }
+    }
+    // Strings: paint the quotes and text, keep only the expressions inside
+    // `${...}` from the lexer.
+    let regions = string_regions(line);
+    spans.retain(|span| {
+        regions.iter().all(|region| {
+            let inside = span.range.start >= region.range.start && span.range.end <= region.range.end;
+            !inside
+                || region
+                    .inner
+                    .iter()
+                    .any(|inner| span.range.start >= inner.start && span.range.end <= inner.end)
+        })
+    });
+    for region in regions {
+        spans.extend(region.pieces);
+    }
+    spans.sort_by_key(|span| span.range.start);
+    // A lexer token must never overlap the next: keep the first of any pair.
+    let mut last_end = 0;
+    spans.retain(|span| {
+        let keep = span.range.start >= last_end;
+        if keep {
+            last_end = span.range.end;
+        }
+        keep
+    });
+    Some(spans)
+}
+
+struct StringRegion {
+    range: Range<usize>,
+    /// Byte ranges of the expressions inside `${...}`.
+    inner: Vec<Range<usize>>,
+    /// Quotes, text and the `${` / `}` delimiters, already in order.
+    pieces: Vec<HighlightSpan>,
+}
+
+/// The `"..."` literals of a Spar line, split around `${...}` interpolation.
+fn string_regions(line: &str) -> Vec<StringRegion> {
+    let bytes = line.as_bytes();
+    let mut regions = Vec::new();
+    let mut index = 0;
+    while index < line.len() {
+        if line[index..].starts_with("//") {
+            break;
+        }
+        if bytes[index] != b'"' {
+            index += line[index..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let end = quoted_end(line, index, '"');
+        let mut pieces = Vec::new();
+        let mut inner = Vec::new();
+        let mut text_start = index;
+        let mut cursor = index + 1;
+        while cursor < end {
+            if line[cursor..end].starts_with("${") {
+                if text_start < cursor {
+                    pieces.push(HighlightSpan {
+                        range: text_start..cursor,
+                        role: SemanticRole::QuotedString,
+                    });
+                }
+                pieces.push(HighlightSpan {
+                    range: cursor..cursor + 2,
+                    role: SemanticRole::Operator,
+                });
+                let inner_start = cursor + 2;
+                let mut depth = 1;
+                let mut close = inner_start;
+                while close < end {
+                    match bytes[close] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    close += 1;
+                }
+                inner.push(inner_start..close.min(end));
+                if close < end {
+                    pieces.push(HighlightSpan {
+                        range: close..close + 1,
+                        role: SemanticRole::Operator,
+                    });
+                    cursor = close + 1;
+                } else {
+                    cursor = end;
+                }
+                text_start = cursor;
+            } else {
+                cursor += line[cursor..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        if text_start < end {
+            pieces.push(HighlightSpan {
+                range: text_start..end,
+                role: SemanticRole::QuotedString,
+            });
+        }
+        regions.push(StringRegion {
+            range: index..end,
+            inner,
+            pieces,
+        });
+        index = end.max(index + 1);
+    }
+    regions
+}
+
+fn shell_scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut index = 0;
     let mut command_position = true;
@@ -191,6 +421,9 @@ pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
 }
 
 fn command_role(snapshot: &ShellUiSnapshot, word: &str) -> SemanticRole {
+    if crate::editor::HOST_COMMANDS.contains(&word) {
+        return SemanticRole::Builtin;
+    }
     match snapshot.classify_command(word) {
         CommandKind::Builtin => SemanticRole::Builtin,
         CommandKind::Alias => SemanticRole::Alias,
@@ -708,5 +941,118 @@ mod tests {
 
         assert_eq!(styled.buffer.len(), 1);
         assert_eq!(styled.buffer[0].1, "pwd");
+    }
+
+    fn word_role(
+        input: &str,
+        snapshot: &sparsh_core::ShellUiSnapshot,
+        word: &str,
+    ) -> Option<SemanticRole> {
+        scan(input, snapshot)
+            .into_iter()
+            .find(|span| &input[span.range.clone()] == word)
+            .map(|span| span.role)
+    }
+
+    #[test]
+    fn view_is_highlighted_as_a_builtin() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        assert_eq!(scan("view", &snapshot)[0].role, SemanticRole::Builtin);
+    }
+
+    #[test]
+    fn spar_lines_use_the_lexer_for_numbers_types_and_comments() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let input = "var count: int = 42; // note";
+        assert_eq!(word_role(input, &snapshot, "var"), Some(SemanticRole::SparSyntax));
+        assert_eq!(word_role(input, &snapshot, "int"), Some(SemanticRole::TypeName));
+        assert_eq!(word_role(input, &snapshot, "42"), Some(SemanticRole::DataNumber));
+        assert_eq!(word_role(input, &snapshot, "// note"), Some(SemanticRole::Comment));
+        assert_eq!(word_role(input, &snapshot, "count"), Some(SemanticRole::Argument));
+    }
+
+    #[test]
+    fn spar_types_booleans_and_null_get_their_roles() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let input = "var flags: List<bool> = [true, false, null];";
+        assert_eq!(word_role(input, &snapshot, "List"), Some(SemanticRole::TypeName));
+        assert_eq!(word_role(input, &snapshot, "bool"), Some(SemanticRole::TypeName));
+        assert_eq!(word_role(input, &snapshot, "true"), Some(SemanticRole::DataBool));
+        assert_eq!(word_role(input, &snapshot, "false"), Some(SemanticRole::DataBool));
+        assert_eq!(word_role(input, &snapshot, "null"), Some(SemanticRole::DataNull));
+    }
+
+    #[test]
+    fn string_interpolation_highlights_the_expression_inside() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let input = "var s: str = \"n=${1 + 2}!\";";
+        assert_eq!(word_role(input, &snapshot, "1"), Some(SemanticRole::DataNumber));
+        assert_eq!(word_role(input, &snapshot, "2"), Some(SemanticRole::DataNumber));
+        let fragment = input.find("n=").unwrap();
+        let spans = scan(input, &snapshot);
+        assert!(
+            spans.iter().any(|span| span.range.start <= fragment
+                && span.range.end > fragment
+                && span.role == SemanticRole::QuotedString),
+            "{:?}",
+            roles(&spans)
+        );
+    }
+
+    #[test]
+    fn known_function_calls_and_named_parameters_are_highlighted() {
+        let mut session = ShellSession::new();
+        session
+            .submit("fn add(a: int, b: int) -> int {\n    return a + b;\n};")
+            .unwrap();
+        let snapshot = session.ui_snapshot();
+        let input = "add(a: 1, b: 2)";
+        assert_eq!(word_role(input, &snapshot, "add"), Some(SemanticRole::Function));
+        assert_eq!(word_role(input, &snapshot, "a"), Some(SemanticRole::Parameter));
+        assert_eq!(word_role(input, &snapshot, "1"), Some(SemanticRole::DataNumber));
+    }
+
+    #[test]
+    fn half_typed_spar_falls_back_without_losing_highlighting() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let input = "var s: str = \"abc";
+        let spans = scan(input, &snapshot);
+        assert!(!spans.is_empty());
+        assert_eq!(word_role(input, &snapshot, "var"), Some(SemanticRole::SparSyntax));
+    }
+
+    #[test]
+    fn spar_highlighting_never_panics_or_overlaps_on_awkward_input() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let inputs = [
+            "var s: str = \"é ${ \"",
+            "var s: str = \"${1 + ${2}}\" // end",
+            "var s: str = \"unterminated ${",
+            "fn f(a: int) -> int { return a; }; // ünï",
+            "if x { var y: int = 1 } else {",
+            "var 🙂: int = 1;",
+            "// only a comment",
+            "var s: str = \"\\\"quoted\\\"\";",
+            "const N: int = 4 % 3; while N < 9 { loop { break; } }",
+            "var t: (int, str) = (1, \"a\"); t",
+            "f(a: \"${g(b: 1)}\")",
+        ];
+        for input in inputs {
+            let spans = scan(input, &snapshot);
+            let mut last_end = 0;
+            for span in &spans {
+                assert!(
+                    span.range.start >= last_end && span.range.end <= input.len(),
+                    "{input:?}: {:?}",
+                    roles(&spans)
+                );
+                assert!(input.is_char_boundary(span.range.start), "{input:?}");
+                assert!(input.is_char_boundary(span.range.end), "{input:?}");
+                last_end = span.range.end;
+            }
+            // Painting must reproduce every input byte.
+            let painted = paint_range(input, 0..input.len(), &snapshot, &Theme::plain());
+            assert_eq!(painted, input, "{input:?}");
+        }
     }
 }

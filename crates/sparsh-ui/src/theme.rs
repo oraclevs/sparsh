@@ -33,6 +33,10 @@ pub enum SemanticRole {
     QuotedString,
     Operator,
     SparSyntax,
+    /// `// comments` in Spar source typed at the prompt.
+    Comment,
+    /// Type names in Spar source: `int`, `List`, declared structs and enums.
+    TypeName,
     VirtualEnvironment,
     ProjectPython,
     ProjectRust,
@@ -151,6 +155,8 @@ impl Theme {
             SemanticRole::QuotedString => Style::new().fg(Color::LightGreen),
             SemanticRole::Operator => Style::new().fg(Color::LightBlue).bold(),
             SemanticRole::SparSyntax => Style::new().fg(Color::LightPurple).bold(),
+            SemanticRole::Comment => Style::new().fg(Color::DarkGray).italic(),
+            SemanticRole::TypeName => Style::new().fg(Color::Yellow),
             SemanticRole::VirtualEnvironment => Style::new().fg(Color::LightMagenta).bold(),
             SemanticRole::ProjectPython => Style::new().fg(Color::LightBlue).bold(),
             SemanticRole::ProjectRust => Style::new().fg(Color::LightYellow).bold(),

@@ -88,6 +88,10 @@ fn should_review_multiline_submission(
 
 const VIEW_COMMAND: &str = "view";
 
+/// Commands the run loop handles itself instead of the shell session. They
+/// are valid commands, so the prompt must color them like builtins.
+pub(crate) const HOST_COMMANDS: &[&str] = &[VIEW_COMMAND];
+
 fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
     let mut keybindings = default_emacs_keybindings();
     keybindings.add_binding(
