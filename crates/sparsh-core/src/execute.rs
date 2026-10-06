@@ -78,8 +78,12 @@ pub(crate) fn execute_plan_with_captured(
         requested_exec: None,
         requested_source: None,
         last_result: None,
+        deferred_error: None,
     };
     let outcome = spar_process::run_plan(plan, &mut executor)?;
+    if let Some(error) = executor.deferred_error.take() {
+        return Err(ShellError::Builtin(error));
+    }
     if let Some(status) = executor.requested_exit {
         return Ok(ShellResult::Exit(status));
     }
@@ -129,6 +133,29 @@ struct SparshExecutor<'a> {
     requested_exec: Option<(Vec<String>, CommandPlan)>,
     requested_source: Option<crate::builtin::SourceRequest>,
     last_result: Option<ShellResult>,
+    /// A builtin failed but later steps of the chain (`||`, `;`) may still
+    /// run. Reported before the next command, or returned if none follows.
+    deferred_error: Option<crate::builtin::BuiltinError>,
+}
+
+impl SparshExecutor<'_> {
+    fn report_deferred_error(&mut self) {
+        if let Some(error) = self.deferred_error.take() {
+            self.flush_previous_builtin_output();
+            let _ = writeln!(io::stderr(), "error: {}", error.message);
+        }
+    }
+
+    /// A non-builtin command is about to run (or write to the terminal), so
+    /// anything an earlier builtin in the chain produced must reach the
+    /// terminal first to keep output in command order.
+    fn flush_previous_builtin_output(&mut self) {
+        if let Some(ShellResult::Builtin(previous)) = self.last_result.take() {
+            let _ = io::stdout().write_all(&previous.stdout);
+            let _ = io::stdout().flush();
+            let _ = io::stderr().write_all(&previous.stderr);
+        }
+    }
 }
 
 impl spar_process::StepExecutor for SparshExecutor<'_> {
@@ -138,6 +165,7 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
         &mut self,
         command: &CommandPlan,
     ) -> Result<spar_process::ExitStatus, Self::Error> {
+        self.report_deferred_error();
         let command_text = render_command_for_job(command);
         match prepare_command(
             command,
@@ -146,15 +174,24 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
             self.services,
         )? {
             PreparedCommand::Builtin { name, plan } => self.run_builtin(&name, &plan),
-            PreparedCommand::SparScript(plan) => self.run_spar_script(&plan),
-            PreparedCommand::External(plan) => self.run_external(&plan, command_text),
+            PreparedCommand::SparScript(plan) => {
+                self.flush_previous_builtin_output();
+                self.run_spar_script(&plan)
+            }
+            PreparedCommand::External(plan) => {
+                self.flush_previous_builtin_output();
+                self.run_external(&plan, command_text)
+            }
             PreparedCommand::CapturedOutput(_) | PreparedCommand::Decoder(_) => {
                 unreachable!("virtual pipeline stage cannot run alone")
             }
             PreparedCommand::Missing {
                 program,
                 suggestions,
-            } => self.run_missing(program, suggestions),
+            } => {
+                self.flush_previous_builtin_output();
+                self.run_missing(program, suggestions)
+            }
         }
     }
 
@@ -162,6 +199,8 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
         &mut self,
         pipeline: &PipelinePlan,
     ) -> Result<spar_process::ExitStatus, Self::Error> {
+        self.report_deferred_error();
+        self.flush_previous_builtin_output();
         let mut prepared = Vec::with_capacity(pipeline.commands.len());
         for command in &pipeline.commands {
             if command.program == crate::function_pipeline::CAPTURED_OUTPUT_PROGRAM {
@@ -670,11 +709,30 @@ impl SparshExecutor<'_> {
             resolution_mode: ResolutionMode::Normal,
             session_mode: self.mode,
         };
-        let output = self
-            .registry
-            .execute(name, &plan.args, &mut context)
-            .map_err(ShellError::Builtin)?;
-        let visible = streams.route(output).map_err(process_error)?;
+        let output = match self.registry.execute(name, &plan.args, &mut context) {
+            Ok(output) => output,
+            Err(error) => {
+                // Not fatal for the chain: `cd missing || echo recovered`.
+                self.last_status = error.status;
+                let status = spar_process::ExitStatus {
+                    success: false,
+                    code: Some(error.status),
+                };
+                self.deferred_error = Some(error);
+                return Ok(status);
+            }
+        };
+        let mut visible = streams.route(output).map_err(process_error)?;
+        // An earlier builtin in the same chain already ran; keep its output
+        // in front of this one instead of letting `last_result` drop it.
+        if let Some(ShellResult::Builtin(previous)) = self.last_result.take() {
+            let mut stdout = previous.stdout;
+            stdout.extend_from_slice(&visible.stdout);
+            let mut stderr = previous.stderr;
+            stderr.extend_from_slice(&visible.stderr);
+            visible.stdout = stdout;
+            visible.stderr = stderr;
+        }
         self.requested_exit = context.requested_exit;
         self.requested_editor_mode = context.requested_editor_mode;
         self.requested_reload_config = context.requested_reload_config;
@@ -850,6 +908,14 @@ fn run_spar_script_stage(
     streams.route(output).map_err(process_error)
 }
 
+/// `ls`/`ll` are builtins only for the arguments the native listing supports;
+/// anything else (`ls -S`, `ls *.rs` before expansion, ...) runs the real binary.
+fn native_listing_accepts(plan: &CommandPlan) -> bool {
+    !crate::listing::NATIVE_COMMANDS.contains(&plan.program.as_str())
+        || crate::listing::parse_words(&plan.program, plan.args.iter().map(String::as_str))
+            .is_some()
+}
+
 fn prepare_command(
     original: &CommandPlan,
     mode: ResolutionMode,
@@ -877,6 +943,10 @@ fn prepare_command(
 
     let home = services.environment.get("HOME").map(PathBuf::from);
     expand_tilde_in_plan(&mut plan, home.as_deref())?;
+    // Globs expand now, against the session directory as it is after any
+    // earlier `cd` in the same line, and for builtins as well as externals.
+    let glob_base = services.directories.current().to_path_buf();
+    plan.expand_globs(&glob_base);
 
     if mode != ResolutionMode::BuiltinOnly && matches!(plan.program.as_str(), "command" | "builtin")
     {
@@ -896,7 +966,10 @@ fn prepare_command(
         return prepare_command(&plan, next_mode, registry, services);
     }
 
-    if mode != ResolutionMode::ExternalOnly && registry.find(&plan.program).is_some() {
+    if mode != ResolutionMode::ExternalOnly
+        && registry.find(&plan.program).is_some()
+        && native_listing_accepts(&plan)
+    {
         return Ok(PreparedCommand::Builtin {
             name: plan.program.clone(),
             plan,

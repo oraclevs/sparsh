@@ -160,6 +160,7 @@ fn virtual_command(program: &str, args: Vec<String>) -> CommandPlan {
         stderr: None,
         redirections: Vec::new(),
         background: false,
+        glob_args: Vec::new(),
     }
 }
 

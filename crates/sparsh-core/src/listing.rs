@@ -36,15 +36,38 @@ pub struct ListRequest {
 /// returns `None` so the external command handles it.
 pub fn parse_request(input: &str) -> Option<ListRequest> {
     let mut words = input.split_whitespace();
+    let name = words.next()?;
+    if word_has_shell_syntax_any(input) {
+        return None;
+    }
+    parse_words(name, words)
+}
+
+fn word_has_shell_syntax(word: &str) -> bool {
+    word.chars().any(|c| "|&;<>()$`*?[]{}\"'\\~!#".contains(c))
+}
+
+fn word_has_shell_syntax_any(input: &str) -> bool {
+    input.split_whitespace().skip(1).any(word_has_shell_syntax)
+}
+
+/// Parses already-split words (the builtin path, where the shell has done
+/// quoting and expansion). `None` means the native listing can't honor the
+/// request, so the external `ls` should run.
+pub fn parse_words<'a>(
+    name: &str,
+    words: impl IntoIterator<Item = &'a str>,
+) -> Option<ListRequest> {
     let mut request = ListRequest::default();
-    match words.next()? {
+    match name {
         "ls" => {}
         "ll" => request.long = true,
         _ => return None,
     }
     let mut options_done = false;
     for word in words {
-        if word.chars().any(|c| "|&;<>()$`*?[]{}\"'\\~!#".contains(c)) {
+        // Unexpanded globs are left to the external binary.
+        if word.chars().any(|c| "*?[".contains(c)) {
             return None;
         }
         if !options_done && word == "--" {
@@ -52,6 +75,7 @@ pub fn parse_request(input: &str) -> Option<ListRequest> {
         } else if !options_done && word.starts_with("--") {
             match word {
                 "--all" | "--almost-all" => {}
+                "--color" | "--color=auto" | "--color=always" | "--color=never" => {}
                 "--long" => request.long = true,
                 "--sizes" => {
                     request.long = true;
@@ -90,6 +114,45 @@ pub fn encode_stage(stage: &str) -> Option<&str> {
     let mut words = stage.split_whitespace();
     let format = (words.next()? == "to").then(|| words.next()).flatten()?;
     words.next().is_none().then_some(format)
+}
+
+/// Plain-text listing for chains and pipes: names one per line, or a
+/// `ls -l` style line per entry when `long`. No color, so it is safe to feed
+/// to another command.
+pub fn list_plain(request: &ListRequest, cwd: &Path) -> Result<String, String> {
+    let Value::Table(table) = list(request, cwd)? else {
+        return Ok(String::new());
+    };
+    let text = |row: &spar::Shared<spar::Record>, key: &str| match row.get(key) {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Int(number)) => number.to_string(),
+        _ => String::new(),
+    };
+    let mut out = String::new();
+    for row in (*table).clone().into_rows() {
+        let Value::Object(fields) = row else { continue };
+        if request.long {
+            let size = text(&fields, "size");
+            out.push_str(&format!(
+                "{} {} {} {:>10} {} {}",
+                text(&fields, "mode"),
+                text(&fields, "user"),
+                text(&fields, "group"),
+                if size.is_empty() { "-".into() } else { size },
+                text(&fields, "modified"),
+                text(&fields, "name"),
+            ));
+            let target = text(&fields, "target");
+            if !target.is_empty() {
+                out.push_str(" -> ");
+                out.push_str(&target);
+            }
+        } else {
+            out.push_str(&text(&fields, "name"));
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// Lists the requested paths relative to `cwd`.
@@ -486,7 +549,8 @@ mod tests {
         assert_eq!(parse_request("ls -a").unwrap().long, false);
         assert_eq!(parse_request("ls | wc -l"), None);
         assert_eq!(parse_request("ls *.rs"), None);
-        assert_eq!(parse_request("ls --color=auto"), None);
+        assert_eq!(parse_request("ls --color=auto"), Some(ListRequest::default()));
+        assert_eq!(parse_request("ls --color=bogus"), None);
         assert_eq!(parse_request("ls -R"), None);
         assert_eq!(parse_request("lsblk"), None);
         assert_eq!(

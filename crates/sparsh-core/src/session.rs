@@ -1102,11 +1102,6 @@ impl ShellSession {
                 .builtins
                 .names()
                 .into_iter()
-                .chain(
-                    crate::listing::NATIVE_COMMANDS
-                        .iter()
-                        .map(|name| name.to_string()),
-                )
                 .collect(),
             aliases: self.services.aliases.names().map(str::to_string).collect(),
             functions: self.spar.function_names().map(str::to_string).collect(),
@@ -1713,6 +1708,149 @@ mod tests {
             second,
             ShellResult::Process(spar::ShellPlanOutcome { exit_code: 0, .. })
         ));
+    }
+
+    #[test]
+    fn chained_builtins_keep_every_output() {
+        for (input, expected) in [
+            ("echo a; echo b", "a\nb\n"),
+            ("echo a && echo b", "a\nb\n"),
+            ("echo a && echo b && echo c", "a\nb\nc\n"),
+            ("false || echo b", "b\n"),
+            ("echo a || echo b", "a\n"),
+            ("echo a; cd .; echo c", "a\nc\n"),
+        ] {
+            let mut session = ShellSession::new();
+            let output = builtin_stdout(session.submit(input).unwrap());
+            assert_eq!(output, expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn ls_in_a_chain_is_the_native_listing() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("zdir")).unwrap();
+        std::fs::write(directory.path().join("a.txt"), "x").unwrap();
+        let dir = directory.path().display();
+        for input in [
+            format!("cd {dir}; ls && echo done"),
+            format!("cd {dir}; ls --color=auto; echo done"),
+            format!("cd {dir}; ls -la && echo done"),
+        ] {
+            let mut session = ShellSession::new();
+            let output = builtin_stdout(session.submit(&input).unwrap());
+            assert!(output.contains("a.txt"), "input: {input}\n{output}");
+            assert!(output.contains("zdir"), "input: {input}\n{output}");
+            assert!(output.ends_with("done\n"), "input: {input}\n{output}");
+            // directories sort first, like the native listing
+            assert!(
+                output.find("zdir") < output.find("a.txt"),
+                "input: {input}\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn ls_with_unsupported_flags_still_reaches_the_binary() {
+        let mut session = ShellSession::new();
+        let result = session.submit("ls --definitely-not-a-flag").unwrap();
+        assert!(!matches!(result, ShellResult::Builtin(_)));
+    }
+
+    #[test]
+    fn failed_builtin_does_not_abort_the_chain() {
+        let missing = "/definitely/not/a/dir/zzz";
+        for (input, expected) in [
+            (format!("cd {missing} || echo recovered"), "recovered\n"),
+            (format!("cd {missing}; echo after"), "after\n"),
+            (format!("cd {missing} && echo no; echo after"), "after\n"),
+        ] {
+            let mut session = ShellSession::new();
+            let output = builtin_stdout(session.submit(&input).unwrap());
+            assert_eq!(output, expected, "input: {input}");
+        }
+        // A builtin error in last position is still reported as an error.
+        let mut session = ShellSession::new();
+        assert!(session.submit(&format!("cd {missing}")).is_err());
+        assert!(session.submit(&format!("echo a; cd {missing}")).is_err());
+    }
+
+    #[test]
+    fn unquoted_globs_expand_against_the_session_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        for file in ["a.txt", "b.txt", "c.md", ".hidden.txt"] {
+            std::fs::write(directory.path().join(file), "").unwrap();
+        }
+        let dir = directory.path().display();
+        for (input, expected) in [
+            (format!("cd {dir}; echo *.txt"), "a.txt b.txt\n"),
+            (format!("cd {dir}; echo ?.md"), "c.md\n"),
+            (format!("cd {dir}; echo [ab].txt"), "a.txt b.txt\n"),
+            (format!("cd {dir}; echo .*.txt"), ".hidden.txt\n"),
+            // quoted, escaped and unmatched patterns stay literal
+            (format!("cd {dir}; echo \"*.txt\""), "*.txt\n"),
+            (format!("cd {dir}; echo '*.txt'"), "*.txt\n"),
+            (format!("cd {dir}; echo \\*.txt"), "*.txt\n"),
+            (format!("cd {dir}; echo *.zzz"), "*.zzz\n"),
+            // expansion happens for each command in a chain
+            (format!("cd {dir}; echo *.md && echo *.txt"), "c.md\na.txt b.txt\n"),
+        ] {
+            let mut session = ShellSession::new();
+            let output = builtin_stdout(session.submit(&input).unwrap());
+            assert_eq!(output, expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn errors_in_imported_functions_name_the_imported_file_and_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let lib = directory.path().join("lib.spar");
+        std::fs::write(&lib, "fn boom(x: int) -> int {\n    return 10 / x;\n};\n").unwrap();
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("import {{ boom }} from \"{}\";", lib.display()))
+            .unwrap();
+        let error = session.submit("boom(x: 0)").unwrap_err();
+        let errors = match error {
+            super::ShellError::Spar(errors) => errors,
+            super::ShellError::SparSource { errors, .. } => errors,
+            other => panic!("expected a Spar error, got {other:?}"),
+        };
+        let text = spar::ErrorRenderer::new("boom(x: 0)", "<sparsh>").render_all(&errors);
+        assert!(text.contains("lib.spar:2:"), "{text}");
+        assert!(text.contains("return 10 / x;"), "{text}");
+        assert!(text.contains("trace (most recent call first):"), "{text}");
+        assert!(text.contains("in boom"), "{text}");
+        assert!(text.contains("called from top level"), "{text}");
+        assert!(text.contains("<sparsh>:1:"), "{text}");
+    }
+
+    #[test]
+    fn missing_program_in_an_imported_function_names_the_program_and_its_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let lib = directory.path().join("lib.spar");
+        std::fs::write(
+            &lib,
+            "fn badcmd() -> ShellResult<str, str> {\n    nonexistent_cmd_zzz --flag;\n    return ok(value: \"x\");\n};\n",
+        )
+        .unwrap();
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("import {{ badcmd }} from \"{}\";", lib.display()))
+            .unwrap();
+        let error = session.submit("badcmd()").unwrap_err();
+        let errors = match error {
+            super::ShellError::Spar(errors) => errors,
+            super::ShellError::SparSource { errors, .. } => errors,
+            other => panic!("expected a Spar error, got {other:?}"),
+        };
+        let text = spar::ErrorRenderer::new("badcmd()", "<sparsh>").render_all(&errors);
+        assert!(
+            text.contains("could not run 'nonexistent_cmd_zzz': not found"),
+            "{text}"
+        );
+        assert!(text.contains("lib.spar:2:"), "{text}");
+        assert!(text.contains("nonexistent_cmd_zzz --flag;"), "{text}");
     }
 
     #[test]
@@ -3043,6 +3181,53 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             panic!("expected previous Table value");
         };
         assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn json_array_pipes_as_rows_into_data_stages() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("import pkg { where, select, take } from \"std/data\";")
+            .unwrap();
+        let json = "printf '[{\"name\":\"a\",\"age\":3},{\"name\":\"b\",\"age\":40}]'";
+        for (stages, rows) in [
+            ("where(predicate: |value| value.age > 5)", 1),
+            ("select(fields: [\"name\"])", 2),
+            ("take(count: 1)", 1),
+        ] {
+            let result = session.submit(&format!("{json} | from json |> {stages}"));
+            let ShellResult::Structured(value) = result.unwrap_or_else(|error| {
+                panic!("{stages}: {error:?}");
+            }) else {
+                panic!("{stages}: expected structured result");
+            };
+            let count = match &value.value {
+                spar::Value::Table(table) => table.len(),
+                spar::Value::List(items) => items.len(),
+                _ => 1,
+            };
+            assert_eq!(count, rows, "{stages}");
+        }
+        // A one-element array stays a one-row list, not a bare object.
+        let one = session.submit("printf '[{\"a\":1}]' | from json").unwrap();
+        let ShellResult::Structured(one) = one else {
+            panic!("expected structured result");
+        };
+        assert!(
+            matches!(one.value, spar::Value::Table(_) | spar::Value::List(_)),
+            "{:?}",
+            one.value
+        );
+        // A plain object is still one value.
+        let object = session.submit("printf '{\"a\":1}' | from json").unwrap();
+        let ShellResult::Structured(object) = object else {
+            panic!("expected structured result");
+        };
+        assert!(
+            matches!(object.value, spar::Value::Object(_)),
+            "{:?}",
+            object.value
+        );
     }
 
     #[test]

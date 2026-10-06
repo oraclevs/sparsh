@@ -213,6 +213,7 @@ mod tests {
                     stderr: Some(Redirection::DuplicateFd(1)),
                     redirections: vec![],
                     background: false,
+                    glob_args: Vec::new(),
                 }),
             )],
         });

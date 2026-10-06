@@ -308,6 +308,24 @@ impl BuiltinRegistry {
                     io::echo
                 ),
                 builtin!(
+                    "ls",
+                    "List directory contents (plain text in chains and pipes)",
+                    "ls [-a] [-l] [--sizes] [path ...]",
+                    "io",
+                    false,
+                    true,
+                    io::ls
+                ),
+                builtin!(
+                    "ll",
+                    "Long directory listing (plain text in chains and pipes)",
+                    "ll [-a] [--sizes] [path ...]",
+                    "io",
+                    false,
+                    true,
+                    io::ll
+                ),
+                builtin!(
                     "printf",
                     "Format and write arguments",
                     "printf format [argument ...]",
@@ -987,6 +1005,8 @@ mod tests {
             "history",
             "stealth",
             "echo",
+            "ls",
+            "ll",
             "printf",
             "read",
             "umask",

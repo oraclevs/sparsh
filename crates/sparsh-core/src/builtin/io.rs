@@ -149,3 +149,33 @@ fn unescape_backslashes(value: &str) -> String {
     }
     out
 }
+
+/// `ls` / `ll` inside chains and pipes. The interactive fast path returns a
+/// structured table; here the output is plain text for the next stage.
+/// `prepare_command` only routes here when `listing::parse_words` accepts the
+/// arguments, so anything else still reaches the external binary.
+pub(super) fn ls(
+    args: &[String],
+    context: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
+    list_native("ls", args, context)
+}
+
+pub(super) fn ll(
+    args: &[String],
+    context: &mut BuiltinContext<'_>,
+    _: &BuiltinRegistry,
+) -> BuiltinResult {
+    list_native("ll", args, context)
+}
+
+fn list_native(name: &str, args: &[String], context: &mut BuiltinContext<'_>) -> BuiltinResult {
+    let request = crate::listing::parse_words(name, args.iter().map(String::as_str))
+        .ok_or_else(|| error(format!("{name}: unsupported arguments")))?;
+    let cwd = context.services.directories.current().to_path_buf();
+    match crate::listing::list_plain(&request, &cwd) {
+        Ok(text) => Ok(status_output(0, text.into_bytes())),
+        Err(message) => Err(error(message)),
+    }
+}
