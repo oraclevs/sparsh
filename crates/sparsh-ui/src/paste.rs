@@ -103,8 +103,14 @@ fn parse_decision(input: &str) -> PasteDecision {
     }
 }
 
-fn edit_paste(source: &str, snapshot: &ShellUiSnapshot, session: &sparsh_core::ShellSession) -> io::Result<PasteEditOutcome> {
-    Ok(classify_editor_result(edit_text(source, true, snapshot, session)?))
+fn edit_paste(
+    source: &str,
+    snapshot: &ShellUiSnapshot,
+    session: &sparsh_core::ShellSession,
+) -> io::Result<PasteEditOutcome> {
+    Ok(classify_editor_result(edit_text(
+        source, true, snapshot, session,
+    )?))
 }
 
 fn classify_editor_result(result: Option<EditorResult>) -> PasteEditOutcome {
@@ -202,6 +208,24 @@ mod tests {
                 "shell {\n    echo one;\n    echo two;\n}".to_string(),
                 "pwd".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn here_document_stays_grouped_inside_multiline_paste() {
+        let source = "cat <<'END'\nfirst line\nEND\necho done";
+        assert_eq!(
+            multiline_submissions(source),
+            vec!["cat <<'END'\nfirst line\nEND", "echo done"]
+        );
+    }
+
+    #[test]
+    fn backslash_continuation_stays_grouped_inside_multiline_paste() {
+        let source = "printf '%s' \\\nhello\necho done";
+        assert_eq!(
+            multiline_submissions(source),
+            vec!["printf '%s' \\\nhello", "echo done"]
         );
     }
 

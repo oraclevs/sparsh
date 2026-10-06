@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -12,6 +13,8 @@ use crate::services::ShellServices;
 use crate::session::{CommandDiagnostic, SessionMode, ShellError, ShellResult};
 
 enum PreparedCommand {
+    CapturedOutput(Vec<u8>),
+    Decoder(String),
     Builtin {
         name: String,
         plan: CommandPlan,
@@ -31,7 +34,40 @@ pub(crate) fn execute_plan(
     last_status: i32,
     mode: SessionMode,
 ) -> Result<ShellResult, ShellError> {
+    execute_plan_with_input(plan, registry, services, last_status, mode, None)
+}
+
+pub(crate) fn execute_plan_with_input(
+    plan: &ShellPlan,
+    registry: &BuiltinRegistry,
+    services: &mut ShellServices,
+    last_status: i32,
+    mode: SessionMode,
+    input: Option<Vec<u8>>,
+) -> Result<ShellResult, ShellError> {
+    execute_plan_with_captured(
+        plan,
+        registry,
+        services,
+        last_status,
+        mode,
+        input,
+        Vec::new(),
+    )
+}
+
+pub(crate) fn execute_plan_with_captured(
+    plan: &ShellPlan,
+    registry: &BuiltinRegistry,
+    services: &mut ShellServices,
+    last_status: i32,
+    mode: SessionMode,
+    input: Option<Vec<u8>>,
+    captured_outputs: Vec<Vec<u8>>,
+) -> Result<ShellResult, ShellError> {
     let mut executor = SparshExecutor {
+        captured_outputs: captured_outputs.into(),
+        pending_stdin: input,
         registry,
         services,
         last_status,
@@ -81,6 +117,8 @@ pub(crate) fn execute_plan(
 }
 
 struct SparshExecutor<'a> {
+    captured_outputs: VecDeque<Vec<u8>>,
+    pending_stdin: Option<Vec<u8>>,
     registry: &'a BuiltinRegistry,
     services: &'a mut ShellServices,
     last_status: i32,
@@ -110,6 +148,9 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
             PreparedCommand::Builtin { name, plan } => self.run_builtin(&name, &plan),
             PreparedCommand::SparScript(plan) => self.run_spar_script(&plan),
             PreparedCommand::External(plan) => self.run_external(&plan, command_text),
+            PreparedCommand::CapturedOutput(_) | PreparedCommand::Decoder(_) => {
+                unreachable!("virtual pipeline stage cannot run alone")
+            }
             PreparedCommand::Missing {
                 program,
                 suggestions,
@@ -123,6 +164,23 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
     ) -> Result<spar_process::ExitStatus, Self::Error> {
         let mut prepared = Vec::with_capacity(pipeline.commands.len());
         for command in &pipeline.commands {
+            if command.program == crate::function_pipeline::CAPTURED_OUTPUT_PROGRAM {
+                let bytes =
+                    self.captured_outputs
+                        .pop_front()
+                        .ok_or_else(|| ShellError::Process {
+                            message: "function pipeline output is unavailable".into(),
+                            status: 2,
+                        })?;
+                prepared.push(PreparedCommand::CapturedOutput(bytes));
+                continue;
+            }
+            if command.program == crate::function_pipeline::DECODER_PROGRAM {
+                prepared.push(PreparedCommand::Decoder(
+                    command.args.first().cloned().unwrap_or_default(),
+                ));
+                continue;
+            }
             prepared.push(prepare_command(
                 command,
                 ResolutionMode::Normal,
@@ -149,13 +207,27 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
                 .last()
                 .is_some_and(|command| command.background)
             {
+                if self.pending_stdin.is_some() {
+                    return Err(ShellError::Process {
+                        message: "background here-documents are not supported".into(),
+                        status: 2,
+                    });
+                }
                 return self.run_background_pipeline(&pipeline, command_text);
             }
-            if self.mode == SessionMode::InteractiveTty && spar_process::stdin_is_tty() {
+            if self.pending_stdin.is_none()
+                && self.mode == SessionMode::InteractiveTty
+                && spar_process::stdin_is_tty()
+            {
                 return self.run_foreground_pipeline(&pipeline, command_text);
             }
             let options = execution_options(self.services);
-            let output = spar_process::run_pipeline(&pipeline, &options).map_err(process_error)?;
+            let output = spar_process::run_pipeline_with_input(
+                &pipeline,
+                &options,
+                self.pending_stdin.take(),
+            )
+            .map_err(process_error)?;
             let outcome = shell_outcome_from_pipeline(&output);
             self.last_status = outcome.exit_code;
             self.last_result = Some(ShellResult::Process(outcome));
@@ -210,12 +282,64 @@ impl SparshExecutor<'_> {
         stages: Vec<PreparedCommand>,
     ) -> Result<spar_process::ExitStatus, ShellError> {
         let mut statuses = Vec::new();
-        let mut input = None;
+        let mut input = self.pending_stdin.take();
         let mut index = 0usize;
         let mut final_in_process = None;
 
         while index < stages.len() {
             match &stages[index] {
+                PreparedCommand::CapturedOutput(captured) => {
+                    let mut bytes = input.take().unwrap_or_default();
+                    bytes.extend_from_slice(captured);
+                    statuses.push(spar_process::ExitStatus {
+                        success: true,
+                        code: Some(0),
+                    });
+                    if index + 1 == stages.len() {
+                        final_in_process = Some(crate::builtin::BuiltinOutput {
+                            status: 0,
+                            stdout: bytes,
+                            stderr: Vec::new(),
+                        });
+                    } else {
+                        input = Some(bytes);
+                    }
+                    index += 1;
+                }
+                PreparedCommand::Decoder(format) => {
+                    if index + 1 != stages.len() {
+                        return Err(ShellError::Process {
+                            message: "from FORMAT must end a function pipeline".into(),
+                            status: 2,
+                        });
+                    }
+                    let bytes = input.take().unwrap_or_default();
+                    let values = spar::StructuredFormatRegistry::builtin()
+                        .decode_bytes(format, &bytes)
+                        .map_err(|error| ShellError::Process {
+                            message: format!("cannot decode {format}: {error}; use a supported format such as json, jsonl, csv, or lines"),
+                            status: 2,
+                        })?;
+                    let value = if values.len() == 1 {
+                        values.into_iter().next().unwrap()
+                    } else {
+                        spar::Value::List(spar::Shared::from(values))
+                    };
+                    statuses.push(spar_process::ExitStatus {
+                        success: true,
+                        code: Some(0),
+                    });
+                    let status = aggregate_pipeline_status(&statuses);
+                    self.last_status = status.code.unwrap_or(0);
+                    self.last_result =
+                        Some(ShellResult::Structured(spar::InteractiveRuntimeValue {
+                            value,
+                            stream_preview: false,
+                            truncated: false,
+                            presentation: spar::InteractivePresentation::Pipeline,
+                        }));
+                    return Ok(status);
+                }
                 PreparedCommand::Builtin { name, plan } => {
                     let mut output = run_isolated_builtin_stage(
                         self.registry,
@@ -345,7 +469,8 @@ impl SparshExecutor<'_> {
                 status: 2,
             });
         }
-        let mut output = run_spar_script_stage(self.services, plan, None, true)?;
+        let mut output =
+            run_spar_script_stage(self.services, plan, self.pending_stdin.take(), true)?;
         if !output.stdout.is_empty() {
             io::stdout()
                 .lock()
@@ -375,13 +500,33 @@ impl SparshExecutor<'_> {
         command_text: String,
     ) -> Result<spar_process::ExitStatus, ShellError> {
         if plan.background {
+            if self.pending_stdin.is_some() {
+                return Err(ShellError::Process {
+                    message: "background here-documents are not supported".into(),
+                    status: 2,
+                });
+            }
             return self.run_background_command(plan, command_text);
         }
-        if self.mode == SessionMode::InteractiveTty && spar_process::stdin_is_tty() {
+        if self.pending_stdin.is_none()
+            && self.mode == SessionMode::InteractiveTty
+            && spar_process::stdin_is_tty()
+        {
             return self.run_foreground_command(plan, command_text);
         }
         let options = execution_options(self.services);
-        let output = spar_process::run_command(plan, &options).map_err(process_error)?;
+        let output = if self.pending_stdin.is_some() {
+            spar_process::run_pipeline_with_input(
+                &PipelinePlan {
+                    commands: vec![plan.clone()],
+                },
+                &options,
+                self.pending_stdin.take(),
+            )
+        } else {
+            spar_process::run_command(plan, &options)
+        }
+        .map_err(process_error)?;
         let outcome = shell_outcome_from_command(&output);
         self.last_status = outcome.exit_code;
         self.last_result = Some(ShellResult::Process(outcome));
@@ -488,7 +633,14 @@ impl SparshExecutor<'_> {
         // A failed open therefore cannot leave cd/export/alias half-applied.
         let cwd = self.services.directories.current().to_path_buf();
         let mut streams = BuiltinStreams::prepare(plan, &cwd).map_err(redirection_error)?;
-        let (stdin, stdin_available) = read_builtin_stdin(plan, &cwd).map_err(redirection_error)?;
+        let (mut stdin, mut stdin_available) =
+            read_builtin_stdin(plan, &cwd).map_err(redirection_error)?;
+        if !stdin_available {
+            if let Some(bytes) = self.pending_stdin.take() {
+                stdin = bytes;
+                stdin_available = true;
+            }
+        }
         let login_shell = self.services.login_shell;
         let mut context = BuiltinContext {
             services: self.services,
@@ -547,6 +699,7 @@ pub(crate) fn replace_with_external_command(
             let error = spar_process::replace_process(&plan, &execution_options(services));
             Err(process_error(error))
         }
+        PreparedCommand::CapturedOutput(_) | PreparedCommand::Decoder(_) => unreachable!("virtual stage cannot replace a process"),
         PreparedCommand::SparScript(_) => Err(ShellError::Process {
             message: "exec: in-process .spar execution cannot replace Sparsh; use 'spar file.spar' for process replacement".into(),
             status: 2,

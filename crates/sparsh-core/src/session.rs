@@ -346,6 +346,23 @@ impl ShellSession {
 
     pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
         self.poll_jobs()?;
+        let prepared = if input.contains("<<")
+            || (matches!(classify(input, &self.spar), Dispatch::Command(_))
+                && input.contains("\\\n"))
+        {
+            Some(
+                crate::shell_input::prepare(input)
+                    .map_err(|message| ShellError::Process { message, status: 2 })?,
+            )
+        } else {
+            None
+        };
+        let input = prepared
+            .as_ref()
+            .map_or(input, |prepared| prepared.command.as_str());
+        let heredoc_input = prepared
+            .as_ref()
+            .and_then(|prepared| prepared.stdin.clone());
         let cwd = self.services.directories.current().to_path_buf();
         let environment = self.services.environment.snapshot();
         if input.trim() == "_" {
@@ -406,19 +423,21 @@ impl ShellSession {
             }
             return self.finish_submission(result);
         }
-        if let Some(plan) = crate::function_pipeline::compose_function_pipeline(
+        if let Some(composed) = crate::function_pipeline::compose_function_pipeline(
             input,
             &self.spar,
             &cwd,
             &environment,
             self.last_status,
         )? {
-            let result = execute_plan(
-                &plan,
+            let result = crate::execute::execute_plan_with_captured(
+                &composed.plan,
                 &self.builtins,
                 &mut self.services,
                 self.last_status,
                 self.mode,
+                None,
+                composed.captured_outputs,
             );
             return self.finish_submission(result);
         }
@@ -468,12 +487,13 @@ impl ShellSession {
                 .eval_shell_plan_with_context(command, &cwd, &environment, Some(self.last_status))
                 .map_err(|errors| ShellError::from_spar(errors, command))
                 .and_then(|plan| {
-                    execute_plan(
+                    crate::execute::execute_plan_with_input(
                         &plan,
                         &self.builtins,
                         &mut self.services,
                         self.last_status,
                         self.mode,
+                        heredoc_input,
                     )
                 }),
         };
@@ -1728,6 +1748,151 @@ mod tests {
 
         let output = builtin_stdout(session.submit("export").unwrap());
         assert!(output.contains("KEEP_VALUE='old'"), "{output}");
+    }
+
+    #[test]
+    fn spar_variable_can_capture_a_grouped_command_substitution() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("image.jpg");
+        let output = directory.path().join("out.txt");
+        std::fs::write(&image, b"image").unwrap();
+        let mut session = ShellSession::new();
+        session.submit(&format!(
+            "var img: str = $(find {} -type f \\( -iname '*.jpg' -o -iname '*.png' \\) | head -n1);",
+            directory.path().display()
+        )).unwrap();
+        session
+            .submit(&format!(r#"echo "${{img}}" > {}"#, output.display()))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("{}\n", image.display())
+        );
+    }
+
+    #[test]
+    fn shell_function_output_decodes_with_json_bridge() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .submit("import pkg { stringify } from \"std/json\";")
+            .unwrap();
+        session
+            .submit("export struct Data { name: str = \"OCC\"; age: int = 33; };")
+            .unwrap();
+        session.submit("fn getProfileJson() -> shell {\n return shell {\n echo;\n println(value: stringify(value: Data()));\n };\n};").unwrap();
+        let result = session.submit("getProfileJson() | from json").unwrap();
+        let ShellResult::Structured(value) = result else {
+            panic!("expected structured data");
+        };
+        assert!(value.value.render_display().contains("OCC"));
+        let recalled = session.submit("_ |> to json").unwrap();
+        let ShellResult::Structured(recalled) = recalled else {
+            panic!("expected decoded record to remain available for structured pipelines");
+        };
+        assert!(recalled.value.render_display().contains("OCC"));
+        let error = session
+            .submit("getProfileJson() | from record")
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot decode record"));
+    }
+
+    #[test]
+    fn shell_function_println_reaches_downstream_grep() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("result.txt");
+        let mut session = ShellSession::new();
+        session
+            .submit("export struct Data { name: str = \"OCC\"; age: int = 33; };")
+            .unwrap();
+        session.submit("fn getProfile() -> shell {\n return shell {\n echo;\n println(value: Data());\n };\n};").unwrap();
+        session
+            .submit(&format!("getProfile() | grep OCC > {}", output.display()))
+            .unwrap();
+        assert!(std::fs::read_to_string(output).unwrap().contains("OCC"));
+    }
+
+    #[test]
+    fn shell_function_output_pipes_to_another_shell_function_without_status_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("result.txt");
+        let mut session = ShellSession::new();
+        session
+            .submit("fn emit() -> shell { return shell { printf 'OCC\\n'; }; };")
+            .unwrap();
+        session
+            .submit("fn select(path: str) -> shell { return shell { grep OCC > \"${path}\"; }; };")
+            .unwrap();
+        session
+            .submit(&format!("emit() | select(path: \"{}\")", output.display()))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "OCC\n");
+        assert_eq!(session.last_status(), 0);
+    }
+
+    #[test]
+    fn shell_function_pipeline_does_not_add_exit_status_to_stdout() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("result.txt");
+        let mut session = ShellSession::new();
+        session
+            .submit("fn emit() -> shell { println(value: \"OCC\"); return shell { echo; }; };")
+            .unwrap();
+        session
+            .submit(&format!("emit() | grep OCC > {}", output.display()))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "OCC\n");
+        assert_eq!(session.last_status(), 0);
+    }
+
+    #[test]
+    fn here_document_feeds_external_stdin_and_preserves_output_redirection() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("out.txt");
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!(
+                "cat <<'BODY' > {}\nline one\nline two\nBODY",
+                output.display()
+            ))
+            .unwrap();
+        assert_eq!(std::fs::read(output).unwrap(), b"line one\nline two\n");
+    }
+
+    #[test]
+    fn here_document_body_is_never_classified_as_spar() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("out.txt");
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!(
+                "cat <<BODY > {}\nvalue |> untouched\nBODY",
+                output.display()
+            ))
+            .unwrap();
+        assert_eq!(std::fs::read(output).unwrap(), b"value |> untouched\n");
+    }
+
+    #[test]
+    fn here_document_missing_terminator_does_not_execute_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("out.txt");
+        let mut session = ShellSession::new();
+        let error = session
+            .submit(&format!("cat <<BODY > {}\nunfinished", output.display()))
+            .unwrap_err();
+        assert_eq!(error.status(), 2);
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn shell_line_continuation_joins_words_before_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("out.txt");
+        let mut session = ShellSession::new();
+        session
+            .submit(&format!("printf '%s' foo\\\nbar > {}", output.display()))
+            .unwrap();
+        assert_eq!(std::fs::read(output).unwrap(), b"foobar");
     }
 
     #[test]

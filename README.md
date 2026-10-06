@@ -78,6 +78,26 @@ export NAME=OCC
 echo "$NAME"         # shell environment shorthand
 ```
 
+## Command input and redirection
+
+Sparsh accepts backslash-newline continuation, escaped shell arguments, `<`, `>`, `>>`, and here-documents for commands. A here-document is passed to the command on standard input; its body is not parsed as Spar.
+
+```text
+find ~/Pictures -type f \( -iname '*.jpg' -o -iname '*.png' \) | head -n1
+cat <<'END' > sample.txt
+one line
+END
+```
+
+Use a Spar declaration to store a command result:
+
+```spar
+var img: str = $(find ~/Pictures -type f \( -iname '*.jpg' -o -iname '*.png' \) | head -n1);
+echo "${img}";
+```
+
+`IMG=...` on its own is Bash assignment syntax; Sparsh uses `var` for persistent values. Here-document bodies are passed literally, with or without quotes around the marker. An unfinished marker keeps the interactive prompt open for more input.
+
 ## Native Sparsh builtins
 
 The practical stateful/interactive builtin set is owned by Sparsh itself:
@@ -133,8 +153,29 @@ function readLog(file: str) -> shell {
 readLog(file: "server.log") | grep error | head -n 10
 ```
 
-A non-shell Spar value is rejected as a pipeline stage; Sparsh never silently
-stringifies arbitrary values into commands.
+A function's `println` output also reaches the next pipeline stage. A returned
+`shell` plan runs as the command stage; neither its return value nor its exit
+status is added to standard output.
+
+To pass a record into a structured pipeline, print JSON and decode it:
+
+```spar
+import pkg { stringify } from "std/json";
+export struct Data { name: str = "OCC"; age: int = 33; };
+fn getProfile() -> shell {
+    println(value: stringify(value: Data()));
+    return shell { echo; };
+};
+```
+
+```text
+getProfile() | from json
+_ |> to json
+```
+
+`from record` is not a codec. Sparsh accepts `json`, `jsonl`, `csv`,
+`tsv`, `lines`, `yaml`, `toml`, and `text` here. A non-shell Spar
+value is rejected as a pipeline stage.
 
 ## Configuration: `~/.sparsh/src/config.spar`
 

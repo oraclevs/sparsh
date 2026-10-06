@@ -17,6 +17,7 @@ mod prompt_config;
 mod resolver;
 mod services;
 mod session;
+mod shell_input;
 mod template;
 pub mod value;
 
@@ -50,7 +51,11 @@ pub use value::render_value;
 pub const PRODUCT_NAME: &str = "sparsh";
 
 pub fn input_completeness(source: &str) -> InputCompleteness {
-    spar::input_completeness(source)
+    if shell_input::needs_more_input(source) {
+        InputCompleteness::Incomplete
+    } else {
+        spar::input_completeness(source)
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,16 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use spar_command::{Join, PipelinePlan, ShellPlan, Step};
+use spar_command::{CommandPlan, Join, PipelinePlan, ShellPlan, Step};
+
+pub(crate) const CAPTURED_OUTPUT_PROGRAM: &str = "\0sparsh-captured-output";
+pub(crate) const DECODER_PROGRAM: &str = "\0sparsh-decoder";
+
+#[derive(Debug)]
+pub(crate) struct ComposedFunctionPipeline {
+    pub plan: ShellPlan,
+    pub captured_outputs: Vec<Vec<u8>>,
+}
 
 use crate::dispatch::is_explicit_call;
 use crate::session::ShellError;
@@ -39,18 +48,19 @@ pub(crate) fn compose_function_pipeline(
     cwd: &Path,
     environment: &[(OsString, OsString)],
     last_status: i32,
-) -> Result<Option<ShellPlan>, ShellError> {
+) -> Result<Option<ComposedFunctionPipeline>, ShellError> {
     let stages = split_top_level_pipeline(source);
     if stages.len() < 2 || !stages.iter().any(|stage| is_explicit_call(stage.trim())) {
         return Ok(None);
     }
 
     let mut commands = Vec::new();
+    let mut captured_outputs = Vec::new();
     for stage in stages {
         let stage = stage.trim();
         if is_explicit_call(stage) {
-            let value = spar
-                .eval_transient_with_context(stage, cwd, environment)
+            let (value, captured) = spar
+                .eval_transient_capture_stdout_with_context(stage, cwd, environment)
                 .map_err(|errors| ShellError::from_spar(errors, stage))?;
             let spar::InteractiveEvalResult::Value(spar::ConfigValue::Shell(plan)) = value else {
                 return Err(ShellError::Process {
@@ -59,6 +69,19 @@ pub(crate) fn compose_function_pipeline(
                 });
             };
             commands.extend(flatten_single_pipeline(plan)?);
+            if !captured.is_empty() {
+                captured_outputs.push(captured);
+                commands.push(virtual_command(CAPTURED_OUTPUT_PROGRAM, Vec::new()));
+            }
+        } else if let Some(format) = stage.strip_prefix("from ") {
+            let format = format.trim();
+            if format.is_empty() || format.contains(char::is_whitespace) {
+                return Err(ShellError::Process {
+                    message: "from expects one format name".into(),
+                    status: 2,
+                });
+            }
+            commands.push(virtual_command(DECODER_PROGRAM, vec![format.to_string()]));
         } else {
             let plan = spar
                 .eval_shell_plan_with_context(stage, cwd, environment, Some(last_status))
@@ -69,9 +92,26 @@ pub(crate) fn compose_function_pipeline(
     if let Some(last) = commands.last_mut() {
         last.background = false;
     }
-    Ok(Some(ShellPlan {
-        steps: vec![(Join::Always, Step::Pipeline(PipelinePlan { commands }))],
+    Ok(Some(ComposedFunctionPipeline {
+        plan: ShellPlan {
+            steps: vec![(Join::Always, Step::Pipeline(PipelinePlan { commands }))],
+        },
+        captured_outputs,
     }))
+}
+
+fn virtual_command(program: &str, args: Vec<String>) -> CommandPlan {
+    CommandPlan {
+        program: program.to_string(),
+        args,
+        env: Vec::new(),
+        cwd: None,
+        stdin: None,
+        stdout: None,
+        stderr: None,
+        redirections: Vec::new(),
+        background: false,
+    }
 }
 
 fn flatten_single_pipeline(plan: ShellPlan) -> Result<Vec<spar_command::CommandPlan>, ShellError> {
@@ -194,7 +234,7 @@ mod tests {
         .unwrap()
         .expect("explicit Spar call should trigger mixed-pipeline composition");
 
-        let [(join, Step::Pipeline(pipeline))] = plan.steps.as_slice() else {
+        let [(join, Step::Pipeline(pipeline))] = plan.plan.steps.as_slice() else {
             panic!("expected one composed pipeline");
         };
         assert_eq!(*join, spar_command::Join::Always);

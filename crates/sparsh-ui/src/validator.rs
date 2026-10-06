@@ -29,6 +29,11 @@ impl Validator for SparshValidator {
                 InputCompleteness::Complete => ValidationResult::Incomplete,
             };
         }
+        if sparsh_core::input_completeness(line) == InputCompleteness::Incomplete
+            && (line.contains("<<") || line.trim_end().ends_with('\\'))
+        {
+            return ValidationResult::Incomplete;
+        }
         if !looks_like_spar_input(line) {
             return ValidationResult::Complete;
         }
@@ -112,6 +117,11 @@ mod tests {
         let mode = Arc::new(RwLock::new(EditorMode::Normal));
         let validator = SparshValidator::new(mode);
         assert_complete(validator.validate("git status"));
+        assert_incomplete(validator.validate("cat <<EOF"));
+        assert_incomplete(validator.validate("cat <<EOF\nhello\n"));
+        assert_complete(validator.validate("cat <<EOF\nhello\nEOF"));
+        assert_incomplete(validator.validate("echo hello\\"));
+        assert_complete(validator.validate("echo hello\\\nworld"));
         assert_complete(validator.validate("echo foo(bar)"));
         assert_complete(validator.validate("build()"));
         assert_incomplete(validator.validate("function build() -> int {"));
