@@ -161,8 +161,9 @@ For functions that produce pipeline data, return `ShellResult<T, E>`. Bare comma
 lines in the body run when the function is called. The value in `ok(value: ...)`
 becomes the pipeline input: strings are sent as text and records are encoded
 as JSON. `err(error: ...)` writes to standard error and stops the pipeline
-with a nonzero status. Printing inside the function is a side effect; it does
-not supply pipeline input.
+with a nonzero status. A `ShellResult` value also supports `Result` methods
+such as `isOk()` and `unwrap()`. Printing inside the function is a side
+effect; it does not supply pipeline input.
 
 ```spar
 export struct Data { name: str = "OCC"; age: int = 33; };
