@@ -1853,6 +1853,47 @@ mod tests {
         assert!(text.contains("nonexistent_cmd_zzz --flag;"), "{text}");
     }
 
+    fn rendered_spar_error(error: super::ShellError, input: &str) -> String {
+        let errors = match error {
+            super::ShellError::Spar(errors) => errors,
+            super::ShellError::SparSource { errors, .. } => errors,
+            other => panic!("expected a Spar error, got {other:?}"),
+        };
+        spar::ErrorRenderer::new(input, "<sparsh>").render_all(&errors)
+    }
+
+    #[test]
+    fn a_plain_top_level_error_prints_no_trace_section() {
+        let mut session = ShellSession::new();
+        let input = "var z: int = 0; 10 / z";
+        let error = session.submit(input).unwrap_err();
+        let text = rendered_spar_error(error, input);
+        assert!(text.contains("division by zero"), "{text}");
+        assert!(!text.contains("trace (most recent call first)"), "{text}");
+    }
+
+    #[test]
+    fn session_defined_functions_do_not_print_wrong_frame_locations() {
+        let mut session = ShellSession::new();
+        session
+            .submit("fn b(x: int) -> int {\n    return 10 / x;\n};")
+            .unwrap();
+        session
+            .submit("fn a(x: int) -> int {\n    return b(x: x);\n};")
+            .unwrap();
+        let input = "a(x: 0)";
+        let error = session.submit(input).unwrap_err();
+        let text = rendered_spar_error(error, input);
+        let line = |prefix: &str| {
+            text.lines()
+                .find(|line| line.trim_start().starts_with(prefix))
+                .unwrap_or_else(|| panic!("no `{prefix}` line in\n{text}"))
+                .to_string()
+        };
+        assert!(!line("in b").contains("<sparsh>:1:1"), "{text}");
+        assert!(!line("called from a").contains("<sparsh>:1:1"), "{text}");
+    }
+
     #[test]
     fn aliases_expand_in_pipelines() {
         let directory = tempfile::tempdir().unwrap();
