@@ -423,6 +423,26 @@ impl ShellSession {
             }
             return self.finish_submission(result);
         }
+        let call = input.trim().trim_end_matches(';').trim_end();
+        if crate::dispatch::is_explicit_call(call) {
+            let name = call.split_once('(').map_or(call, |(name, _)| name).trim();
+            if matches!(self.spar.function_return_type(name),
+                Some(spar::ast::SparType::Applied { name, arguments }) if name == "ShellResult" && arguments.len() == 2)
+            {
+                let value = self.spar.eval_transient_with_context(call, &cwd, &environment)
+                    .map_err(|errors| ShellError::from_spar(errors, call))?;
+                let output = crate::function_pipeline::shell_result_output(value)?;
+                if !output.stderr.is_empty() {
+                    use std::io::Write;
+                    std::io::stderr().lock().write_all(&output.stderr).map_err(|error| ShellError::Process { message: error.to_string(), status: 1 })?;
+                }
+                return self.finish_submission(Ok(ShellResult::Builtin(crate::BuiltinOutput {
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    status: output.status,
+                })));
+            }
+        }
         if let Some(composed) = crate::function_pipeline::compose_function_pipeline(
             input,
             &self.spar,
@@ -1768,6 +1788,47 @@ mod tests {
             std::fs::read_to_string(output).unwrap(),
             format!("{}\n", image.display())
         );
+    }
+
+    #[test]
+    fn shell_result_function_returns_typed_data_to_pipeline() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("profile.txt");
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session.submit("struct Data { name: str = \"OCC\"; age: int = 33; };").unwrap();
+        session.submit("fn getProfile() -> ShellResult<Data, str> {\n    echo preparing;\n    echo ready;\n    return ok(value: Data());\n};").unwrap();
+        let result = session.submit("getProfile() | from json").unwrap();
+        let ShellResult::Structured(value) = result else { panic!("expected structured result"); };
+        assert!(value.value.render_display().contains("OCC"));
+        session.submit(&format!("getProfile() | grep -i age > {}", output.display())).unwrap();
+        assert!(std::fs::read_to_string(output).unwrap().contains("age"));
+    }
+
+    #[test]
+    fn shell_result_direct_call_runs_commands_and_prints_only_returned_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let side_effect = directory.path().join("side.txt");
+        let mut session = ShellSession::new();
+        session.submit("fn emit(path: str) -> ShellResult<str, str> {\n echo side > \"${path}\";\n return ok(value: \"payload\");\n};").unwrap();
+        let result = session.submit(&format!("emit(path: \"{}\")", side_effect.display())).unwrap();
+        assert_eq!(builtin_stdout(result), "payload\n");
+        assert_eq!(std::fs::read_to_string(side_effect).unwrap(), "side\n");
+        assert_eq!(session.last_status(), 0);
+    }
+
+    #[test]
+    fn shell_result_error_goes_to_stderr_and_sets_status() {
+        let mut session = ShellSession::new();
+        session.submit("fn fail() -> ShellResult<str, str> { return err(error: \"no profile\"); };").unwrap();
+        let ShellResult::Builtin(direct) = session.submit("fail()").unwrap() else { panic!("expected builtin output"); };
+        assert_eq!(direct.stderr, b"no profile\n");
+        assert!(direct.stdout.is_empty());
+        assert_eq!(direct.status, 1);
+        let result = session.submit("fail() | cat").unwrap();
+        assert!(matches!(result, ShellResult::CommandStatus { status: 1, .. }));
+        assert_eq!(session.last_status(), 1);
+        let decoded = session.submit("fail() | from json").unwrap();
+        assert!(matches!(decoded, ShellResult::CommandStatus { status: 1, .. }));
     }
 
     #[test]

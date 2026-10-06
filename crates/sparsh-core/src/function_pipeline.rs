@@ -4,12 +4,51 @@ use std::path::Path;
 use spar_command::{CommandPlan, Join, PipelinePlan, ShellPlan, Step};
 
 pub(crate) const CAPTURED_OUTPUT_PROGRAM: &str = "\0sparsh-captured-output";
+
+#[derive(Debug)]
+pub(crate) struct FunctionOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub status: i32,
+}
+
+pub(crate) fn shell_result_output(value: spar::InteractiveEvalResult) -> Result<FunctionOutput, ShellError> {
+    let spar::InteractiveEvalResult::Value(spar::ConfigValue::Result(result)) = value else {
+        return Err(ShellError::Process { message: "ShellResult function did not return ok or err".into(), status: 2 });
+    };
+    match result {
+        Ok(value) => {
+            let value = *value;
+            let stdout = match value {
+                spar::ConfigValue::Str(text) => line_bytes(text),
+                other => {
+                    let runtime = spar::Value::from_config(other);
+                    let bytes = spar::StructuredFormatRegistry::builtin().encode_values("json", &[runtime])
+                        .map_err(|error| ShellError::Process { message: format!("cannot encode ShellResult value: {error}"), status: 2 })?;
+                    line_bytes(String::from_utf8(bytes).map_err(|error| ShellError::Process { message: error.to_string(), status: 2 })?)
+                }
+            };
+            Ok(FunctionOutput { stdout, stderr: Vec::new(), status: 0 })
+        }
+        Err(error) => Ok(FunctionOutput {
+            stdout: Vec::new(),
+            stderr: line_bytes(spar::Value::from_config(*error).render_display()),
+            status: 1,
+        }),
+    }
+}
+
+fn line_bytes(mut value: String) -> Vec<u8> {
+    if !value.ends_with('\n') { value.push('\n'); }
+    value.into_bytes()
+}
+
 pub(crate) const DECODER_PROGRAM: &str = "\0sparsh-decoder";
 
 #[derive(Debug)]
 pub(crate) struct ComposedFunctionPipeline {
     pub plan: ShellPlan,
-    pub captured_outputs: Vec<Vec<u8>>,
+    pub captured_outputs: Vec<FunctionOutput>,
 }
 
 use crate::dispatch::is_explicit_call;
@@ -59,6 +98,16 @@ pub(crate) fn compose_function_pipeline(
     for stage in stages {
         let stage = stage.trim();
         if is_explicit_call(stage) {
+            let name = stage.split_once('(').map_or(stage, |(name, _)| name).trim();
+            let shell_result = matches!(spar.function_return_type(name),
+                Some(spar::ast::SparType::Applied { name, arguments }) if name == "ShellResult" && arguments.len() == 2);
+            if shell_result {
+                let value = spar.eval_transient_with_context(stage, cwd, environment)
+                    .map_err(|errors| ShellError::from_spar(errors, stage))?;
+                captured_outputs.push(shell_result_output(value)?);
+                commands.push(virtual_command(CAPTURED_OUTPUT_PROGRAM, Vec::new()));
+                continue;
+            }
             let (value, captured) = spar
                 .eval_transient_capture_stdout_with_context(stage, cwd, environment)
                 .map_err(|errors| ShellError::from_spar(errors, stage))?;
@@ -70,7 +119,7 @@ pub(crate) fn compose_function_pipeline(
             };
             commands.extend(flatten_single_pipeline(plan)?);
             if !captured.is_empty() {
-                captured_outputs.push(captured);
+                captured_outputs.push(FunctionOutput { stdout: captured, stderr: Vec::new(), status: 0 });
                 commands.push(virtual_command(CAPTURED_OUTPUT_PROGRAM, Vec::new()));
             }
         } else if let Some(format) = stage.strip_prefix("from ") {

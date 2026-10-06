@@ -13,7 +13,7 @@ use crate::services::ShellServices;
 use crate::session::{CommandDiagnostic, SessionMode, ShellError, ShellResult};
 
 enum PreparedCommand {
-    CapturedOutput(Vec<u8>),
+    CapturedOutput(crate::function_pipeline::FunctionOutput),
     Decoder(String),
     Builtin {
         name: String,
@@ -63,7 +63,7 @@ pub(crate) fn execute_plan_with_captured(
     last_status: i32,
     mode: SessionMode,
     input: Option<Vec<u8>>,
-    captured_outputs: Vec<Vec<u8>>,
+    captured_outputs: Vec<crate::function_pipeline::FunctionOutput>,
 ) -> Result<ShellResult, ShellError> {
     let mut executor = SparshExecutor {
         captured_outputs: captured_outputs.into(),
@@ -117,7 +117,7 @@ pub(crate) fn execute_plan_with_captured(
 }
 
 struct SparshExecutor<'a> {
-    captured_outputs: VecDeque<Vec<u8>>,
+    captured_outputs: VecDeque<crate::function_pipeline::FunctionOutput>,
     pending_stdin: Option<Vec<u8>>,
     registry: &'a BuiltinRegistry,
     services: &'a mut ShellServices,
@@ -290,14 +290,28 @@ impl SparshExecutor<'_> {
             match &stages[index] {
                 PreparedCommand::CapturedOutput(captured) => {
                     let mut bytes = input.take().unwrap_or_default();
-                    bytes.extend_from_slice(captured);
+                    bytes.extend_from_slice(&captured.stdout);
+                    if !captured.stderr.is_empty() {
+                        io::stderr().lock().write_all(&captured.stderr).map_err(process_error)?;
+                    }
                     statuses.push(spar_process::ExitStatus {
-                        success: true,
-                        code: Some(0),
+                        success: captured.status == 0,
+                        code: Some(captured.status),
                     });
+                    if captured.status != 0 {
+                        self.last_status = captured.status;
+                        self.last_result = Some(ShellResult::CommandStatus {
+                            status: captured.status,
+                            diagnostic: None,
+                        });
+                        return Ok(spar_process::ExitStatus {
+                            success: false,
+                            code: Some(captured.status),
+                        });
+                    }
                     if index + 1 == stages.len() {
                         final_in_process = Some(crate::builtin::BuiltinOutput {
-                            status: 0,
+                            status: captured.status,
                             stdout: bytes,
                             stderr: Vec::new(),
                         });

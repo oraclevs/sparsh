@@ -157,25 +157,36 @@ A function's `println` output also reaches the next pipeline stage. A returned
 `shell` plan runs as the command stage; neither its return value nor its exit
 status is added to standard output.
 
-To pass a record into a structured pipeline, print JSON and decode it:
+For functions that produce pipeline data, return `ShellResult<T, E>`. Bare command
+lines in the body run when the function is called. The value in `ok(value: ...)`
+becomes the pipeline input: strings are sent as text and records are encoded
+as JSON. `err(error: ...)` writes to standard error and stops the pipeline
+with a nonzero status. Printing inside the function is a side effect; it does
+not supply pipeline input.
 
 ```spar
-import pkg { stringify } from "std/json";
 export struct Data { name: str = "OCC"; age: int = 33; };
-fn getProfile() -> shell {
-    println(value: stringify(value: Data()));
-    return shell { echo; };
+
+fn getProfile() -> ShellResult<Data, str> {
+    echo preparing;
+    return ok(value: Data());
+};
+
+fn missingProfile() -> ShellResult<Data, str> {
+    return err(error: "profile unavailable");
 };
 ```
 
 ```text
 getProfile() | from json
 _ |> to json
+missingProfile() | cat
 ```
 
-`from record` is not a codec. Sparsh accepts `json`, `jsonl`, `csv`,
-`tsv`, `lines`, `yaml`, `toml`, and `text` here. A non-shell Spar
-value is rejected as a pipeline stage.
+The earlier `-> shell` form remains useful when a function returns a command
+plan whose output should be piped. `from record` is not a codec. Sparsh
+accepts `json`, `jsonl`, `csv`, `tsv`, `lines`, `yaml`,
+`toml`, and `text`.
 
 ## Configuration: `~/.sparsh/src/config.spar`
 
