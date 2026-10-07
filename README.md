@@ -156,9 +156,9 @@ function readLog(file: str) -> ShellResult<int, str> {
 readLog(file: "server.log") | grep error | head -n 10
 ```
 
-A function's `println` output also reaches the next pipeline stage. A returned
-`shell` plan runs as the command stage; neither its return value nor its exit
-status is added to standard output.
+A function's `println` output also reaches the next pipeline stage. Commands in a
+`ShellResult` function body run as the command stage; neither its return value
+nor its exit status is added to standard output.
 
 For functions that produce pipeline data, return `ShellResult<T, E>`. Bare command
 lines in the body run when the function is called. The value in `ok(value: ...)`
