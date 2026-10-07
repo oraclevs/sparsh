@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use crate::builtin::{BuiltinError, BuiltinOutput, BuiltinRegistry};
 use crate::dispatch::{classify, Dispatch};
+use spar::repl_split::ReplKind;
 use crate::execute::execute_plan;
 use crate::resolver::find_external;
 use crate::services::ShellServices;
@@ -140,6 +141,32 @@ pub enum ShellResult {
         diagnostic: Option<CommandDiagnostic>,
     },
     Exit(i32),
+    /// A submission that held several statements: one outcome per statement,
+    /// in order. A failing statement does not stop the ones after it.
+    Sequence(Vec<StatementOutcome>),
+}
+
+/// What one statement of a multi-statement submission produced.
+#[derive(Debug)]
+pub struct StatementOutcome {
+    /// The statement as the user typed it.
+    pub source: String,
+    pub result: Result<ShellResult, ShellError>,
+}
+
+impl ShellResult {
+    /// The result that decides the submission's exit status and editor
+    /// effects: the result itself, or the last successful statement of a
+    /// sequence.
+    pub fn leaf(&self) -> Option<&ShellResult> {
+        match self {
+            ShellResult::Sequence(outcomes) => match outcomes.last()?.result.as_ref() {
+                Ok(result) => result.leaf(),
+                Err(_) => None,
+            },
+            other => Some(other),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -344,7 +371,13 @@ impl ShellSession {
             .unwrap_or_default()
     }
 
-    pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
+    /// Runs one statement. `forced` is the kind the statement splitter chose;
+    /// `None` falls back to the whole-input classifier.
+    fn submit_statement(
+        &mut self,
+        input: &str,
+        forced: Option<ReplKind>,
+    ) -> Result<ShellResult, ShellError> {
         self.poll_jobs()?;
         let prepared = if input.contains("<<")
             || (matches!(classify(input, &self.spar), Dispatch::Command(_))
@@ -488,9 +521,27 @@ impl ShellSession {
             return self.finish_submission(result);
         }
 
-        let dispatch = classify(input, &self.spar);
+        let mut dispatch = classify(input, &self.spar);
         if matches!(&dispatch, Dispatch::Empty) {
             return Ok(ShellResult::Empty);
+        }
+        match forced {
+            // The splitter decided this is Spar. A bare existing variable
+            // still prints its value directly.
+            Some(ReplKind::Spar) => {
+                let text = input.trim();
+                dispatch = if crate::dispatch::is_bare_identifier(text)
+                    && self.spar.value(text).is_some()
+                {
+                    Dispatch::SparValue(text)
+                } else {
+                    Dispatch::SparFragment(text)
+                };
+            }
+            // A command-shaped statement stays a command unless the old
+            // classifier knows better: `env.HOME`, `env["X"]`, `_` access,
+            // `|>` pipelines, existing variables, `(await ...)`.
+            Some(ReplKind::Command) | None => {}
         }
 
         let result = match dispatch {
@@ -521,23 +572,97 @@ impl ShellSession {
         self.finish_submission(result)
     }
 
+    pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
+        self.poll_jobs()?;
+        // Heredocs and line continuations span lines on purpose; keep them
+        // as one statement.
+        if input.trim().is_empty() || input.contains("<<") || input.contains("\\\n") {
+            return self.submit_statement(input, None);
+        }
+        let names = self.split_names(input);
+        let statements = spar::repl_split::split_statements(input, &names);
+        if statements.is_empty() {
+            return self.submit_statement(input, None);
+        }
+
+        let mut outcomes = Vec::with_capacity(statements.len());
+        let mut cursor = 0;
+        let total = statements.len();
+        for statement in statements {
+            let original = original_text(&statement);
+            let start = input[cursor..]
+                .find(&original)
+                .map_or(cursor, |offset| cursor + offset);
+            cursor = (start + original.len()).min(input.len());
+
+            // Each statement is its own fragment, so expressions and
+            // declarations need no `;` (and a control block rejects one).
+            // A top-level `~ command` marker runs through the command path.
+            let (text, kind, start, inserted) = match statement.text.strip_prefix('~') {
+                Some(rest)
+                    if statement.kind == ReplKind::Spar
+                        && rest.starts_with(char::is_whitespace) =>
+                {
+                    let trimmed = rest.trim_start();
+                    let skipped = statement.text.len() - trimmed.len();
+                    (
+                        trimmed.trim_end_matches(';').to_string(),
+                        ReplKind::Command,
+                        start + skipped,
+                        Vec::new(),
+                    )
+                }
+                _ => (
+                    statement.text.clone(),
+                    statement.kind,
+                    start,
+                    statement.inserted.clone(),
+                ),
+            };
+            let result = self
+                .submit_statement(&text, Some(kind))
+                .map_err(|error| remap_error(error, &text, &inserted, start, input));
+            let stop = matches!(
+                &result,
+                Ok(ShellResult::Exit(_)) | Ok(ShellResult::EditorMode(_))
+            );
+            outcomes.push(StatementOutcome {
+                source: original,
+                result,
+            });
+            if stop {
+                break;
+            }
+        }
+        if total == 1 {
+            return outcomes.pop().expect("one statement").result;
+        }
+        Ok(ShellResult::Sequence(outcomes))
+    }
+
+    /// Names the splitter treats as Spar: the user's declarations plus any
+    /// existing value used as `name.field` / `name[index]` at a statement
+    /// start (`env.HOME`), without hijacking a bare command of that name.
+    fn split_names(&self, input: &str) -> std::collections::HashSet<String> {
+        let mut names = self.spar.scope_names();
+        for piece in input.split([';', '\n']) {
+            let piece = piece.trim_start();
+            if let Some(index) = piece.find(['.', '[']) {
+                let head = &piece[..index];
+                if crate::dispatch::is_bare_identifier(head) && self.spar.value(head).is_some() {
+                    names.insert(head.to_string());
+                }
+            }
+        }
+        names
+    }
+
     /// Submission for scripts (`-c`, piped stdin). A string returned by a Spar
     /// expression is data, so it is written as-is; a bare variable name still
     /// shows the quoted, Spar-literal form, as does the prompt.
     pub fn submit_script(&mut self, input: &str) -> Result<ShellResult, ShellError> {
         let result = self.submit(input)?;
-        Ok(match result {
-            ShellResult::Value(spar::ConfigValue::Str(text))
-                if !crate::dispatch::is_bare_identifier(input.trim()) =>
-            {
-                ShellResult::Builtin(crate::BuiltinOutput {
-                    stdout: format!("{text}\n").into_bytes(),
-                    stderr: Vec::new(),
-                    status: 0,
-                })
-            }
-            other => other,
-        })
+        Ok(script_result(result, input))
     }
 
     fn finish_submission(
@@ -575,6 +700,7 @@ impl ShellSession {
                     ShellResult::BackgroundJob { .. } => 0,
                     ShellResult::CommandStatus { status, .. } => *status,
                     ShellResult::Exit(status) => *status,
+                    ShellResult::Sequence(_) => self.last_status,
                 };
                 if matches!(&result, ShellResult::Exit(_)) {
                     self.should_exit = true;
@@ -1239,6 +1365,97 @@ fn install_color_ls_alias(
     }
 }
 
+/// A string returned by a Spar expression in a script is data, so it is
+/// written as-is; a bare variable name still shows the quoted form.
+fn script_result(result: ShellResult, source: &str) -> ShellResult {
+    match result {
+        ShellResult::Value(spar::ConfigValue::Str(text))
+            if !crate::dispatch::is_bare_identifier(source.trim()) =>
+        {
+            ShellResult::Builtin(crate::BuiltinOutput {
+                stdout: format!("{text}\n").into_bytes(),
+                stderr: Vec::new(),
+                status: 0,
+            })
+        }
+        ShellResult::Sequence(outcomes) => ShellResult::Sequence(
+            outcomes
+                .into_iter()
+                .map(|outcome| StatementOutcome {
+                    result: outcome
+                        .result
+                        .map(|result| script_result(result, &outcome.source)),
+                    source: outcome.source,
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The statement as the user typed it: its rewritten text without the
+/// inserted `~ ` markers and `;` terminators.
+fn original_text(statement: &spar::repl_split::ReplStatement) -> String {
+    let mut out = String::with_capacity(statement.text.len());
+    for (index, ch) in statement.text.char_indices() {
+        if !statement
+            .inserted
+            .iter()
+            .any(|&(start, end)| index >= start && index < end)
+        {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Maps a byte offset in rewritten statement text back to the submission the
+/// user typed: drop the inserted bytes before it, add the statement's start.
+fn map_offset(offset: usize, inserted: &[(usize, usize)], start: usize, limit: usize) -> usize {
+    let removed: usize = inserted
+        .iter()
+        .map(|&(a, b)| offset.min(b).saturating_sub(a.min(offset)))
+        .sum();
+    (start + offset - removed.min(offset)).min(limit)
+}
+
+/// Re-points Spar error spans from the text handed to Spar (rewritten, or a
+/// trimmed slice of it) to the user's typed submission, and renders against
+/// that submission.
+fn remap_error(
+    error: ShellError,
+    passed: &str,
+    inserted: &[(usize, usize)],
+    start: usize,
+    submission: &str,
+) -> ShellError {
+    let ShellError::SparSource { mut errors, source, filename } = error else {
+        return error;
+    };
+    let Some(base) = passed.find(&source) else {
+        return ShellError::SparSource { errors, source, filename };
+    };
+    for error in &mut errors {
+        let span = error.span_mut();
+        if span.file != 0 {
+            continue;
+        }
+        let first = map_offset(base + span.start, inserted, start, submission.len());
+        let last = map_offset(base + span.end, inserted, start, submission.len()).max(first);
+        span.start = first;
+        span.end = last;
+        let before = &submission[..first];
+        span.line = before.matches('\n').count() as u32 + 1;
+        let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+        span.col = submission[line_start..first].chars().count() as u32 + 1;
+    }
+    ShellError::SparSource {
+        errors,
+        source: submission.to_string(),
+        filename,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -1866,7 +2083,14 @@ mod tests {
     fn a_plain_top_level_error_prints_no_trace_section() {
         let mut session = ShellSession::new();
         let input = "var z: int = 0; 10 / z";
-        let error = session.submit(input).unwrap_err();
+        // Two statements: the failing one is reported inside the sequence.
+        let ShellResult::Sequence(outcomes) = session.submit(input).unwrap() else {
+            panic!("expected a sequence");
+        };
+        let error = outcomes
+            .into_iter()
+            .find_map(|outcome| outcome.result.err())
+            .expect("the division fails");
         let text = rendered_spar_error(error, input);
         assert!(text.contains("division by zero"), "{text}");
         assert!(!text.contains("trace (most recent call first)"), "{text}");
@@ -3751,5 +3975,53 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             matches!(result, ShellResult::Value(spar::ConfigValue::Int(42))),
             "{result:?}"
         );
+    }
+
+    fn typed_error_column(result: Result<ShellResult, super::ShellError>, input: &str) {
+        let error = match result {
+            Err(error) => error,
+            Ok(ShellResult::Sequence(outcomes)) => outcomes
+                .into_iter()
+                .find_map(|outcome| outcome.result.err())
+                .expect("an outcome failed"),
+            other => panic!("expected an error, got {other:?}"),
+        };
+        let super::ShellError::SparSource { errors, source, .. } = error else {
+            panic!("expected a Spar error");
+        };
+        assert_eq!(source, input, "errors render against the typed submission");
+        let span = errors[0].span();
+        assert!(input[span.start..].starts_with("nope"), "{span:?}");
+        assert_eq!(span.col as usize, input.find("nope").unwrap() + 1);
+    }
+
+    #[test]
+    fn block_rewrite_errors_point_at_the_typed_text() {
+        let input = "if true { echo ok; nope() }";
+        typed_error_column(ShellSession::new().submit(input), input);
+    }
+
+    #[test]
+    fn rewritten_block_errors_in_a_multi_statement_line_point_at_the_typed_text() {
+        let input = "var a: int = 1; if true { echo ok; nope() }";
+        typed_error_column(ShellSession::new().submit(input), input);
+    }
+
+    #[test]
+    fn statements_run_in_order_and_continue_after_a_failure() {
+        let mut session = ShellSession::new();
+        let result = session
+            .submit("var a: int = 2; nope(1); a + 1")
+            .unwrap();
+        let ShellResult::Sequence(outcomes) = result else {
+            panic!("expected a sequence")
+        };
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes[0].result.is_ok());
+        assert!(outcomes[1].result.is_err());
+        assert!(matches!(
+            outcomes[2].result,
+            Ok(ShellResult::Value(spar::ConfigValue::Int(3)))
+        ));
     }
 }

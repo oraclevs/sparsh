@@ -889,6 +889,80 @@ fn piped_stdin_builds_a_program_with_struct_impl_and_method_calls() {
         b"export struct Counter { value: int = 2; };\nimpl Counter { fn inc(self) -> int { return self.value + 1; }; };\nvar counter: Counter = Counter();\ncounter.inc()\n"
     ).unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"3\n");
+}
+
+fn run_c(script: &str) -> String {
+    let output = sparsh().args(["-c", script]).output().unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn run_c_stderr(script: &str) -> String {
+    let output = sparsh().args(["-c", script]).output().unwrap();
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn mixed_line_runs_commands_and_spar_statements() {
+    let out = run_c("echo hi; var a: int = 2; a + 1");
+    assert!(out.contains("hi") && out.trim_end().ends_with('3'), "{out}");
+}
+
+#[test]
+fn shell_command_inside_an_if_block_runs() {
+    assert!(run_c("if true { echo yes }").contains("yes"));
+}
+
+#[test]
+fn shell_command_inside_a_for_block_runs() {
+    let out = run_c("for i in [1, 2] { echo n${i} }");
+    assert!(out.contains("n1") && out.contains("n2"), "{out}");
+}
+
+#[test]
+fn a_failing_command_does_not_stop_later_statements() {
+    assert!(run_c("ls /definitely/not/here; echo after").contains("after"));
+}
+
+#[test]
+fn a_failing_spar_statement_does_not_stop_later_statements() {
+    let out = run_c("var a: int = 1; a = 2; echo after");
+    assert!(out.contains("after"), "{out}");
+}
+
+#[test]
+fn variable_shadows_command_and_tilde_reaches_it() {
+    let out = run_c("var ls: List<int> = [1, 2]; ls; ~ ls /");
+    assert!(out.contains("1") && out.contains("bin"), "{out}");
+}
+
+#[test]
+fn existing_behaviors_are_unchanged() {
+    assert!(run_c("var n: int = 3; n").contains('3'));
+    assert!(run_c("echo a | cat").contains('a'));
+    let piped = run_c(
+        "import pkg { where } from \"std/data\"; printf '%s\\n' '{\"n\":\"web\",\"s\":\"up\"}' '{\"n\":\"db\",\"s\":\"down\"}' | from jsonl |> where(predicate: fn(value) => value.s == \"up\") |> to jsonl",
+    );
+    assert!(piped.contains("web") && !piped.contains("db"), "{piped}");
+}
+
+#[test]
+fn spar_error_in_rewritten_block_points_at_typed_text() {
+    let err = run_c_stderr("if true { echo ok; nope(1) }");
+    // The caret line must sit under what the user typed, not under an
+    // inserted `~ ` marker or `;` terminator.
+    let lines: Vec<&str> = err.lines().collect();
+    let code = lines
+        .iter()
+        .position(|l| l.contains("if true {"))
+        .expect(&err);
+    assert!(
+        !lines[code].contains("~ "),
+        "inserted marker leaked into the rendered source: {err}"
+    );
 }

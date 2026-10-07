@@ -111,7 +111,45 @@ pub fn render_result<W: Write>(
         | ShellResult::Process(_)
         | ShellResult::CommandStatus { .. }
         | ShellResult::Exit(_) => Ok(()),
+        ShellResult::Sequence(outcomes) => {
+            for outcome in outcomes {
+                if let Ok(result) = &outcome.result {
+                    render_result(result, theme, interactive, out)?;
+                }
+            }
+            Ok(())
+        }
     }
+}
+
+/// Renders a multi-statement submission in order: each statement's output,
+/// its command diagnostic or its error.
+pub fn render_sequence<W: Write, E: Write>(
+    outcomes: &[sparsh_core::StatementOutcome],
+    theme: &Theme,
+    interactive: bool,
+    out: &mut W,
+    err: &mut E,
+) -> io::Result<()> {
+    for outcome in outcomes {
+        match &outcome.result {
+            Ok(ShellResult::Sequence(inner)) => {
+                render_sequence(inner, theme, interactive, out, err)?
+            }
+            Ok(result) => {
+                render_result(result, theme, interactive, out)?;
+                if let ShellResult::CommandStatus {
+                    diagnostic: Some(diagnostic),
+                    ..
+                } = result
+                {
+                    render_command_diagnostic(diagnostic, Some(&outcome.source), theme, err)?;
+                }
+            }
+            Err(error) => render_error(error, Some(&outcome.source), theme, err)?,
+        }
+    }
+    Ok(())
 }
 
 pub fn render_command_diagnostic<W: Write>(
@@ -155,10 +193,17 @@ where
         let submitted = line.trim_end_matches(['\r', '\n']);
         match session.submit_script(submitted) {
             Ok(result) => {
-                let exit_status = match &result {
-                    ShellResult::Exit(status) => Some(*status),
+                let exit_status = match result.leaf() {
+                    Some(ShellResult::Exit(status)) => Some(*status),
                     _ => None,
                 };
+                if let ShellResult::Sequence(outcomes) = &result {
+                    render_sequence(outcomes, &theme, false, out, err)?;
+                    if let Some(status) = exit_status {
+                        return Ok(status);
+                    }
+                    continue;
+                }
                 render_result(&result, &theme, false, out)?;
                 if let ShellResult::CommandStatus {
                     diagnostic: Some(diagnostic),

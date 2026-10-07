@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use sparsh_core::{SessionMode, ShellResult, ShellSession, StartupMode};
 use sparsh_ui::{
-    edit_buffer_file, render_command_diagnostic, render_error, render_result, run_interactive,
-    run_noninteractive_loop, ColorPolicy, Theme,
+    edit_buffer_file, render_command_diagnostic, render_error, render_result, render_sequence,
+    run_interactive, run_noninteractive_loop, ColorPolicy, Theme,
 };
 
 const HELP: &str = "\
@@ -78,6 +78,12 @@ fn run_one_command(startup: StartupMode, input: String) -> i32 {
     match session.submit_script(&input) {
         Ok(result) => {
             let status = result_status(&result);
+            if let ShellResult::Sequence(outcomes) = &result {
+                if render_sequence(outcomes, &Theme::plain(), false, &mut out, &mut err).is_err() {
+                    return 1;
+                }
+                return status;
+            }
             if let Err(error) = render_result(&result, &Theme::plain(), false, &mut out) {
                 let _ = writeln!(err, "sparsh: {error}");
                 return 1;
@@ -162,6 +168,11 @@ fn result_status(result: &ShellResult) -> i32 {
         ShellResult::BackgroundJob { .. } => 0,
         ShellResult::CommandStatus { status, .. } => *status,
         ShellResult::Exit(status) => *status,
+        ShellResult::Sequence(outcomes) => match outcomes.last().map(|outcome| &outcome.result) {
+            Some(Ok(result)) => result_status(result),
+            Some(Err(error)) => error.status(),
+            None => 0,
+        },
     }
 }
 

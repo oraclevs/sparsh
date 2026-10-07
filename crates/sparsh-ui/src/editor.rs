@@ -526,11 +526,11 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                     };
                     match result {
                         Ok(result) => {
-                            let exit_status = match &result {
-                                ShellResult::Exit(status) => Some(*status),
+                            let exit_status = match result.leaf() {
+                                Some(ShellResult::Exit(status)) => Some(*status),
                                 _ => None,
                             };
-                            if let ShellResult::EditorMode(requested) = &result {
+                            if let Some(ShellResult::EditorMode(requested)) = result.leaf() {
                                 if let Ok(mut mode) = editor_mode.write() {
                                     *mode = *requested;
                                 }
@@ -544,8 +544,18 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                                 break;
                             }
                             let stdout = io::stdout();
-                            render_result(&result, &theme, true, &mut stdout.lock())?;
-                            if let ShellResult::Structured(value) = &result {
+                            if let ShellResult::Sequence(outcomes) = &result {
+                                crate::render_sequence(
+                                    outcomes,
+                                    &theme,
+                                    true,
+                                    &mut stdout.lock(),
+                                    &mut io::stderr().lock(),
+                                )?;
+                            } else {
+                                render_result(&result, &theme, true, &mut stdout.lock())?;
+                            }
+                            if let Some(ShellResult::Structured(value)) = result.leaf() {
                                 last_view = Some(value.clone());
                             }
                             if let ShellResult::CommandStatus {

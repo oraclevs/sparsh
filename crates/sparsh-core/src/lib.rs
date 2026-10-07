@@ -42,7 +42,7 @@ pub use prompt_config::{
 };
 pub use session::{
     CommandDiagnostic, CommandKind, EditorMode, SessionMode, ShellError, ShellResult, ShellSession,
-    ShellUiSnapshot, StartupMode,
+    ShellUiSnapshot, StartupMode, StatementOutcome,
 };
 pub use spar::InputCompleteness;
 pub use template::{suggest, Piece, Template, WidgetKind, WidgetRef};
