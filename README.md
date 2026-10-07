@@ -80,6 +80,24 @@ export NAME=OCC
 echo "$NAME"         # shell environment shorthand
 ```
 
+## Mixing commands and Spar
+
+Each statement in a submission is classified on its own, so commands and Spar
+can share a line:
+
+```text
+echo hi; var a: int = 2; a + 1
+```
+
+This runs the command, declares `a` and prints `3`. Commands also run inside
+blocks: `if true { echo yes }` and `for i in [1, 2] { echo n${i} }`.
+
+A variable that shares a name with a command wins. After
+`var ls: List<int> = [1, 2]`, `ls` prints the list. Write `~ ls` to run the
+command. Commands joined with `;`, `&&`, `||` or `|` stay one shell command
+group. `~` followed by a space marks a statement as a shell command anywhere,
+including inside plain Spar functions.
+
 ## Command input and redirection
 
 Sparsh accepts backslash-newline continuation, escaped shell arguments, `<`, `>`, `>>`, and here-documents for commands. A here-document is passed to the command on standard input; its body is not parsed as Spar.
