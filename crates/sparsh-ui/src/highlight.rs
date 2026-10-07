@@ -33,6 +33,24 @@ enum MixedHighlightState {
 }
 
 pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
+    // `~ cmd` is a Spar statement marker: color the `~` as syntax and the
+    // rest of the line as a shell command line.
+    let indent = line.len() - line.trim_start().len();
+    let trimmed = &line[indent..];
+    if let Some(rest) = trimmed.strip_prefix('~') {
+        if rest.starts_with(char::is_whitespace) {
+            let offset = indent + 1;
+            let mut spans = vec![HighlightSpan {
+                range: indent..offset,
+                role: SemanticRole::SparSyntax,
+            }];
+            for mut span in shell_scan(&line[offset..], snapshot) {
+                span.range = span.range.start + offset..span.range.end + offset;
+                spans.push(span);
+            }
+            return spans;
+        }
+    }
     if looks_like_spar(line) {
         if let Some(spans) = spar_scan(line, snapshot) {
             return spans;
@@ -739,6 +757,25 @@ mod tests {
         assert!(spans
             .iter()
             .all(|span| span.role != SemanticRole::UnknownCommand));
+    }
+
+    #[test]
+    fn tilde_marker_is_spar_syntax_and_the_command_after_it_is_a_command() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let source = "~ ls -la";
+        let spans = scan(source, &snapshot);
+        assert_eq!(spans[0].range, 0..1);
+        assert_eq!(spans[0].role, SemanticRole::SparSyntax);
+        assert_eq!(role_of(source, "ls", &snapshot), Some(SemanticRole::Builtin));
+        assert_eq!(role_of(source, "-la", &snapshot), Some(SemanticRole::Option));
+        let spans = scan("~/bin/tool", &snapshot);
+        assert_ne!(spans[0].role, SemanticRole::SparSyntax);
+    }
+
+    #[test]
+    fn command_is_not_a_spar_keyword() {
+        assert!(!super::is_spar_keyword("command"));
+        assert!(!super::is_spar_keyword("shell"));
     }
 
     fn role_of(
