@@ -773,6 +773,25 @@ mod tests {
     }
 
     #[test]
+    fn tilde_marker_before_an_external_command_and_lone_tilde() {
+        let snapshot = ShellSession::new().ui_snapshot();
+        let source = "~ git status";
+        let spans = scan(source, &snapshot);
+        assert_eq!((spans[0].range.clone(), spans[0].role), (0..1, SemanticRole::SparSyntax));
+        assert_eq!(role_of(source, "git", &snapshot), Some(SemanticRole::ExternalCommand));
+        for lone in ["~", "~\n", "~\nls"] {
+            let spans = scan(lone, &snapshot);
+            assert!(
+                spans.iter().all(|span| span.range.end <= lone.len()),
+                "{lone:?}: {:?}",
+                roles(&spans)
+            );
+        }
+        let spans = scan("~", &snapshot);
+        assert!(spans.iter().all(|span| span.role != SemanticRole::SparSyntax));
+    }
+
+    #[test]
     fn command_is_not_a_spar_keyword() {
         assert!(!super::is_spar_keyword("command"));
         assert!(!super::is_spar_keyword("shell"));
