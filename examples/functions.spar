@@ -2,14 +2,12 @@ fn greet(prefix: str, name: str) -> str {
     return "${prefix}, ${name}";
 };
 
-fn build(profile: str) -> shell {
-    return shell {
-        cargo build --profile "${profile}";
-    };
+fn build(profile: str) -> ShellResult<int, str> {
+    cargo build --profile "${profile}";
+    return ok(value: 0);
 };
 
-fn showFile(file: str) -> shell {
-    return shell {
-        cat "${file}";
-    };
+fn showFile(file: str) -> ShellResult<int, str> {
+    cat "${file}";
+    return ok(value: 0);
 };

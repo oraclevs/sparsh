@@ -267,8 +267,8 @@ mod tests {
         let mut session = engine.session();
         session
             .eval(
-                r#"function emit(value: str) -> shell {
-                    return shell { printf "%s\n" ${value}; };
+                r#"function emit(value: str) -> __shell {
+                    return __shell { printf "%s\n" ${value}; };
                 };"#,
             )
             .unwrap();
@@ -323,8 +323,8 @@ mod tests {
         let mut session = engine.session();
         session
             .eval(
-                r#"function emit() -> shell {
-                    return shell { printf one; printf two; };
+                r#"function emit() -> __shell {
+                    return __shell { printf one; printf two; };
                 };"#,
             )
             .unwrap();

@@ -282,7 +282,7 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
     let root = expect_section(&value, "config")?;
     if root.contains_key("startup") {
         return Err(
-            "config.startup has been removed; define `function startup() -> shell { ... };` instead"
+            "config.startup has been removed; define `function startup() -> ShellResult<int, str> { ... };` instead"
                 .into(),
         );
     }

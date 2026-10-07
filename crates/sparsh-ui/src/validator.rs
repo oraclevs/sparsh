@@ -69,7 +69,7 @@ fn looks_like_spar_input(line: &str) -> bool {
         "for",
         "while",
         "loop",
-        "shell",
+        "__shell",
         "exec",
     ];
     PREFIXES.iter().any(|prefix| {
@@ -125,7 +125,7 @@ mod tests {
         assert_complete(validator.validate("echo foo(bar)"));
         assert_complete(validator.validate("build()"));
         assert_incomplete(validator.validate("function build() -> int {"));
-        assert_incomplete(validator.validate("shell {"));
+        assert_incomplete(validator.validate("__shell {"));
         assert_incomplete(validator.validate("while i < 3 {"));
         assert_incomplete(validator.validate("loop {"));
         assert_incomplete(validator.validate("for item in items {"));

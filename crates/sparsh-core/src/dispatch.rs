@@ -65,7 +65,7 @@ fn is_explicit_spar_construct(input: &str) -> bool {
         "for",
         "while",
         "loop",
-        "shell",
+        "__shell",
         "await",
     ];
     if KEYWORDS
@@ -78,7 +78,7 @@ fn is_explicit_spar_construct(input: &str) -> bool {
     // process-replacing builtin and stays a command.
     if begins_with_word(input, "exec") {
         let rest = input["exec".len()..].trim_start();
-        if rest.starts_with('{') || begins_with_word(rest, "shell") {
+        if rest.starts_with('{') || begins_with_word(rest, "__shell") {
             return true;
         }
     }
@@ -133,7 +133,7 @@ pub(crate) fn is_explicit_call(input: &str) -> bool {
 /// misclassified as mixed pipelines.
 pub(crate) fn is_mixed_byte_pipeline(input: &str) -> bool {
     let input = input.trim();
-    if begins_with_word(input, "shell") {
+    if begins_with_word(input, "__shell") {
         return false;
     }
 
@@ -252,7 +252,7 @@ mod tests {
             "loop { break; }",
             "build()",
             "Rust::build();",
-            "shell { echo hello; }",
+            "__shell { echo hello; }",
             "exec { printf hello; }",
             "await get(url: \"http://localhost\")",
             "(await get(url: \"http://localhost\")).json()",
@@ -279,7 +279,7 @@ mod tests {
             "shellcheck report.txt | from lines"
         ));
         assert!(!super::is_mixed_byte_pipeline(
-            "shell { printf x | from jsonl |> to jsonl; }"
+            "__shell { printf x | from jsonl |> to jsonl; }"
         ));
     }
 

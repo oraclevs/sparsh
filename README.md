@@ -3,8 +3,9 @@
 Sparsh is an interactive Unix shell built on [Spar](https://github.com/oraclevs/spar) — a real typed language for your rc file, functions, and pipelines instead of Bash string-splicing:
 
 ```spar
-function build(profile: str) -> shell {
-    return shell { cargo build --profile "${profile}"; };
+function build(profile: str) -> ShellResult<int, str> {
+    cargo build --profile "${profile}";
+    return ok(value: 0);
 };
 
 build(profile: "release")
@@ -54,16 +55,17 @@ build()          # Spar function call
 build            # command named "build", never an implicit function call
 ```
 
-A direct Spar expression returning `shell` auto-executes. Assignment stores the
-shell value without executing it:
+A direct Spar call to a function returning `ShellResult<T, E>` runs the
+commands in its body and yields the result:
 
 ```spar
-function build(profile: str) -> shell {
-    return shell { cargo build --profile "${profile}"; };
+function build(profile: str) -> ShellResult<int, str> {
+    cargo build --profile "${profile}";
+    return ok(value: 0);
 };
 
 build(profile: "release")
-var plan: shell = build(profile: "release");
+var result: ShellResult<int, str> = build(profile: "release");
 ```
 
 Spar variables and environment variables remain different namespaces:
@@ -141,11 +143,12 @@ interactive session.
 ## Functions in native pipelines
 
 An explicit Spar function call may be a native pipeline stage when it returns
-`shell`:
+`ShellResult<T, E>`:
 
 ```spar
-function readLog(file: str) -> shell {
-    return shell { cat "${file}"; };
+function readLog(file: str) -> ShellResult<int, str> {
+    cat "${file}";
+    return ok(value: 0);
 };
 ```
 
@@ -184,8 +187,8 @@ _ |> to json
 missingProfile() | cat
 ```
 
-The earlier `-> shell` form remains useful when a function returns a command
-plan whose output should be piped. `from record` is not a codec. Sparsh
+A `ShellResult` function is useful when a function runs a command whose output
+should be piped. `from record` is not a codec. Sparsh
 accepts `json`, `jsonl`, `csv`, `tsv`, `lines`, `yaml`,
 `toml`, and `text`.
 
@@ -293,11 +296,10 @@ struct Config: SparshConfig {
     completion = { enabled: true; };
 };
 
-function startup() -> shell {
-    return shell {
-        path append $(npm prefix -g)/bin;
-        nitch;
-    };
+function startup() -> ShellResult<int, str> {
+    path append $(npm prefix -g)/bin;
+    nitch;
+    return ok(value: 0);
 };
 ```
 
@@ -318,10 +320,9 @@ shell plan executes in the same persistent `ShellSession` as commands entered
 later. For example:
 
 ```spar
-function startup() -> shell {
-    return shell {
-        nitch;
-    };
+function startup() -> ShellResult<int, str> {
+    nitch;
+    return ok(value: 0);
 };
 ```
 

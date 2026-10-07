@@ -1333,7 +1333,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut session = ShellSession::new();
         let source = format!(
-            "function startup() -> shell {{ return shell {{ cd {}; }}; }};",
+            "function startup() -> __shell {{ return __shell {{ cd {}; }}; }};",
             directory.path().display()
         );
 
@@ -2019,7 +2019,7 @@ mod tests {
         session
             .submit("export struct Data { name: str = \"OCC\"; age: int = 33; };")
             .unwrap();
-        session.submit("fn getProfileJson() -> shell {\n return shell {\n echo;\n println(value: stringify(value: Data()));\n };\n};").unwrap();
+        session.submit("fn getProfileJson() -> __shell {\n return __shell {\n echo;\n println(value: stringify(value: Data()));\n };\n};").unwrap();
         let result = session.submit("getProfileJson() | from json").unwrap();
         let ShellResult::Structured(value) = result else {
             panic!("expected structured data");
@@ -2044,7 +2044,7 @@ mod tests {
         session
             .submit("export struct Data { name: str = \"OCC\"; age: int = 33; };")
             .unwrap();
-        session.submit("fn getProfile() -> shell {\n return shell {\n echo;\n println(value: Data());\n };\n};").unwrap();
+        session.submit("fn getProfile() -> __shell {\n return __shell {\n echo;\n println(value: Data());\n };\n};").unwrap();
         session
             .submit(&format!("getProfile() | grep OCC > {}", output.display()))
             .unwrap();
@@ -2057,10 +2057,10 @@ mod tests {
         let output = directory.path().join("result.txt");
         let mut session = ShellSession::new();
         session
-            .submit("fn emit() -> shell { return shell { printf 'OCC\\n'; }; };")
+            .submit("fn emit() -> __shell { return __shell { printf 'OCC\\n'; }; };")
             .unwrap();
         session
-            .submit("fn select(path: str) -> shell { return shell { grep OCC > \"${path}\"; }; };")
+            .submit("fn select(path: str) -> __shell { return __shell { grep OCC > \"${path}\"; }; };")
             .unwrap();
         session
             .submit(&format!("emit() | select(path: \"{}\")", output.display()))
@@ -2075,7 +2075,7 @@ mod tests {
         let output = directory.path().join("result.txt");
         let mut session = ShellSession::new();
         session
-            .submit("fn emit() -> shell { println(value: \"OCC\"); return shell { echo; }; };")
+            .submit("fn emit() -> __shell { println(value: \"OCC\"); return __shell { echo; }; };")
             .unwrap();
         session
             .submit(&format!("emit() | grep OCC > {}", output.display()))
@@ -2318,7 +2318,7 @@ mod tests {
         let mut session = ShellSession::new();
         session
             .submit(&format!(
-                "function build() -> shell {{ return shell {{ touch {}; }}; }};",
+                "function build() -> __shell {{ return __shell {{ touch {}; }}; }};",
                 marker.display()
             ))
             .unwrap();
@@ -2333,8 +2333,8 @@ mod tests {
         let mut session = ShellSession::new();
         session
             .submit(
-                r#"function writeMarker(output: str) -> shell {
-    return shell {
+                r#"function writeMarker(output: str) -> __shell {
+    return __shell {
         var value: str = $(printf ready);
         printf "%s" "${value}" > "${output}";
     };
@@ -2356,8 +2356,8 @@ mod tests {
         let mut session = ShellSession::new();
         session
             .submit(
-                r#"function writeMarkers(output: str) -> shell {
-    return shell {
+                r#"function writeMarkers(output: str) -> __shell {
+    return __shell {
         var values: List<str> = ["one", "two"];
         for value in values {
             touch "${output}-${value}";
@@ -2380,11 +2380,11 @@ mod tests {
         let mut session = ShellSession::new();
         session
             .submit(&format!(
-                "function build() -> shell {{ return shell {{ touch {}; }}; }};",
+                "function build() -> __shell {{ return __shell {{ touch {}; }}; }};",
                 marker.display()
             ))
             .unwrap();
-        session.submit("var plan: shell = build();").unwrap();
+        session.submit("var plan: __shell = build();").unwrap();
         assert!(!marker.exists());
     }
 
@@ -2484,7 +2484,7 @@ mod tests {
         session.submit("export SPARSH_GREETING=Hello").unwrap();
         session
             .submit_spar(
-                "function greet(name: str, output: str) -> shell { return shell { printf \"%s %s\" $SPARSH_GREETING ${name} > ${output}; }; }",
+                "function greet(name: str, output: str) -> __shell { return __shell { printf \"%s %s\" $SPARSH_GREETING ${name} > ${output}; }; }",
             )
             .unwrap();
         session

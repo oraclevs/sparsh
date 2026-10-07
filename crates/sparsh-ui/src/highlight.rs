@@ -577,7 +577,7 @@ fn is_spar_keyword(word: &str) -> bool {
             | "break"
             | "continue"
             | "return"
-            | "shell"
+            | "__shell"
             | "command"
             | "exec"
             | "await"

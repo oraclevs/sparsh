@@ -11,9 +11,8 @@ struct Config {
     pagerKeybindings: List<SparshPagerKeybinding> = [SparshPagerKeybinding(key: "ctrl+n", action: "lineDown"), SparshPagerKeybinding(key: "ctrl+p", action: "lineUp")];
 };
 
-fn startup() -> shell {
-    return shell {
-        path append $(npm prefix -g)/bin;
-        nitch;
-    };
+fn startup() -> ShellResult<int, str> {
+    path append $(npm prefix -g)/bin;
+    nitch;
+    return ok(value: 0);
 };

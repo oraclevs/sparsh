@@ -328,8 +328,8 @@ fn rc_shell_function_with_named_arguments_can_feed_external_pipeline() {
     std::fs::write(&file, "info ready\nerror exploded\n").unwrap();
     write_rc(
         home.path(),
-        r#"function readLog(file: str) -> shell {
-    return shell { cat "${file}"; };
+        r#"function readLog(file: str) -> __shell {
+    return __shell { cat "${file}"; };
 };"#,
     );
     let command = format!("readLog(file: \"{}\") | grep error", file.display());

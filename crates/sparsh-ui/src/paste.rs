@@ -200,12 +200,12 @@ mod tests {
 
     #[test]
     fn shell_block_stays_grouped_inside_multiline_paste() {
-        let source = "shell {\n    echo one;\n    echo two;\n}\npwd";
+        let source = "__shell {\n    echo one;\n    echo two;\n}\npwd";
 
         assert_eq!(
             multiline_submissions(source),
             vec![
-                "shell {\n    echo one;\n    echo two;\n}".to_string(),
+                "__shell {\n    echo one;\n    echo two;\n}".to_string(),
                 "pwd".to_string(),
             ]
         );
