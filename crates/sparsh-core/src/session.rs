@@ -1236,6 +1236,7 @@ impl ShellSession {
             executables,
             spar_identifiers,
             spar_functions,
+            session_source: self.spar.committed_source().to_string(),
         }
     }
 

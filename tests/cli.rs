@@ -1166,3 +1166,26 @@ fn editor_snapshot_completes_import_names_relative_to_the_session_directory() {
     let names: Vec<_> = items.iter().map(|item| item.replacement.as_str()).collect();
     assert_eq!(names, vec!["port"]);
 }
+
+#[test]
+fn editor_snapshot_completes_members_of_session_variables() {
+    let mut session = sparsh_core::ShellSession::new();
+    session
+        .submit("struct P { name: str = \"\"; port: int = 0; };")
+        .unwrap();
+    session.submit("var p: P = P();").unwrap();
+    let snapshot = session.completion_snapshot();
+    let complete = |line: &str| -> Vec<String> {
+        sparsh_core::complete(
+            &snapshot,
+            sparsh_core::CompletionRequest { line, cursor: line.len() },
+        )
+        .into_iter()
+        .map(|item| item.replacement)
+        .collect()
+    };
+    let all = complete("p.");
+    assert!(all.contains(&"name".to_string()) && all.contains(&"port".to_string()), "{all:?}");
+    assert_eq!(complete("p.na"), vec!["name"]);
+    assert!(!complete("echo p.").contains(&"name".to_string()));
+}

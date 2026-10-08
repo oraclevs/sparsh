@@ -30,6 +30,7 @@ pub enum ItemKind {
     Method,
     Struct,
     Enum,
+    EnumMember,
     Type,
     Keyword,
     Parameter,
@@ -47,6 +48,8 @@ pub enum CompletionContext {
     NoPaths,
     SparIdentifier,
     Import,
+    /// After `receiver.` in Spar code.
+    Member,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +68,8 @@ pub struct CompletionSnapshot {
     pub(crate) executables: BTreeSet<String>,
     pub(crate) spar_identifiers: BTreeSet<String>,
     pub(crate) spar_functions: BTreeMap<String, Vec<String>>,
+    /// Everything the Spar session has committed so far, as source text.
+    pub(crate) session_source: String,
 }
 
 impl CompletionSnapshot {
@@ -81,6 +86,7 @@ impl CompletionSnapshot {
             executables: BTreeSet::from(["git".into(), "grep".into()]),
             spar_identifiers: BTreeSet::from(["build".into(), "project".into()]),
             spar_functions: BTreeMap::from([("build".into(), vec!["profile".into()])]),
+            session_source: String::new(),
         }
     }
 }
@@ -99,7 +105,8 @@ pub fn complete(
     if let Some(items) = complete_function_parameters(snapshot, request.line, cursor) {
         return items;
     }
-    let (context, span) = classify(request.line, cursor);
+    let (context, span) = member_context(snapshot, request.line, cursor)
+        .unwrap_or_else(|| classify(request.line, cursor));
     let token = &request.line[span.clone()];
     let mut items = match context {
         CompletionContext::Command => {
@@ -127,6 +134,7 @@ pub fn complete(
         }
         CompletionContext::SparIdentifier => complete_spar_identifiers(snapshot, token, span),
         CompletionContext::Import => complete_imports(snapshot, token, span),
+        CompletionContext::Member => complete_members_at(snapshot, request.line, cursor, span),
         CompletionContext::Argument => {
             if statement_argument_kind(request.line, cursor) == Some(ArgumentKind::Nothing) {
                 Vec::new()
@@ -149,6 +157,91 @@ pub fn complete(
     });
     items.dedup_by(|left, right| left.replacement == right.replacement);
     items
+}
+
+/// `Some((Member, span))` when the cursor follows `<identifier chain>.` (plus
+/// an optional partial member name) in Spar code: a statement `repl_split`
+/// calls Spar, or the inside of a `${ }` interpolation.
+fn member_context(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+) -> Option<(CompletionContext, Range<usize>)> {
+    let prefix = &line[..cursor];
+    let start = prefix
+        .rfind(|ch: char| !(ch == '_' || ch.is_alphanumeric()))
+        .map_or(0, |index| index + prefix[index..].chars().next().map_or(1, char::len_utf8));
+    let before = prefix[..start].strip_suffix('.')?;
+    // The receiver is a name, or ends in `]` (an index step).
+    let last = before.chars().next_back()?;
+    if !(last == '_' || last == ']' || last.is_alphanumeric()) {
+        return None;
+    }
+    if before.ends_with('.') {
+        return None;
+    }
+    if !spar_member_statement(snapshot, prefix) {
+        return None;
+    }
+    Some((CompletionContext::Member, start..cursor))
+}
+
+/// Whether the statement being typed is Spar (or the cursor is in `${ }`).
+fn spar_member_statement(snapshot: &CompletionSnapshot, prefix: &str) -> bool {
+    if let Some(open) = prefix.rfind("${") {
+        if !prefix[open..].contains('}') {
+            return true;
+        }
+    }
+    let names: std::collections::HashSet<String> = snapshot
+        .spar_identifiers
+        .iter()
+        .cloned()
+        .chain(snapshot.spar_functions.keys().cloned())
+        .collect();
+    spar::repl_split::split_statements(prefix, &names)
+        .last()
+        .is_some_and(|statement| statement.kind == spar::repl_split::ReplKind::Spar)
+}
+
+fn complete_members_at(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+    span: Range<usize>,
+) -> Vec<CompletionItem> {
+    use spar::intel::IntelKind;
+    let source = format!("{}\n{line}", snapshot.session_source);
+    let offset = snapshot.session_source.len() + 1 + cursor;
+    let request = spar::intel::IntelRequest {
+        source: &source,
+        offset,
+        base_dir: &snapshot.cwd,
+    };
+    spar::intel::complete_members(&request)
+        .into_iter()
+        .map(|item| CompletionItem {
+            replacement: if item.insert_text.is_empty() {
+                item.label.clone()
+            } else {
+                item.insert_text.clone()
+            },
+            span: span.clone(),
+            description: item.detail,
+            kind: Some(match item.kind {
+                IntelKind::Function => ItemKind::Function,
+                IntelKind::Method => ItemKind::Method,
+                IntelKind::Variable => ItemKind::Variable,
+                IntelKind::Field => ItemKind::Field,
+                IntelKind::Struct => ItemKind::Struct,
+                IntelKind::Enum => ItemKind::Enum,
+                IntelKind::EnumMember => ItemKind::EnumMember,
+                IntelKind::Type | IntelKind::Module => ItemKind::Type,
+                IntelKind::Keyword => ItemKind::Keyword,
+                IntelKind::Parameter => ItemKind::Parameter,
+            }),
+        })
+        .collect()
 }
 
 pub fn classify(line: &str, cursor: usize) -> (CompletionContext, Range<usize>) {
@@ -1628,5 +1721,105 @@ mod tests {
         let line = "import pkg { wr } from \"std/fs\";";
         let names = pkg_names(line, "import pkg { wr".len(), dir.path());
         assert!(names.contains(&"writeText".to_string()), "{names:?}");
+    }
+
+    // ── Member completion ──────────────────────────────────────────────────
+
+    const SESSION: &str = "struct P { name: str = \"\"; port: int = 0; };\nvar p: P = P();";
+
+    fn member_snapshot(session: &str) -> CompletionSnapshot {
+        let mut snapshot = CompletionSnapshot::default();
+        snapshot.cwd = std::env::temp_dir();
+        snapshot.session_source = session.to_string();
+        snapshot.spar_identifiers = BTreeSet::from(["P".into(), "p".into(), "s".into(), "q".into()]);
+        snapshot
+    }
+
+    fn member_items(session: &str, line: &str) -> Vec<CompletionItem> {
+        complete(
+            &member_snapshot(session),
+            CompletionRequest { line, cursor: line.len() },
+        )
+    }
+
+    fn member_names(session: &str, line: &str) -> Vec<String> {
+        member_items(session, line)
+            .into_iter()
+            .map(|item| item.replacement)
+            .collect()
+    }
+
+    #[test]
+    fn dot_after_a_spar_variable_offers_its_fields() {
+        let names = member_names(SESSION, "p.");
+        assert!(names.contains(&"name".to_string()), "{names:?}");
+        assert!(names.contains(&"port".to_string()), "{names:?}");
+        let item = member_items(SESSION, "p.")
+            .into_iter()
+            .find(|item| item.replacement == "port")
+            .unwrap();
+        assert_eq!(item.kind, Some(ItemKind::Field));
+        assert_eq!(item.description.as_deref(), Some("int"));
+        assert_eq!(item.span, 2..2);
+    }
+
+    #[test]
+    fn partial_member_name_filters_and_spans_the_partial() {
+        let items = member_items(SESSION, "p.na");
+        assert_eq!(
+            items.iter().map(|i| i.replacement.as_str()).collect::<Vec<_>>(),
+            vec!["name"]
+        );
+        assert_eq!(items[0].span, 2..4);
+    }
+
+    #[test]
+    fn methods_are_labelled_as_methods() {
+        let items = member_items("var s: str = \"x\";", "s.len");
+        let method = items.iter().find(|item| item.replacement == "length").unwrap();
+        assert_eq!(method.kind, Some(ItemKind::Method));
+    }
+
+    #[test]
+    fn members_work_inside_larger_spar_statements_and_interpolation() {
+        assert!(member_names(SESSION, "var n = p.").contains(&"name".to_string()));
+        assert!(member_names(SESSION, "if p.").contains(&"port".to_string()));
+        let line = "echo ${p.";
+        assert!(member_names(SESSION, line).contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn dot_on_a_command_line_offers_no_members() {
+        let names = member_names(SESSION, "echo p.");
+        assert!(!names.contains(&"name".to_string()) && !names.contains(&"port".to_string()), "{names:?}");
+        assert!(member_names(SESSION, "ls -l p.").iter().all(|n| n != "name"));
+    }
+
+    #[test]
+    fn multi_line_session_source_keeps_offsets_aligned() {
+        let session = format!(
+            "// header \u{e9}\nfn helper() -> int {{\n    return 1;\n}};\n\n{SESSION}\nvar q: int = 2;"
+        );
+        let names = member_names(&session, "p.po");
+        assert_eq!(names, vec!["port"]);
+        let line = "var r = p.";
+        assert!(member_names(&session, line).contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn empty_session_and_unknown_receivers_are_empty() {
+        assert!(member_names("", "p.").is_empty());
+        assert!(member_names(SESSION, "nothing.").is_empty());
+    }
+
+    #[test]
+    fn cursor_in_the_middle_of_a_multibyte_line_does_not_panic() {
+        let line = "var \u{e9} = p.na";
+        for cursor in 0..=line.len() {
+            let _ = complete(
+                &member_snapshot(SESSION),
+                CompletionRequest { line, cursor },
+            );
+        }
     }
 }
