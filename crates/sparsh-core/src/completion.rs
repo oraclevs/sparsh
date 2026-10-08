@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::command_args::{argument_kind, is_known_command, positional_index, ArgumentKind};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionRequest<'a> {
     pub line: &'a str,
@@ -21,6 +23,7 @@ pub enum CompletionContext {
     Argument,
     Path,
     Directory,
+    File,
     SparIdentifier,
     Import,
 }
@@ -29,6 +32,7 @@ pub enum CompletionContext {
 enum PathCompletionMode {
     FilesAndDirectories,
     DirectoriesOnly,
+    FilesOnly,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -93,14 +97,23 @@ pub fn complete(
         CompletionContext::Directory => {
             complete_paths(snapshot, token, span, PathCompletionMode::DirectoriesOnly)
         }
+        CompletionContext::File => {
+            complete_paths(snapshot, token, span, PathCompletionMode::FilesOnly)
+        }
         CompletionContext::SparIdentifier => complete_spar_identifiers(snapshot, token, span),
         CompletionContext::Import => complete_imports(snapshot, token, span),
-        CompletionContext::Argument => complete_paths(
-            snapshot,
-            token,
-            span,
-            PathCompletionMode::FilesAndDirectories,
-        ),
+        CompletionContext::Argument => {
+            if statement_argument_kind(request.line, cursor) == Some(ArgumentKind::Nothing) {
+                Vec::new()
+            } else {
+                complete_paths(
+                    snapshot,
+                    token,
+                    span,
+                    PathCompletionMode::FilesAndDirectories,
+                )
+            }
+        }
     };
     items.sort_by(|left, right| {
         let left_exact = left.replacement == token;
@@ -119,37 +132,130 @@ pub fn classify(line: &str, cursor: usize) -> (CompletionContext, Range<usize>) 
     let start = active_token_start(prefix);
     let span = start..cursor;
     let token = &line[span.clone()];
-    let before = line[..start].trim_end();
     let trimmed = prefix.trim_start();
 
     if trimmed.starts_with("import ") || trimmed.starts_with("import pkg ") {
         return (CompletionContext::Import, span);
     }
-    if looks_like_spar(trimmed) {
+    let statement = statement_before(line, start);
+    let statement_is_command = statement
+        .split_whitespace()
+        .next()
+        .is_some_and(is_known_command);
+    // A Spar line such as `if x { cat ` ends in a shell statement once the
+    // block opens; only an explicitly known command takes it back.
+    let spar_line = looks_like_spar(trimmed)
+        && !(statement.len() != trimmed.len() - token.len() && statement_is_command);
+    if spar_line {
         return (CompletionContext::SparIdentifier, span);
     }
 
-    let segment_start = before
-        .char_indices()
-        .rev()
-        .find_map(|(index, ch)| matches!(ch, '|' | '&' | ';').then_some(index + ch.len_utf8()))
-        .unwrap_or(0);
-    let segment_before = before[segment_start..].trim_start();
-    let first_word = segment_before.split_whitespace().next().unwrap_or("");
-    let command_position = segment_before.is_empty();
+    let command_position = statement.trim().is_empty();
     if command_position {
         if path_like(token) {
             (CompletionContext::Path, span)
         } else {
             (CompletionContext::Command, span)
         }
-    } else if first_word == "cd" {
-        (CompletionContext::Directory, span)
     } else if path_like(token) {
         (CompletionContext::Path, span)
     } else {
-        (CompletionContext::Argument, span)
+        match statement_kind(statement) {
+            Some(ArgumentKind::Directories) => (CompletionContext::Directory, span),
+            Some(ArgumentKind::Files) => (CompletionContext::File, span),
+            _ => (CompletionContext::Argument, span),
+        }
     }
+}
+
+/// Kind of argument being typed at the end of `line[..cursor]`, if a command is present.
+fn statement_argument_kind(line: &str, cursor: usize) -> Option<ArgumentKind> {
+    let start = active_token_start(&line[..cursor]);
+    let statement = statement_before(line, start);
+    if statement.trim().is_empty() {
+        return None;
+    }
+    statement_kind(statement)
+}
+
+/// `statement` is the text of the current statement before the active token.
+fn statement_kind(statement: &str) -> Option<ArgumentKind> {
+    let words = split_words(statement);
+    let (command, args) = words.split_first()?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Some(argument_kind(command, positional_index(&args)))
+}
+
+/// Text of the current statement that precedes byte offset `end`: starts after the
+/// last unquoted `;`, `|`, `&`, `{` or `}` and drops a leading `~ ` shell marker.
+fn statement_before(line: &str, end: usize) -> &str {
+    let prefix = &line[..end];
+    let mut start = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in prefix.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(active) => {
+                if active == '"' && ch == '\\' {
+                    escaped = true;
+                } else if ch == active {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => escaped = true,
+                ';' | '|' | '&' | '{' | '}' => start = index + ch.len_utf8(),
+                _ => {}
+            },
+        }
+    }
+    let statement = prefix[start..].trim_start();
+    match statement.strip_prefix('~') {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+        _ => statement,
+    }
+}
+
+/// Whitespace split that keeps quoted spans together (quotes stripped).
+fn split_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote = None;
+    for ch in text.chars() {
+        match quote {
+            Some(active) => {
+                if ch == active {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            None if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
 }
 
 fn active_token_start(prefix: &str) -> usize {
@@ -461,6 +567,9 @@ fn complete_paths(
         // completion needs: a symlink to a directory is still a valid target.
         let is_dir = entry.path().is_dir();
         if mode == PathCompletionMode::DirectoriesOnly && !is_dir {
+            continue;
+        }
+        if mode == PathCompletionMode::FilesOnly && is_dir {
             continue;
         }
         let mut replacement = format!("{display_dir}{name}");
@@ -797,5 +906,108 @@ mod tests {
         );
 
         assert!(items.iter().any(|item| item.replacement == "Projects/"));
+    }
+
+    fn complete_in_fixture_dir(line: &str) -> Vec<CompletionItem> {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("a.txt"), "x").unwrap();
+        std::fs::write(temp.path().join("b.rs"), "x").unwrap();
+        std::fs::create_dir(temp.path().join("dir1")).unwrap();
+        symlink(temp.path().join("dir1"), temp.path().join("link_dir")).unwrap();
+        symlink(temp.path().join("a.txt"), temp.path().join("link_file")).unwrap();
+        let snapshot = CompletionSnapshot {
+            cwd: temp.path().to_path_buf(),
+            home: None,
+            ..CompletionSnapshot::default()
+        };
+        complete(
+            &snapshot,
+            CompletionRequest {
+                line,
+                cursor: line.len(),
+            },
+        )
+    }
+
+    #[test]
+    fn cat_offers_files_only() {
+        let items = complete_in_fixture_dir("cat ");
+        let names: Vec<_> = items.iter().map(|i| i.replacement.as_str()).collect();
+        assert!(names.contains(&"a.txt") && names.contains(&"link_file"));
+        assert!(!names
+            .iter()
+            .any(|n| n.starts_with("dir1") || n.starts_with("link_dir")));
+    }
+
+    #[test]
+    fn cd_offers_directories_only() {
+        let items = complete_in_fixture_dir("cd ");
+        let names: Vec<_> = items.iter().map(|i| i.replacement.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("dir1"))
+                && names.iter().any(|n| n.starts_with("link_dir"))
+        );
+        assert!(!names.contains(&"a.txt"));
+    }
+
+    #[test]
+    fn context_restarts_after_separators_and_marker() {
+        for line in [
+            "echo x; cat ",
+            "true && cat ",
+            "ls | cat ",
+            "~ cat ",
+            "if true { cat ",
+            "{ cat ",
+            "} ; cat ",
+        ] {
+            let names: Vec<_> = complete_in_fixture_dir(line)
+                .into_iter()
+                .map(|i| i.replacement)
+                .collect();
+            assert!(names.contains(&"a.txt".to_string()), "{line}");
+            assert!(!names.iter().any(|n| n.starts_with("dir1")), "{line}");
+        }
+    }
+
+    #[test]
+    fn options_are_skipped_when_finding_the_argument() {
+        let names: Vec<_> = complete_in_fixture_dir("cat -n ")
+            .into_iter()
+            .map(|i| i.replacement)
+            .collect();
+        assert!(
+            names.contains(&"a.txt".to_string()) && !names.iter().any(|n| n.starts_with("dir1"))
+        );
+    }
+
+    #[test]
+    fn quoted_and_home_arguments_keep_working() {
+        let names: Vec<_> = complete_in_fixture_dir("cat \"a")
+            .into_iter()
+            .map(|i| i.replacement)
+            .collect();
+        assert!(names.iter().any(|n| n.contains("a.txt")));
+        let names: Vec<_> = complete_in_fixture_dir("cd \"di")
+            .into_iter()
+            .map(|i| i.replacement)
+            .collect();
+        assert!(names.iter().any(|n| n.contains("dir1")));
+    }
+
+    #[test]
+    fn echo_offers_no_paths() {
+        assert!(complete_in_fixture_dir("echo ").is_empty());
+    }
+
+    #[test]
+    fn quoted_separators_do_not_restart_the_statement() {
+        let names: Vec<_> = complete_in_fixture_dir("cat \"x;y\" ")
+            .into_iter()
+            .map(|i| i.replacement)
+            .collect();
+        assert!(names.contains(&"a.txt".to_string()));
+        assert!(!names.iter().any(|n| n.starts_with("dir1")));
     }
 }

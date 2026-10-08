@@ -1,5 +1,6 @@
 mod alias;
 pub mod builtin;
+mod command_args;
 mod completion;
 mod config;
 mod config_home;
