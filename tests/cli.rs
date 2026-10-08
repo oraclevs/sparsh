@@ -1189,3 +1189,23 @@ fn editor_snapshot_completes_members_of_session_variables() {
     assert_eq!(complete("p.na"), vec!["name"]);
     assert!(!complete("echo p.").contains(&"name".to_string()));
 }
+
+#[test]
+fn editor_snapshot_completes_scope_names_in_spar_positions_only() {
+    let mut session = sparsh_core::ShellSession::new();
+    session.submit("var count: int = 1;").unwrap();
+    let snapshot = session.completion_snapshot();
+    let complete = |line: &str| -> Vec<String> {
+        sparsh_core::complete(
+            &snapshot,
+            sparsh_core::CompletionRequest { line, cursor: line.len() },
+        )
+        .into_iter()
+        .map(|item| item.replacement)
+        .collect()
+    };
+    assert!(complete("var x = co").contains(&"count".to_string()));
+    assert!(complete("echo ${co").contains(&"count".to_string()));
+    assert!(complete("for i in [1, 2] { echo ${i").contains(&"i".to_string()));
+    assert!(!complete("co").contains(&"count".to_string()));
+}

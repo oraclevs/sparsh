@@ -106,6 +106,7 @@ pub fn complete(
         return items;
     }
     let (context, span) = member_context(snapshot, request.line, cursor)
+        .or_else(|| interpolation_context(request.line, cursor))
         .unwrap_or_else(|| classify(request.line, cursor));
     let token = &request.line[span.clone()];
     let mut items = match context {
@@ -132,7 +133,9 @@ pub fn complete(
         CompletionContext::File => {
             complete_paths(snapshot, token, span, PathCompletionMode::FilesOnly)
         }
-        CompletionContext::SparIdentifier => complete_spar_identifiers(snapshot, token, span),
+        CompletionContext::SparIdentifier => {
+            complete_scope_names(snapshot, request.line, cursor, token, span)
+        }
         CompletionContext::Import => complete_imports(snapshot, token, span),
         CompletionContext::Member => complete_members_at(snapshot, request.line, cursor, span),
         CompletionContext::Argument => {
@@ -187,6 +190,20 @@ fn member_context(
     Some((CompletionContext::Member, start..cursor))
 }
 
+/// Inside an open `${ }` of a command line the word at the cursor is a Spar
+/// name, whatever the surrounding command is.
+fn interpolation_context(line: &str, cursor: usize) -> Option<(CompletionContext, Range<usize>)> {
+    let prefix = &line[..cursor];
+    let open = prefix.rfind("${")?;
+    if prefix[open..].contains('}') {
+        return None;
+    }
+    let start = prefix
+        .rfind(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .map_or(0, |index| index + prefix[index..].chars().next().map_or(1, char::len_utf8));
+    Some((CompletionContext::SparIdentifier, start..cursor))
+}
+
 /// Whether the statement being typed is Spar (or the cursor is in `${ }`).
 fn spar_member_statement(snapshot: &CompletionSnapshot, prefix: &str) -> bool {
     if let Some(open) = prefix.rfind("${") {
@@ -205,13 +222,28 @@ fn spar_member_statement(snapshot: &CompletionSnapshot, prefix: &str) -> bool {
         .is_some_and(|statement| statement.kind == spar::repl_split::ReplKind::Spar)
 }
 
+fn item_kind(kind: spar::intel::IntelKind) -> ItemKind {
+    use spar::intel::IntelKind;
+    match kind {
+        IntelKind::Function => ItemKind::Function,
+        IntelKind::Method => ItemKind::Method,
+        IntelKind::Variable => ItemKind::Variable,
+        IntelKind::Field => ItemKind::Field,
+        IntelKind::Struct => ItemKind::Struct,
+        IntelKind::Enum => ItemKind::Enum,
+        IntelKind::EnumMember => ItemKind::EnumMember,
+        IntelKind::Type | IntelKind::Module => ItemKind::Type,
+        IntelKind::Keyword => ItemKind::Keyword,
+        IntelKind::Parameter => ItemKind::Parameter,
+    }
+}
+
 fn complete_members_at(
     snapshot: &CompletionSnapshot,
     line: &str,
     cursor: usize,
     span: Range<usize>,
 ) -> Vec<CompletionItem> {
-    use spar::intel::IntelKind;
     let Some(analysis) = session_analysis(&snapshot.session_source, &snapshot.cwd) else {
         return Vec::new();
     };
@@ -227,18 +259,7 @@ fn complete_members_at(
             },
             span: span.clone(),
             description: item.detail,
-            kind: Some(match item.kind {
-                IntelKind::Function => ItemKind::Function,
-                IntelKind::Method => ItemKind::Method,
-                IntelKind::Variable => ItemKind::Variable,
-                IntelKind::Field => ItemKind::Field,
-                IntelKind::Struct => ItemKind::Struct,
-                IntelKind::Enum => ItemKind::Enum,
-                IntelKind::EnumMember => ItemKind::EnumMember,
-                IntelKind::Type | IntelKind::Module => ItemKind::Type,
-                IntelKind::Keyword => ItemKind::Keyword,
-                IntelKind::Parameter => ItemKind::Parameter,
-            }),
+            kind: Some(item_kind(item.kind)),
         })
         .collect()
 }
@@ -755,6 +776,43 @@ fn complete_spar_identifiers(
             kind: None,
         })
         .collect()
+}
+
+/// Names visible at the cursor (from the cached session analysis) merged with
+/// the snapshot identifiers; the scope items win on a shared label.
+fn complete_scope_names(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+    prefix: &str,
+    span: Range<usize>,
+) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = Vec::new();
+    if let Some(analysis) = session_analysis(&snapshot.session_source, &snapshot.cwd) {
+        let source = format!("{}\n{line}", snapshot.session_source);
+        let offset = snapshot.session_source.len() + 1 + cursor;
+        items = spar::intel::complete_scope_with(&analysis, &source, offset)
+            .into_iter()
+            .map(|item| CompletionItem {
+                replacement: if item.insert_text.is_empty() {
+                    item.label.clone()
+                } else {
+                    item.insert_text.clone()
+                },
+                span: span.clone(),
+                description: item.detail,
+                kind: Some(item_kind(item.kind)),
+            })
+            .collect();
+    }
+    let known: std::collections::HashSet<String> =
+        items.iter().map(|item| item.replacement.clone()).collect();
+    items.extend(
+        complete_spar_identifiers(snapshot, prefix, span)
+            .into_iter()
+            .filter(|item| !known.contains(&item.replacement)),
+    );
+    items
 }
 
 /// Cached unfiltered export lists keyed by what the answer depends on.
@@ -1772,6 +1830,67 @@ mod tests {
         let line = "import pkg { wr } from \"std/fs\";";
         let names = pkg_names(line, "import pkg { wr".len(), dir.path());
         assert!(names.contains(&"writeText".to_string()), "{names:?}");
+    }
+
+    // ── Scope completion ───────────────────────────────────────────────────
+
+    const SCOPE_SESSION: &str = "var count: int = 1;";
+
+    fn scope_names(session: &str, line: &str) -> Vec<String> {
+        member_items(session, line).into_iter().map(|i| i.replacement).collect()
+    }
+
+    #[test]
+    fn a_session_variable_is_offered_after_var_x_eq() {
+        let items = member_items(SCOPE_SESSION, "var x = co");
+        let count = items.iter().find(|i| i.replacement == "count").expect("count");
+        assert_eq!(count.kind, Some(ItemKind::Variable));
+        assert_eq!(count.description.as_deref(), Some("int"));
+        assert_eq!(count.span, 8..10);
+    }
+
+    #[test]
+    fn scope_items_are_not_offered_in_command_position() {
+        let names = scope_names(SCOPE_SESSION, "co");
+        assert!(!names.contains(&"count".to_string()), "{names:?}");
+        assert!(!names.contains(&"continue".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn scope_items_win_over_snapshot_identifiers_without_duplicates() {
+        let mut snapshot = member_snapshot(SCOPE_SESSION);
+        snapshot.spar_identifiers.insert("count".into());
+        let items = complete(&snapshot, CompletionRequest { line: "var x = co", cursor: 12 });
+        let hits: Vec<_> = items.iter().filter(|i| i.replacement == "count").collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, Some(ItemKind::Variable));
+    }
+
+    #[test]
+    fn snapshot_identifiers_still_appear_when_the_session_does_not_know_them() {
+        let names = scope_names(SCOPE_SESSION, "var x = q");
+        assert!(names.contains(&"q".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn loop_variable_is_offered_inside_a_block_interpolation() {
+        let names = scope_names("", "for i in [1, 2] { echo ${i");
+        assert!(names.contains(&"i".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn session_names_are_offered_inside_command_interpolation() {
+        let names = scope_names(SCOPE_SESSION, "echo ${co");
+        assert!(names.contains(&"count".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn scope_completion_reuses_the_cached_analysis() {
+        let snapshot = member_snapshot("var cached_scope_probe: int = 1;");
+        let before = analyses();
+        complete(&snapshot, CompletionRequest { line: "var x = ca", cursor: 11 });
+        complete(&snapshot, CompletionRequest { line: "var y = ca", cursor: 11 });
+        assert_eq!(analyses() - before, 1);
     }
 
     // ── Member completion ──────────────────────────────────────────────────
