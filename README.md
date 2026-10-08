@@ -555,6 +555,33 @@ works in ordinary command arguments (`ls Pro<Tab>`), `cd`, after pipelines, and
 for `~/...` paths. Quoted/spaced directory completion remains open so deeper
 components can continue completing.
 
+### Completion
+
+Completion depends on the command and on the Spar code around the cursor.
+
+- Argument kinds are per command. `cat`, `less` and `head` offer files only.
+  `cd`, `pushd` and `rmdir` offer directories only. `cp`, `mv`, `rm`, `ls` and
+  unknown commands offer both. `echo`, `printf`, `kill`, `which` and `type`
+  offer nothing. Options like `-n` are skipped. The context restarts after
+  `;`, `&&`, `|`, `~ ` and `{`. `VAR=val cmd` and `/bin/cat` work, and
+  redirections offer files and directories.
+- `import { | } from "file.spar"` and `import pkg { | } from "std/fs"` list the
+  exported names of the target. Private and already-listed names are left out.
+  Results are cached, and a lookup that takes over 500 ms gives an empty list.
+- After `value.` you get the struct fields and methods of the value.
+- In Spar code you get the names in scope: locals, parameters, loop variables,
+  functions, constructors and keywords.
+- While the cursor is inside a call, the signature is shown after the buffer,
+  with the active parameter in bold (`build(profile: str, release: bool =
+  false)`). Tab inside the call offers named parameters with types and
+  defaults.
+- The menu shows a short kind tag and the detail, colored by kind.
+
+Limits: the command table is built in and has no user overrides. `sudo cat`
+and `command cat` use the default kind. Only `.` triggers member completion,
+not `::`. Signature and member lookups use the declarations already committed
+in the session. The menu colors have not been checked in a live terminal yet.
+
 Use `hash -r` after installing a new executable into an already scanned PATH
 directory.
 
