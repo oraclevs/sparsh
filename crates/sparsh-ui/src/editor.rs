@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs,
+    default_emacs_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs, InputMode,
     FileBackedHistory, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle,
     OutputMode, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
 };
@@ -199,6 +199,8 @@ fn completion_menu() -> ColumnarMenu {
     let styles = completion_menu_text_style();
     ColumnarMenu::default()
         .with_name("completion_menu")
+        // The completer needs the text after the cursor too (`import { | } from "x"`).
+        .with_input_mode(InputMode::FullBuffer)
         .with_text_style(styles.text_style)
         .with_selected_text_style(styles.selected_text_style)
         .with_description_text_style(styles.description_style)
