@@ -1129,3 +1129,17 @@ fn an_open_quote_in_a_command_says_unterminated_quote() {
     assert!(stderr.contains("unterminated quote"), "{stderr}");
     assert!(!stderr.contains("shell block"), "{stderr}");
 }
+
+#[test]
+fn a_struct_with_an_empty_option_field_keeps_later_submissions_working() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_piped_in(
+        directory.path(),
+        "struct S { o: Option<int> = none<int>(); c: int = 1; };\nvar mut s: S = S();\necho a\ns.c = 5\necho b\ns.c\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("a\n") && stdout.contains("b\n"), "{stdout}");
+    assert!(stdout.trim_end().ends_with('5'), "{stdout}");
+}
