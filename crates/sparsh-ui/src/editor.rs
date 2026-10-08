@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs, InputMode,
+    default_emacs_keybindings, EditCommand, EditMode, Emacs,
     FileBackedHistory, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle,
     OutputMode, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
 };
@@ -17,6 +17,7 @@ use sparsh_core::{
     ShellSession, ShellUiSnapshot,
 };
 
+use crate::bordered_menu::BorderedMenu;
 use crate::history::{SharedHistory, SparshHistory};
 use crate::{
     active_python_environment, detect_projects, is_multiline_paste_candidate,
@@ -100,6 +101,11 @@ fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
         ReedlineEvent::OpenEditor,
     );
     keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, completion_event());
+    keybindings.add_binding(
+        KeyModifiers::SHIFT,
+        KeyCode::BackTab,
+        ReedlineEvent::MenuPrevious,
+    );
     keybindings.add_binding(KeyModifiers::ALT, KeyCode::Char('v'), pager_event());
     keybindings.add_binding(
         KeyModifiers::ALT | KeyModifiers::SHIFT,
@@ -195,17 +201,12 @@ fn completion_menu_text_style() -> MenuTextStyle {
     }
 }
 
-fn completion_menu() -> ColumnarMenu {
-    let styles = completion_menu_text_style();
-    ColumnarMenu::default()
-        .with_name("completion_menu")
-        // The completer needs the text after the cursor too (`import { | } from "x"`).
-        .with_input_mode(InputMode::FullBuffer)
-        .with_text_style(styles.text_style)
-        .with_selected_text_style(styles.selected_text_style)
-        .with_description_text_style(styles.description_style)
-        .with_match_text_style(styles.match_style)
-        .with_selected_match_text_style(styles.selected_match_style)
+fn completion_menu(theme: &Theme) -> BorderedMenu {
+    BorderedMenu::new(
+        "completion_menu",
+        &crate::prompt::prompt_indicator(theme),
+        completion_menu_text_style(),
+    )
 }
 
 fn secure_editor_buffer(path: &std::path::Path) -> io::Result<()> {
@@ -302,7 +303,7 @@ fn build_editor(
         .with_history(Box::new(history.clone()))
         .with_history_exclusion_prefix(Some(" ".into()))
         .with_completer(Box::new(completer))
-        .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu())))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu(theme))))
         .with_menu(ReedlineMenu::HistoryMenu(Box::new(
             ListMenu::default()
                 .with_name("history_menu")
@@ -715,6 +716,15 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn shift_tab_moves_back_in_the_completion_menu() {
+        let keybindings = sparsh_emacs_keybindings(&[]);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::SHIFT, KeyCode::BackTab),
+            Some(ReedlineEvent::MenuPrevious)
         );
     }
 

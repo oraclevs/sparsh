@@ -11,18 +11,18 @@ use crate::{SemanticRole, Theme};
 pub(crate) fn kind_tag(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Command => "cmd",
-        ItemKind::Alias => "als",
-        ItemKind::Builtin => "bi",
+        ItemKind::Alias => "alias",
+        ItemKind::Builtin => "builtin",
         ItemKind::Function => "fn",
         ItemKind::Variable => "var",
-        ItemKind::Field => "fld",
-        ItemKind::Method => "mth",
-        ItemKind::Struct => "st",
-        ItemKind::Enum => "enm",
-        ItemKind::EnumMember => "mem",
-        ItemKind::Type => "ty",
+        ItemKind::Field => "field",
+        ItemKind::Method => "method",
+        ItemKind::Struct => "struct",
+        ItemKind::Enum => "enum",
+        ItemKind::EnumMember => "member",
+        ItemKind::Type => "type",
         ItemKind::Keyword => "kw",
-        ItemKind::Parameter => "prm",
+        ItemKind::Parameter => "param",
         ItemKind::File => "file",
         ItemKind::Directory => "dir",
     }
@@ -51,22 +51,37 @@ fn first_line(text: &str) -> String {
     sanitize(text.lines().next().unwrap_or("")).trim().to_string()
 }
 
+/// Details that only restate the kind (or say nothing useful) are not shown.
+fn is_generic_detail(detail: &str, tag: Option<&str>) -> bool {
+    if detail.is_empty() || tag.is_some_and(|tag| detail.eq_ignore_ascii_case(tag)) {
+        return true;
+    }
+    const GENERIC: &[&str] = &[
+        "file",
+        "directory",
+        "alias",
+        "spar identifier",
+        "spar function",
+        "external command",
+    ];
+    GENERIC.iter().any(|g| detail.eq_ignore_ascii_case(g))
+}
+
 /// The reedline suggestion for an item. `value` stays the replacement text;
-/// the description carries `tag  detail` (the menu shows it after the value
-/// and again, in full, for the selected item) and the style carries the kind
-/// color.
+/// the description carries only the detail (signature, doc line), `extra`
+/// carries the kind word for the popup's right-hand column, and the style
+/// carries the kind color.
 pub(crate) fn suggestion(item: &CompletionItem, theme: &Theme) -> Suggestion {
-    let detail = item.description.as_deref().map(first_line);
     let tag = item.kind.map(kind_tag);
-    let description = match (tag, detail.as_deref()) {
-        (Some(tag), Some(detail)) if !detail.is_empty() => Some(format!("{tag}  {detail}")),
-        (Some(tag), _) => Some(tag.to_string()),
-        (None, Some(detail)) if !detail.is_empty() => Some(detail.to_string()),
-        _ => None,
-    };
+    let description = item
+        .description
+        .as_deref()
+        .map(first_line)
+        .filter(|detail| !is_generic_detail(detail, tag));
     Suggestion {
         value: item.replacement.clone(),
         description,
+        extra: tag.map(|tag| vec![tag.to_string()]),
         style: item
             .kind
             .filter(|_| theme.enabled())
@@ -96,27 +111,28 @@ mod tests {
     fn each_kind_family_has_its_tag_and_role() {
         let cases = [
             (ItemKind::Function, "fn", SemanticRole::CompletionFunction),
-            (ItemKind::Method, "mth", SemanticRole::CompletionFunction),
+            (ItemKind::Method, "method", SemanticRole::CompletionFunction),
             (ItemKind::Variable, "var", SemanticRole::CompletionVariable),
-            (ItemKind::Field, "fld", SemanticRole::CompletionVariable),
-            (ItemKind::Parameter, "prm", SemanticRole::CompletionVariable),
-            (ItemKind::Struct, "st", SemanticRole::CompletionType),
-            (ItemKind::Enum, "enm", SemanticRole::CompletionType),
-            (ItemKind::EnumMember, "mem", SemanticRole::CompletionType),
-            (ItemKind::Type, "ty", SemanticRole::CompletionType),
+            (ItemKind::Field, "field", SemanticRole::CompletionVariable),
+            (ItemKind::Parameter, "param", SemanticRole::CompletionVariable),
+            (ItemKind::Struct, "struct", SemanticRole::CompletionType),
+            (ItemKind::Enum, "enum", SemanticRole::CompletionType),
+            (ItemKind::EnumMember, "member", SemanticRole::CompletionType),
+            (ItemKind::Type, "type", SemanticRole::CompletionType),
             (ItemKind::Keyword, "kw", SemanticRole::CompletionKeyword),
             (ItemKind::File, "file", SemanticRole::CompletionPath),
             (ItemKind::Directory, "dir", SemanticRole::CompletionDirectory),
             (ItemKind::Command, "cmd", SemanticRole::CompletionCommand),
-            (ItemKind::Alias, "als", SemanticRole::Alias),
-            (ItemKind::Builtin, "bi", SemanticRole::Builtin),
+            (ItemKind::Alias, "alias", SemanticRole::Alias),
+            (ItemKind::Builtin, "builtin", SemanticRole::Builtin),
         ];
         let theme = Theme::colored();
         for (kind, tag, role) in cases {
             assert_eq!(kind_tag(kind), tag, "{kind:?}");
             assert_eq!(kind_role(kind), role, "{kind:?}");
             let s = suggestion(&item(Some(kind), "name", Some("detail")), &theme);
-            assert_eq!(s.description, Some(format!("{tag}  detail")), "{kind:?}");
+            assert_eq!(s.description.as_deref(), Some("detail"), "{kind:?}");
+            assert_eq!(s.extra, Some(vec![tag.to_string()]), "{kind:?}");
             assert_eq!(s.style, Some(theme.style(role)), "{kind:?}");
         }
     }
@@ -127,7 +143,7 @@ mod tests {
             &item(Some(ItemKind::Function), "f", Some("first\nsecond")),
             &Theme::plain(),
         );
-        assert_eq!(s.description.as_deref(), Some("fn  first"));
+        assert_eq!(s.description.as_deref(), Some("first"));
     }
 
     #[test]
@@ -154,13 +170,33 @@ mod tests {
         let s = suggestion(&it, &Theme::colored());
         assert_eq!(s.value, "greet(");
         assert_eq!((s.span.start, s.span.end), (2, 5));
-        assert_eq!(s.description.as_deref(), Some("fn  (name: str) -> str"));
+        assert_eq!(s.description.as_deref(), Some("(name: str) -> str"));
                 assert_eq!(s.style, Some(Theme::colored().style(SemanticRole::CompletionFunction)));
         let plain = suggestion(&it, &Theme::plain());
         assert_eq!(plain.style, None);
         let none = suggestion(&item(None, "x", None), &Theme::colored());
         assert_eq!((none.description, none.style), (None, None));
         let tag_only = suggestion(&item(Some(ItemKind::Directory), "d/", None), &Theme::plain());
-        assert_eq!(tag_only.description.as_deref(), Some("dir"));
+        assert_eq!(tag_only.description, None);
+        assert_eq!(tag_only.extra, Some(vec!["dir".to_string()]));
+    }
+
+    #[test]
+    fn generic_or_repeated_details_are_dropped() {
+        let cases = [
+            (ItemKind::File, "file"),
+            (ItemKind::Directory, "directory"),
+            (ItemKind::Variable, "Spar identifier"),
+            (ItemKind::Function, "Spar function"),
+            (ItemKind::Command, "external command"),
+            (ItemKind::Alias, "alias"),
+            (ItemKind::Keyword, "kw"),
+        ];
+        for (kind, detail) in cases {
+            let s = suggestion(&item(Some(kind), "x", Some(detail)), &Theme::plain());
+            assert_eq!(s.description, None, "{kind:?} {detail}");
+        }
+        let kept = suggestion(&item(Some(ItemKind::Alias), "ll", Some("ls -la")), &Theme::plain());
+        assert_eq!(kept.description.as_deref(), Some("ls -la"));
     }
 }

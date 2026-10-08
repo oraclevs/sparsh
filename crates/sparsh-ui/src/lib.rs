@@ -5,6 +5,7 @@ use sparsh_core::{render_value, CommandDiagnostic, ShellResult, ShellSession};
 mod command_editor;
 mod completion;
 mod hint;
+mod bordered_menu;
 mod menu;
 mod data_view;
 mod diagnostic;

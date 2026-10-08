@@ -6,6 +6,12 @@ use reedline::{Prompt, PromptEditMode, PromptHistorySearch};
 use sparsh_core::{PromptConfig, SlotConfig, SlotSpec, TextStyle, WidgetKind};
 
 use crate::project::ProjectKind;
+
+/// The prompt's input marker, also shown by the completion popup (reedline
+/// swaps the prompt marker for the menu's while a menu is open).
+pub(crate) fn prompt_indicator(theme: &Theme) -> String {
+    theme.paint(SemanticRole::PromptMarker, "❯ ")
+}
 use crate::sampler::SystemSnapshot;
 use crate::theme::{SemanticRole, Theme};
 use crate::widgets::{render_slot, Level, LocalTime, RenderedSlot, WidgetInputs};
@@ -177,7 +183,7 @@ impl PromptState {
         SparshPrompt {
             left: first_line,
             right: String::new(),
-            indicator: theme.paint(SemanticRole::PromptMarker, "❯ "),
+            indicator: prompt_indicator(theme),
         }
     }
 
