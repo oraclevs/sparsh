@@ -966,3 +966,87 @@ fn spar_error_in_rewritten_block_points_at_typed_text() {
         "inserted marker leaked into the rendered source: {err}"
     );
 }
+
+fn run_piped_in(directory: &Path, input: &str) -> std::process::Output {
+    let mut child = sparsh()
+        .current_dir(directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn log_lines(directory: &Path) -> Vec<String> {
+    std::fs::read_to_string(directory.join("log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn an_if_block_typed_at_the_prompt_runs_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_piped_in(
+        directory.path(),
+        "if true { echo x >> log }\necho done\necho done2\n1 + 1\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(log_lines(directory.path()), vec!["x"], "{stdout}");
+}
+
+#[test]
+fn a_block_and_a_command_on_one_line_run_the_block_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = sparsh()
+        .current_dir(directory.path())
+        .args(["-c", "if true { echo x >> log }; echo done"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("done"));
+    assert_eq!(log_lines(directory.path()), vec!["x"]);
+}
+
+#[test]
+fn for_and_while_blocks_typed_at_the_prompt_run_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_piped_in(
+        directory.path(),
+        "for k in [1, 2] { echo f${k} >> log }\necho a\nvar mut i: int = 0\nwhile i < 1 { echo w >> log; i = i + 1 }\necho b\ni\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(log_lines(directory.path()), vec!["f1", "f2", "w"], "{stdout}");
+    assert!(stdout.trim_end().ends_with('1'), "{stdout}");
+}
+
+#[test]
+fn block_mutations_persist_without_replaying_the_block() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_piped_in(
+        directory.path(),
+        "var mut t: int = 0\nfor k in [1, 2] { t = t + k; echo t >> log }\nt\nt = t + 10\nt\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(log_lines(directory.path()), vec!["t", "t"], "{stdout}");
+    assert_eq!(stdout, "3\n13\n", "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn a_declaration_initializer_with_a_side_effect_runs_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_piped_in(
+        directory.path(),
+        "fn f() -> int { print(value: \"side\"); return 1; }\nvar x: int = f()\necho a\nvar y: int = 2\nx + y\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.matches("side").count(), 1, "{stdout}");
+    assert!(stdout.trim_end().ends_with('3'), "{stdout}");
+}
