@@ -1050,3 +1050,17 @@ fn a_declaration_initializer_with_a_side_effect_runs_once() {
     assert_eq!(stdout.matches("side").count(), 1, "{stdout}");
     assert!(stdout.trim_end().ends_with('3'), "{stdout}");
 }
+
+#[test]
+fn struct_string_and_map_mutations_persist_across_submissions() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_piped_in(
+        directory.path(),
+        "struct P { x: int = 1; y: int = 2; };\nvar mut p: P = P();\np.x = 9\necho a\np.x\nfor k in [1, 2] { p.x = p.x + k }\necho b\np.x\nvar mut s: str = \"a\"\ns = s + \"!\"\necho c\ns\nvar mut m: Map<str, int> = { a: 1; };\nm.insert(key: \"b\", value: 2)\necho d\nm.length()\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("9\n"), "{stdout}");
+    assert!(stdout.contains("12\n"), "{stdout}");
+    assert!(stdout.contains("a!"), "{stdout}");
+    assert!(stdout.trim_end().ends_with('2'), "{stdout}");
+}
