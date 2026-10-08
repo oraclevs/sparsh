@@ -18,6 +18,7 @@ pub struct CompletionItem {
     pub kind: Option<ItemKind>,
 }
 
+// Several variants are reserved for the menu kind/detail task and unused until then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
     Command,
@@ -612,6 +613,124 @@ fn complete_spar_identifiers(
         .collect()
 }
 
+/// Cached unfiltered export lists keyed by what the answer depends on.
+type ExportKey = (
+    bool,
+    String,
+    PathBuf,
+    bool,
+    Option<(std::time::SystemTime, u64)>,
+);
+const EXPORT_CACHE_LIMIT: usize = 16;
+
+#[derive(Default)]
+struct ExportState {
+    cache: Vec<(ExportKey, Vec<spar::intel::ExportItem>)>,
+    in_flight: bool,
+}
+
+#[cfg(not(test))]
+fn with_export_state<R>(f: impl FnOnce(&mut ExportState) -> R) -> R {
+    use std::sync::Mutex;
+    static STATE: Mutex<ExportState> = Mutex::new(ExportState {
+        cache: Vec::new(),
+        in_flight: false,
+    });
+    f(&mut STATE.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+// Tests run in parallel threads; keep their state per thread.
+#[cfg(test)]
+fn with_export_state<R>(f: impl FnOnce(&mut ExportState) -> R) -> R {
+    thread_local! {
+        static STATE: std::cell::RefCell<ExportState> = std::cell::RefCell::new(ExportState::default());
+    }
+    STATE.with(|state| f(&mut state.borrow_mut()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXPORT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Marks an export worker as running; released on every exit path (drop).
+struct InFlight;
+
+impl InFlight {
+    fn acquire() -> Option<Self> {
+        with_export_state(|state| {
+            if state.in_flight {
+                None
+            } else {
+                state.in_flight = true;
+                Some(InFlight)
+            }
+        })
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        with_export_state(|state| state.in_flight = false);
+    }
+}
+
+fn cached_exports(
+    target: &spar::intel::ImportTarget,
+    cwd: &Path,
+    type_only: bool,
+    budget: std::time::Duration,
+) -> Vec<spar::intel::ExportItem> {
+    use spar::intel::ImportTarget;
+    let (package, name) = match target {
+        ImportTarget::File(name) => (false, name),
+        ImportTarget::Package(name) => (true, name),
+        ImportTarget::Missing => return Vec::new(),
+    };
+    let stamp = if package {
+        None
+    } else {
+        std::fs::metadata(cwd.join(name))
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
+    };
+    let key: ExportKey = (package, name.clone(), cwd.to_path_buf(), type_only, stamp);
+    let hit = with_export_state(|state| {
+        state
+            .cache
+            .iter()
+            .find(|(cached, _)| *cached == key)
+            .map(|(_, items)| items.clone())
+    });
+    if let Some(items) = hit {
+        return items;
+    }
+    let Some(_guard) = InFlight::acquire() else {
+        return Vec::new();
+    };
+    #[cfg(test)]
+    EXPORT_CALLS.with(|calls| calls.set(calls.get() + 1));
+    match spar::intel::exports_of_with_budget(
+        target,
+        cwd,
+        type_only,
+        &std::collections::HashSet::new(),
+        budget,
+    ) {
+        Ok(items) => {
+            with_export_state(|state| {
+                state.cache.retain(|(cached, _)| *cached != key);
+                if state.cache.len() >= EXPORT_CACHE_LIMIT {
+                    state.cache.remove(0);
+                }
+                state.cache.push((key, items.clone()));
+            });
+            items
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Names exported by the target of a Spar `import { | } from "x"` statement.
 /// `None` when the cursor is not between the braces of a Spar import, so the
 /// normal classifier handles the line. Failures and timeouts give no items.
@@ -621,16 +740,17 @@ fn complete_import_names(
     cursor: usize,
 ) -> Option<Vec<CompletionItem>> {
     let import = spar::intel::import_context(line, cursor)?;
-    let exports = spar::intel::exports_of(
+    let exports = cached_exports(
         &import.target,
         &snapshot.cwd,
         import.type_only,
-        &import.already,
-    )
-    .unwrap_or_default();
+        std::time::Duration::from_millis(500),
+    );
     let mut items: Vec<CompletionItem> = exports
         .into_iter()
-        .filter(|export| export.name.starts_with(&import.typed))
+        .filter(|export| {
+            export.name.starts_with(&import.typed) && !import.already.contains(&export.name)
+        })
         .map(|export| CompletionItem {
             span: import.replace_start..cursor,
             description: export.detail,
@@ -1387,5 +1507,126 @@ mod tests {
         let items = complete_at(&CompletionSnapshot::fixture(), "p", 1);
         assert!(!items.is_empty());
         assert!(items.iter().all(|item| item.kind.is_none()));
+    }
+
+    fn calls() -> usize {
+        EXPORT_CALLS.with(|c| c.get())
+    }
+
+    fn pkg_names(line: &str, cursor: usize, dir: &Path) -> Vec<String> {
+        import_names(&snapshot_in(dir), line, cursor)
+    }
+
+    #[test]
+    fn repeated_and_longer_prefixes_reuse_the_cached_export_list() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let snap = snapshot_in(dir.path());
+        let before = calls();
+        let l1 = "import { } from \"lib.spar\";";
+        assert_eq!(import_names(&snap, l1, 9).len(), 2);
+        assert_eq!(import_names(&snap, l1, 9).len(), 2);
+        let l2 = "import { gr } from \"lib.spar\";";
+        assert_eq!(import_names(&snap, l2, 11), vec!["greet"]);
+        let l3 = "import { gre } from \"lib.spar\";";
+        assert_eq!(import_names(&snap, l3, 12), vec!["greet"]);
+        assert_eq!(calls() - before, 1);
+    }
+
+    #[test]
+    fn editing_the_target_invalidates_the_cache() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let snap = snapshot_in(dir.path());
+        let line = "import { } from \"lib.spar\";";
+        assert_eq!(import_names(&snap, line, 9).len(), 2);
+        std::fs::write(
+            dir.path().join("lib.spar"),
+            format!("{LIB}export var extra_name: int = 3;\n"),
+        )
+        .unwrap();
+        let names = import_names(&snap, line, 9);
+        assert!(names.contains(&"extra_name".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn a_timeout_is_not_cached_and_a_busy_worker_returns_nothing() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let target = spar::intel::ImportTarget::File("lib.spar".into());
+        let timed_out = cached_exports(&target, dir.path(), false, std::time::Duration::ZERO);
+        assert!(timed_out.is_empty());
+        with_export_state(|s| assert!(s.cache.is_empty() && !s.in_flight));
+        assert_eq!(cached_exports(&target, dir.path(), false, std::time::Duration::from_millis(500)).len(), 2);
+        // A running worker blocks a new uncached lookup but not a cached one.
+        let guard = InFlight::acquire().unwrap();
+        let other = spar::intel::ImportTarget::File("other.spar".into());
+        let before = calls();
+        assert!(cached_exports(&other, dir.path(), false, std::time::Duration::from_millis(500)).is_empty());
+        assert_eq!(calls(), before);
+        assert_eq!(cached_exports(&target, dir.path(), false, std::time::Duration::from_millis(500)).len(), 2);
+        drop(guard);
+        with_export_state(|s| assert!(!s.in_flight));
+    }
+
+    #[test]
+    fn the_cache_is_bounded() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        for n in 0..(EXPORT_CACHE_LIMIT + 5) {
+            std::fs::write(dir.path().join(format!("m{n}.spar")), "export var a: int = 1;\n").unwrap();
+            let line = format!("import {{ }} from \"m{n}.spar\";");
+            assert_eq!(pkg_names(&line, 9, dir.path()), vec!["a"]);
+        }
+        with_export_state(|s| assert!(s.cache.len() <= EXPORT_CACHE_LIMIT));
+    }
+
+    #[test]
+    fn parse_error_cyclic_and_huge_libraries_do_not_panic() {
+        let dir = temp_dir_with("bad.spar", "export var ok: int = 1;\nexport var = = ;\n");
+        let names = pkg_names("import { } from \"bad.spar\";", 9, dir.path());
+        assert!(names.is_empty() || names.contains(&"ok".to_string()), "{names:?}");
+        std::fs::write(dir.path().join("a.spar"), "import { y } from \"b.spar\";\nexport var x: int = 1;\n").unwrap();
+        std::fs::write(dir.path().join("b.spar"), "import { x } from \"a.spar\";\nexport var y: int = 1;\n").unwrap();
+        let names = pkg_names("import { } from \"a.spar\";", 9, dir.path());
+        assert!(names.is_empty() || names.contains(&"x".to_string()), "{names:?}");
+        let big: String = (0..2000).map(|i| format!("export var name{i}: int = {i};\n")).collect();
+        std::fs::write(dir.path().join("big.spar"), big).unwrap();
+        let started = std::time::Instant::now();
+        let names = pkg_names("import { } from \"big.spar\";", 9, dir.path());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(names.is_empty() || names.len() == 2000, "{}", names.len());
+    }
+
+    #[test]
+    fn cursor_inside_a_multibyte_character_gives_nothing() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let line = "import { \u{e9}x } from \"lib.spar\";";
+        let mid = "import { ".len() + 1;
+        assert!(!line.is_char_boundary(mid));
+        assert!(pkg_names(line, mid, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn import_detection_edge_cases() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let fires = |line: &str, cursor: usize| pkg_names(line, cursor, dir.path()).contains(&"port".to_string());
+        let full = "import{ } from \"lib.spar\";";
+        assert!(fires(full, "import{ ".len()));
+        let after = "import { port } from \"lib.spar\";";
+        assert!(!fires(after, after.len()));
+        assert!(!fires(after, "import { port }".len()));
+        let a = "x = 1; import { } from \"lib.spar\";";
+        assert!(fires(a, "x = 1; import { ".len()));
+        let b = "echo a; import { } from \"lib.spar\";";
+        assert!(fires(b, "echo a; import { ".len()));
+        let c = "echo import { x } from \"lib.spar\"";
+        assert!(!fires(c, "echo import { ".len()));
+        let d = "~ echo import { } from \"lib.spar\"";
+        assert!(!fires(d, "~ echo import { ".len()));
+    }
+
+    #[test]
+    fn std_fs_package_lists_a_known_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "import pkg { wr } from \"std/fs\";";
+        let names = pkg_names(line, "import pkg { wr".len(), dir.path());
+        assert!(names.contains(&"writeText".to_string()), "{names:?}");
     }
 }
