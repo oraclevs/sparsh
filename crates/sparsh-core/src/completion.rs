@@ -169,12 +169,13 @@ fn member_context(
 ) -> Option<(CompletionContext, Range<usize>)> {
     let prefix = &line[..cursor];
     let start = prefix
-        .rfind(|ch: char| !(ch == '_' || ch.is_alphanumeric()))
+        .rfind(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .map_or(0, |index| index + prefix[index..].chars().next().map_or(1, char::len_utf8));
     let before = prefix[..start].strip_suffix('.')?;
     // The receiver is a name, or ends in `]` (an index step).
     let last = before.chars().next_back()?;
-    if !(last == '_' || last == ']' || last.is_alphanumeric()) {
+    // Spar identifiers are ASCII (see the lexer), so `p.n\u{e9}` is no member access.
+    if !(last == '_' || last == ']' || last.is_ascii_alphanumeric()) {
         return None;
     }
     if before.ends_with('.') {
@@ -211,14 +212,12 @@ fn complete_members_at(
     span: Range<usize>,
 ) -> Vec<CompletionItem> {
     use spar::intel::IntelKind;
+    let Some(analysis) = session_analysis(&snapshot.session_source, &snapshot.cwd) else {
+        return Vec::new();
+    };
     let source = format!("{}\n{line}", snapshot.session_source);
     let offset = snapshot.session_source.len() + 1 + cursor;
-    let request = spar::intel::IntelRequest {
-        source: &source,
-        offset,
-        base_dir: &snapshot.cwd,
-    };
-    spar::intel::complete_members(&request)
+    spar::intel::complete_members_with(&analysis, &source, offset)
         .into_iter()
         .map(|item| CompletionItem {
             replacement: if item.insert_text.is_empty() {
@@ -242,6 +241,58 @@ fn complete_members_at(
             }),
         })
         .collect()
+}
+
+/// The session source is compiled once and reused while it stays the same.
+const MEMBER_CACHE_LIMIT: usize = 4;
+type MemberKey = (u64, usize, PathBuf);
+
+#[derive(Default)]
+struct MemberCache {
+    entries: Vec<(MemberKey, std::sync::Arc<spar::intel::MemberAnalysis>)>,
+}
+
+#[cfg(not(test))]
+fn with_member_cache<R>(f: impl FnOnce(&mut MemberCache) -> R) -> R {
+    use std::sync::Mutex;
+    static STATE: Mutex<MemberCache> = Mutex::new(MemberCache { entries: Vec::new() });
+    f(&mut STATE.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+#[cfg(test)]
+fn with_member_cache<R>(f: impl FnOnce(&mut MemberCache) -> R) -> R {
+    thread_local! {
+        static STATE: std::cell::RefCell<MemberCache> = std::cell::RefCell::new(MemberCache::default());
+    }
+    STATE.with(|state| f(&mut state.borrow_mut()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static MEMBER_ANALYSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn session_analysis(source: &str, base_dir: &Path) -> Option<std::sync::Arc<spar::intel::MemberAnalysis>> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    let key: MemberKey = (hasher.finish(), source.len(), base_dir.to_path_buf());
+    if let Some(hit) = with_member_cache(|cache| {
+        cache.entries.iter().find(|(k, _)| *k == key).map(|(_, a)| std::sync::Arc::clone(a))
+    }) {
+        return Some(hit);
+    }
+    #[cfg(test)]
+    MEMBER_ANALYSES.with(|count| count.set(count.get() + 1));
+    let analysis = std::sync::Arc::new(spar::intel::analyze_session(source, base_dir)?);
+    with_member_cache(|cache| {
+        cache.entries.retain(|(k, _)| *k != key);
+        if cache.entries.len() >= MEMBER_CACHE_LIMIT {
+            cache.entries.remove(0);
+        }
+        cache.entries.push((key, std::sync::Arc::clone(&analysis)));
+    });
+    Some(analysis)
 }
 
 pub fn classify(line: &str, cursor: usize) -> (CompletionContext, Range<usize>) {
@@ -1821,5 +1872,72 @@ mod tests {
                 CompletionRequest { line, cursor },
             );
         }
+    }
+
+    fn analyses() -> usize {
+        MEMBER_ANALYSES.with(|count| count.get())
+    }
+
+    #[test]
+    fn the_session_source_is_compiled_once_across_tabs() {
+        let snapshot = member_snapshot(SESSION);
+        let before = analyses();
+        let first = complete(&snapshot, CompletionRequest { line: "p.", cursor: 2 });
+        let second = complete(&snapshot, CompletionRequest { line: "p.na", cursor: 4 });
+        let third = complete(&snapshot, CompletionRequest { line: "var n = p.", cursor: 11 });
+        assert_eq!(analyses() - before, 1);
+        assert!(first.len() >= 2 && second.len() == 1 && !third.is_empty());
+    }
+
+    #[test]
+    fn a_changed_session_source_recompiles() {
+        let before = analyses();
+        assert!(member_names(SESSION, "p.").contains(&"port".to_string()));
+        let changed = format!("{SESSION}\nstruct Extra {{ z: int = 0; }};");
+        assert!(member_names(&changed, "p.").contains(&"port".to_string()));
+        assert_eq!(analyses() - before, 2);
+        // Same source again: still cached.
+        assert!(member_names(&changed, "p.").contains(&"port".to_string()));
+        assert_eq!(analyses() - before, 2);
+    }
+
+    #[test]
+    fn cached_results_equal_uncached_ones() {
+        let snapshot = member_snapshot(SESSION);
+        for line in ["p.", "p.na", "p.PO", "var n = p.", "nothing."] {
+            let cached = complete(&snapshot, CompletionRequest { line, cursor: line.len() });
+            let source = format!("{SESSION}\n{line}");
+            let direct: Vec<_> = spar::intel::complete_members(&spar::intel::IntelRequest {
+                source: &source,
+                offset: source.len(),
+                base_dir: &snapshot.cwd,
+            })
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+            let mut cached: Vec<_> = cached.into_iter().map(|item| item.replacement).collect();
+            cached.sort();
+            let mut direct = direct;
+            direct.sort();
+            if line.starts_with("p.") || line.starts_with("var") {
+                assert_eq!(cached, direct, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn non_ascii_partial_is_not_a_member_position() {
+        assert_eq!(member_context(&member_snapshot(SESSION), "p.n\u{e9}", "p.n\u{e9}".len()), None);
+        assert_eq!(member_names(SESSION, "p.na"), vec!["name"]);
+    }
+
+    #[test]
+    fn command_looking_names_and_open_blocks() {
+        assert!(member_names(SESSION, "ls.").is_empty());
+        let session = format!("{SESSION}\nfn f() -> int {{");
+        // An unclosed block above must not break the mapping or crash.
+        let _ = member_names(&session, "p.");
+        let closed = format!("{SESSION}\nfn f() -> int {{\n    return 1;\n}};");
+        assert!(member_names(&closed, "p.").contains(&"name".to_string()));
     }
 }
