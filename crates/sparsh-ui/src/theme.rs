@@ -63,6 +63,20 @@ pub enum SemanticRole {
     FileSymlink,
     /// Sockets, pipes and devices in a structured `ls` listing.
     FileSpecial,
+    /// Completion menu: functions and methods.
+    CompletionFunction,
+    /// Completion menu: variables, fields and parameters.
+    CompletionVariable,
+    /// Completion menu: structs, enums and type names.
+    CompletionType,
+    /// Completion menu: keywords.
+    CompletionKeyword,
+    /// Completion menu: file names.
+    CompletionPath,
+    /// Completion menu: directory names.
+    CompletionDirectory,
+    /// Completion menu: external commands.
+    CompletionCommand,
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +190,15 @@ impl Theme {
             SemanticRole::FileExecutable => Style::new().fg(Color::LightRed).bold(),
             SemanticRole::FileSymlink => Style::new().fg(Color::LightCyan),
             SemanticRole::FileSpecial => Style::new().fg(Color::Yellow),
+            // The completion roles default to the colors of the matching
+            // highlight roles, so the menu agrees with the buffer.
+            SemanticRole::CompletionFunction => self.style(SemanticRole::Function),
+            SemanticRole::CompletionVariable => self.style(SemanticRole::Parameter),
+            SemanticRole::CompletionType => self.style(SemanticRole::TypeName),
+            SemanticRole::CompletionKeyword => self.style(SemanticRole::SparSyntax),
+            SemanticRole::CompletionPath => self.style(SemanticRole::Path),
+            SemanticRole::CompletionDirectory => self.style(SemanticRole::FileDirectory),
+            SemanticRole::CompletionCommand => self.style(SemanticRole::ExternalCommand),
         }
     }
 }

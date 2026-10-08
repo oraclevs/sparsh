@@ -292,7 +292,7 @@ fn build_editor(
 
     let highlighter = SparshHighlighter::new(snapshot, theme.clone());
     let hinter = SparshHinter::new(Arc::clone(&completion_snapshot));
-    let completer = SparshCompleter::new(completion_snapshot);
+    let completer = SparshCompleter::new(completion_snapshot).with_theme(theme.clone());
     let mut buffer_editor = Command::new(std::env::current_exe()?);
     buffer_editor.arg("--edit-buffer");
     secure_editor_buffer(buffer_file)?;

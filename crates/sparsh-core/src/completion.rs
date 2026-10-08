@@ -18,7 +18,6 @@ pub struct CompletionItem {
     pub kind: Option<ItemKind>,
 }
 
-// Several variants are reserved for the menu kind/detail task and unused until then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
     Command,
@@ -689,7 +688,7 @@ fn complete_function_parameters(
                 .join(", "),
             span: cursor..cursor,
             description: Some("function parameters".into()),
-            kind: None,
+            kind: Some(ItemKind::Parameter),
         }]);
     }
 
@@ -704,7 +703,7 @@ fn complete_function_parameters(
             replacement: format!("{name}: "),
             span: active_start..cursor,
             description: Some(describe(name)),
-            kind: None,
+            kind: Some(ItemKind::Parameter),
         })
         .collect();
     Some(items)
@@ -812,7 +811,7 @@ fn complete_commands(
                 replacement: name.clone(),
                 span: span.clone(),
                 description: Some(description.clone()),
-                kind: None,
+                kind: Some(ItemKind::Builtin),
             });
         }
     }
@@ -822,7 +821,7 @@ fn complete_commands(
                 replacement: name.clone(),
                 span: span.clone(),
                 description: Some("alias".into()),
-                kind: None,
+                kind: Some(ItemKind::Alias),
             });
         }
     }
@@ -832,7 +831,7 @@ fn complete_commands(
                 replacement: name.clone(),
                 span: span.clone(),
                 description: Some("external command".into()),
-                kind: None,
+                kind: Some(ItemKind::Command),
             });
         }
     }
@@ -842,7 +841,7 @@ fn complete_commands(
                 replacement: format!("{name}("),
                 span: span.clone(),
                 description: Some("Spar function".into()),
-                kind: None,
+                kind: Some(ItemKind::Function),
             });
         }
     }
@@ -862,7 +861,7 @@ fn complete_spar_identifiers(
             replacement: name.clone(),
             span: span.clone(),
             description: Some("Spar identifier".into()),
-            kind: None,
+            kind: Some(ItemKind::Variable),
         })
         .collect()
 }
@@ -1095,7 +1094,7 @@ fn complete_paths(
                 replacement: quote_completion("~/", quote, true),
                 span,
                 description: Some("home directory".into()),
-                kind: None,
+                kind: Some(ItemKind::Directory),
             }]
         });
     }
@@ -1129,7 +1128,11 @@ fn complete_paths(
             replacement: quote_completion(&replacement, quote, is_dir),
             span: span.clone(),
             description: Some(if is_dir { "directory" } else { "file" }.into()),
-            kind: None,
+            kind: Some(if is_dir {
+                ItemKind::Directory
+            } else {
+                ItemKind::File
+            }),
         });
     }
     items
@@ -1793,13 +1796,6 @@ mod tests {
         assert!(!names.contains(&"port".to_string()), "{names:?}");
     }
 
-    #[test]
-    fn existing_producers_have_no_kind() {
-        let items = complete_at(&CompletionSnapshot::fixture(), "p", 1);
-        assert!(!items.is_empty());
-        assert!(items.iter().all(|item| item.kind.is_none()));
-    }
-
     fn calls() -> usize {
         EXPORT_CALLS.with(|c| c.get())
     }
@@ -2238,5 +2234,31 @@ mod tests {
         snapshot.spar_functions.insert("create".into(), vec!["name".into()]);
         let items = complete(&snapshot, CompletionRequest { line: "create(na", cursor: 9 });
         assert_eq!(items[0].description.as_deref(), Some("parameter of create"));
+    }
+
+    fn kind_of(items: &[CompletionItem], name: &str) -> Option<ItemKind> {
+        items.iter().find(|i| i.replacement == name).unwrap_or_else(|| panic!("{name} missing")).kind
+    }
+
+    #[test]
+    fn every_producer_sets_a_kind() {
+        let snapshot = CompletionSnapshot::fixture();
+        let at = |line: &str| complete(&snapshot, CompletionRequest { line, cursor: line.len() });
+        let items = at("g");
+        assert_eq!(kind_of(&items, "git"), Some(ItemKind::Command));
+        assert_eq!(kind_of(&items, "gs"), Some(ItemKind::Alias));
+        assert_eq!(kind_of(&at("p"), "pwd"), Some(ItemKind::Builtin));
+        assert_eq!(kind_of(&at("var x = pro"), "project"), Some(ItemKind::Variable));
+        assert_eq!(kind_of(&at("bu"), "build("), Some(ItemKind::Function));
+        assert_eq!(kind_of(&at("build(pro"), "profile: "), Some(ItemKind::Parameter));
+        assert_eq!(kind_of(&at("cd ~"), "~/"), Some(ItemKind::Directory));
+        for line in ["cd ", "cat ", "ls "] {
+            assert!(complete_in_fixture_dir(line).iter().all(|i| i.kind.is_some()), "{line}");
+        }
+        let dirs = complete_in_fixture_dir("cd ");
+        assert!(dirs.iter().all(|i| i.kind == Some(ItemKind::Directory)));
+        let files = complete_in_fixture_dir("cat ");
+        assert!(files.iter().all(|i| i.kind == Some(ItemKind::File)));
+        assert_eq!(kind_of(&files, "a.txt"), Some(ItemKind::File));
     }
 }

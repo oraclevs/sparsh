@@ -1,15 +1,25 @@
 use std::sync::{Arc, RwLock};
 
-use reedline::{Completer, Span, Suggestion};
+use reedline::{Completer, Suggestion};
+use crate::Theme;
 use sparsh_core::{complete, CompletionRequest, CompletionSnapshot};
 
 pub struct SparshCompleter {
     snapshot: Arc<RwLock<CompletionSnapshot>>,
+    theme: Theme,
 }
 
 impl SparshCompleter {
     pub fn new(snapshot: Arc<RwLock<CompletionSnapshot>>) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            theme: Theme::plain(),
+        }
+    }
+
+    pub fn with_theme(mut self, theme: Theme) -> Self {
+        self.theme = theme;
+        self
     }
 }
 
@@ -20,15 +30,7 @@ impl Completer for SparshCompleter {
         };
         complete(&snapshot, CompletionRequest { line, cursor: pos })
             .into_iter()
-            .map(|item| Suggestion {
-                value: item.replacement,
-                description: item.description,
-                span: Span {
-                    start: item.span.start,
-                    end: item.span.end,
-                },
-                ..Suggestion::default()
-            })
+            .map(|item| crate::menu::suggestion(&item, &self.theme))
             .collect()
     }
 }
