@@ -24,6 +24,7 @@ pub enum CompletionContext {
     Path,
     Directory,
     File,
+    NoPaths,
     SparIdentifier,
     Import,
 }
@@ -97,6 +98,7 @@ pub fn complete(
         CompletionContext::Directory => {
             complete_paths(snapshot, token, span, PathCompletionMode::DirectoriesOnly)
         }
+        CompletionContext::NoPaths => Vec::new(),
         CompletionContext::File => {
             complete_paths(snapshot, token, span, PathCompletionMode::FilesOnly)
         }
@@ -138,10 +140,8 @@ pub fn classify(line: &str, cursor: usize) -> (CompletionContext, Range<usize>) 
         return (CompletionContext::Import, span);
     }
     let statement = statement_before(line, start);
-    let statement_is_command = statement
-        .split_whitespace()
-        .next()
-        .is_some_and(is_known_command);
+    let statement_is_command =
+        parse_statement(statement).is_some_and(|(command, _)| is_known_command(&command));
     // A Spar line such as `if x { cat ` ends in a shell statement once the
     // block opens; only an explicitly known command takes it back.
     let spar_line = looks_like_spar(trimmed)
@@ -157,12 +157,13 @@ pub fn classify(line: &str, cursor: usize) -> (CompletionContext, Range<usize>) 
         } else {
             (CompletionContext::Command, span)
         }
-    } else if path_like(token) {
-        (CompletionContext::Path, span)
     } else {
+        let path = path_like(token);
         match statement_kind(statement) {
             Some(ArgumentKind::Directories) => (CompletionContext::Directory, span),
             Some(ArgumentKind::Files) => (CompletionContext::File, span),
+            Some(ArgumentKind::Nothing) if path => (CompletionContext::NoPaths, span),
+            _ if path => (CompletionContext::Path, span),
             _ => (CompletionContext::Argument, span),
         }
     }
@@ -178,22 +179,62 @@ fn statement_argument_kind(line: &str, cursor: usize) -> Option<ArgumentKind> {
     statement_kind(statement)
 }
 
+/// Command word (basename, env assignments skipped) and its arguments.
+fn parse_statement(statement: &str) -> Option<(String, Vec<String>)> {
+    let words = split_words(statement);
+    let mut iter = words.into_iter().skip_while(|word| is_env_assignment(word));
+    let command = iter.next()?;
+    let command = command.rsplit('/').next().unwrap_or(&command).to_string();
+    Some((command, iter.collect()))
+}
+
+fn is_env_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            let mut chars = name.chars();
+            chars
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+                && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
+}
+
+/// `>`, `>>`, `<`, `2>`, `&>`, `>&` ... with no target attached.
+fn is_redirection_operator(word: &str) -> bool {
+    let word = word.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    matches!(word, ">" | ">>" | "<" | "<<" | "&>" | "&>>" | ">&" | "<&")
+}
+
 /// `statement` is the text of the current statement before the active token.
 fn statement_kind(statement: &str) -> Option<ArgumentKind> {
-    let words = split_words(statement);
-    let (command, args) = words.split_first()?;
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    Some(argument_kind(command, positional_index(&args)))
+    let (command, args) = parse_statement(statement)?;
+    if args
+        .last()
+        .is_some_and(|word| is_redirection_operator(word))
+    {
+        return Some(ArgumentKind::FilesAndDirectories);
+    }
+    let args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !word.contains(['>', '<']))
+        .collect();
+    Some(argument_kind(&command, positional_index(&args)))
 }
 
 /// Text of the current statement that precedes byte offset `end`: starts after the
 /// last unquoted `;`, `|`, `&`, `{` or `}` and drops a leading `~ ` shell marker.
 fn statement_before(line: &str, end: usize) -> &str {
     let prefix = &line[..end];
+    let chars: Vec<(usize, char)> = prefix.char_indices().collect();
     let mut start = 0usize;
     let mut quote = None;
     let mut escaped = false;
-    for (index, ch) in prefix.char_indices() {
+    // One entry per open `{`: true when it is a block brace.
+    let mut braces: Vec<bool> = Vec::new();
+    for (position, &(index, ch)) in chars.iter().enumerate() {
         if escaped {
             escaped = false;
             continue;
@@ -209,7 +250,32 @@ fn statement_before(line: &str, end: usize) -> &str {
             None => match ch {
                 '\'' | '"' => quote = Some(ch),
                 '\\' => escaped = true,
-                ';' | '|' | '&' | '{' | '}' => start = index + ch.len_utf8(),
+                ';' | '|' => start = index + ch.len_utf8(),
+                '&' => {
+                    let before = position.checked_sub(1).map(|i| chars[i].1);
+                    let after = chars.get(position + 1).map(|&(_, c)| c);
+                    let redirect =
+                        matches!(before, Some('>' | '<')) || matches!(after, Some('>' | '<'));
+                    if !redirect {
+                        start = index + ch.len_utf8();
+                    }
+                }
+                '{' => {
+                    let expansion = position > 0 && chars[position - 1].1 == '$';
+                    let rest = &prefix[index + 1..];
+                    let body = rest.split('}').next().unwrap_or(rest);
+                    let block =
+                        !expansion && (body.contains(char::is_whitespace) || body.contains(';'));
+                    braces.push(block);
+                    if block {
+                        start = index + 1;
+                    }
+                }
+                '}' => {
+                    if braces.pop().unwrap_or(true) {
+                        start = index + 1;
+                    }
+                }
                 _ => {}
             },
         }
@@ -1009,5 +1075,130 @@ mod tests {
             .collect();
         assert!(names.contains(&"a.txt".to_string()));
         assert!(!names.iter().any(|n| n.starts_with("dir1")));
+    }
+
+    fn fixture_names(line: &str) -> Vec<String> {
+        complete_in_fixture_dir(line)
+            .into_iter()
+            .map(|i| i.replacement)
+            .collect()
+    }
+
+    fn only_files(line: &str) {
+        let names = fixture_names(line);
+        assert!(
+            names.iter().any(|n| n.ends_with("a.txt")),
+            "{line}: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("dir1")),
+            "{line}: {names:?}"
+        );
+    }
+
+    #[test]
+    fn path_like_tokens_still_follow_the_command_kind() {
+        only_files("cat ./");
+        only_files("cat ./a");
+        let names = fixture_names("cd ./");
+        assert!(names.iter().any(|n| n.starts_with("./dir1")), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("a.txt")), "{names:?}");
+        assert!(fixture_names("echo ./x").is_empty());
+        assert!(fixture_names("echo ./").is_empty());
+        assert_eq!(classify("cat src/", 8).0, CompletionContext::File);
+        assert_eq!(classify("cat /etc/", 9).0, CompletionContext::File);
+        assert_eq!(classify("cat ~/", 6).0, CompletionContext::File);
+        assert_eq!(classify("cd /usr/", 8).0, CompletionContext::Directory);
+        assert_eq!(classify("cd ~/", 5).0, CompletionContext::Directory);
+        assert_eq!(classify("ls ~/", 5).0, CompletionContext::Path);
+    }
+
+    #[test]
+    fn cd_and_cat_with_home_prefix_filter_by_kind() {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::write(home.path().join("h.txt"), "x").unwrap();
+        std::fs::create_dir(home.path().join("hdir")).unwrap();
+        let snapshot = CompletionSnapshot {
+            cwd: home.path().to_path_buf(),
+            home: Some(home.path().to_path_buf()),
+            ..CompletionSnapshot::default()
+        };
+        let names = |line: &str| -> Vec<String> {
+            complete(
+                &snapshot,
+                CompletionRequest {
+                    line,
+                    cursor: line.len(),
+                },
+            )
+            .into_iter()
+            .map(|i| i.replacement)
+            .collect()
+        };
+        let cd = names("cd ~/");
+        assert!(cd.contains(&"~/hdir/".to_string()) && !cd.iter().any(|n| n.contains("h.txt")));
+        let cat = names("cat ~/");
+        assert!(cat.contains(&"~/h.txt".to_string()) && !cat.iter().any(|n| n.contains("hdir")));
+    }
+
+    #[test]
+    fn dir_prefixed_arguments_follow_kind() {
+        let names = fixture_names("cd dir1/");
+        assert!(names.is_empty() || names.iter().all(|n| n.ends_with('/')));
+        assert_eq!(classify("cd dir1/", 8).0, CompletionContext::Directory);
+        assert_eq!(classify("cat dir1/", 9).0, CompletionContext::File);
+    }
+
+    #[test]
+    fn braces_in_shell_words_do_not_restart_the_statement() {
+        only_files("cat {a,b} ");
+        assert_eq!(classify("cat ${HOME}/", 12).0, CompletionContext::File);
+        assert_eq!(classify("ls {a,b} x", 10).0, CompletionContext::Argument);
+        only_files("if true { cat ");
+    }
+
+    #[test]
+    fn ampersand_in_redirections_is_not_a_separator() {
+        only_files("cat a 2>&1 ");
+        only_files("cat a >&2 ");
+        only_files("cat a &> out ");
+    }
+
+    #[test]
+    fn redirection_targets_accept_files_and_directories() {
+        let names = fixture_names("cat > ");
+        assert!(names.contains(&"a.txt".to_string()));
+        assert!(names.iter().any(|n| n.starts_with("dir1")));
+        let names = fixture_names("cd 2> ");
+        assert!(names.contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn env_prefix_and_command_basename_are_understood() {
+        only_files("FOO=bar cat ");
+        only_files("A=1 B=2 /bin/cat ");
+        only_files("./cat ");
+        let names = fixture_names("cd ");
+        assert!(!names.contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn extended_table_entries() {
+        for c in [
+            "sha1sum",
+            "sha512sum",
+            "b3sum",
+            "nl",
+            "tac",
+            "strings",
+            "file",
+            "xxd",
+            "od",
+        ] {
+            only_files(&format!("{c} "));
+        }
+        for c in ["man", "alias", "export", "unset", "history"] {
+            assert!(fixture_names(&format!("{c} ")).is_empty(), "{c}");
+        }
     }
 }

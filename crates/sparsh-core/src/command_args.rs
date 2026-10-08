@@ -16,9 +16,11 @@ pub(crate) fn is_known_command(command: &str) -> bool {
 fn explicit_kind(command: &str) -> Option<ArgumentKind> {
     Some(match command {
         "cat" | "less" | "more" | "head" | "tail" | "wc" | "bat" | "source" | "." | "diff"
-        | "sha256sum" | "md5sum" => ArgumentKind::Files,
+        | "sha256sum" | "md5sum" | "sha1sum" | "sha512sum" | "b3sum" | "nl" | "tac" | "strings"
+        | "file" | "xxd" | "od" => ArgumentKind::Files,
         "cd" | "pushd" | "rmdir" => ArgumentKind::Directories,
-        "echo" | "printf" | "kill" | "which" | "type" => ArgumentKind::Nothing,
+        "echo" | "printf" | "kill" | "which" | "type" | "man" | "alias" | "export" | "unset"
+        | "history" => ArgumentKind::Nothing,
         "cp" | "mv" | "rm" | "ls" | "chmod" | "stat" | "du" | "mkdir" => {
             ArgumentKind::FilesAndDirectories
         }
