@@ -1209,3 +1209,21 @@ fn editor_snapshot_completes_scope_names_in_spar_positions_only() {
     assert!(complete("for i in [1, 2] { echo ${i").contains(&"i".to_string()));
     assert!(!complete("co").contains(&"count".to_string()));
 }
+
+#[test]
+fn editor_snapshot_shows_the_signature_of_session_functions() {
+    let mut session = sparsh_core::ShellSession::new();
+    session
+        .submit("fn build(profile: str, release: bool = false) -> int { return 0; };")
+        .unwrap();
+    let snapshot = session.completion_snapshot();
+    let line = "build(profile: ";
+    assert_eq!(
+        sparsh_core::signature_hint(&snapshot, line, line.len()).as_deref(),
+        Some("build(profile: str, release: bool = false)")
+    );
+    let hint = sparsh_core::signature_hint_info(&snapshot, "build(profile: \"x\", ", 19).unwrap();
+    assert_eq!(hint.active, 1);
+    assert_eq!(sparsh_core::signature_hint(&snapshot, "build", 5), None);
+    assert_eq!(sparsh_core::signature_hint(&snapshot, "echo build(", 11), None);
+}

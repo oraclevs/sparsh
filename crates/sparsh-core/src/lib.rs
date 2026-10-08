@@ -24,7 +24,8 @@ pub mod value;
 
 pub use builtin::{BuiltinError, BuiltinMetadata, BuiltinOutput, BuiltinRegistry};
 pub use completion::{
-    complete, CompletionContext, CompletionItem, CompletionRequest, CompletionSnapshot, ItemKind,
+    complete, signature_hint, signature_hint_info, CompletionContext, CompletionItem, CompletionRequest,
+    CompletionSnapshot, ItemKind, SignatureHint,
 };
 pub use config::{
     CompletionConfig, ConfigLoadError, EnvironmentVariableConfig, HistoryConfig, PromptConfig,

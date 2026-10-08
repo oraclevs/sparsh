@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultHinter, EditCommand, EditMode, Emacs,
+    default_emacs_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs,
     FileBackedHistory, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle,
     OutputMode, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
 };
@@ -22,7 +22,7 @@ use crate::{
     active_python_environment, detect_projects, is_multiline_paste_candidate,
     multiline_submissions, render_command_diagnostic, render_error, render_prompt_issues,
     render_result, review_multiline_paste, ColorPolicy, GitProbe, LocalTime, PromptData,
-    PromptState, SparshCompleter, SparshHighlighter, SparshValidator, SystemSampler, Theme,
+    PromptState, SparshCompleter, SparshHighlighter, SparshHinter, SparshValidator, SystemSampler, Theme,
 };
 
 const PRIVATE_EDITOR_BLOCKED: &str = "sparsh:private-editor-blocked";
@@ -291,6 +291,7 @@ fn build_editor(
     session.set_history_access(Arc::new(history.clone()));
 
     let highlighter = SparshHighlighter::new(snapshot, theme.clone());
+    let hinter = SparshHinter::new(Arc::clone(&completion_snapshot));
     let completer = SparshCompleter::new(completion_snapshot);
     let mut buffer_editor = Command::new(std::env::current_exe()?);
     buffer_editor.arg("--edit-buffer");
@@ -305,7 +306,7 @@ fn build_editor(
                 .with_name("history_menu")
                 .with_output_mode(OutputMode::FullBuffer),
         )))
-        .with_hinter(Box::new(DefaultHinter::default()))
+        .with_hinter(Box::new(hinter))
         .with_quick_completions(true)
         .with_partial_completions(true)
         .with_edit_mode(Box::new(PasteTrackingEmacs::new(

@@ -73,6 +73,20 @@ pub struct CompletionSnapshot {
 }
 
 impl CompletionSnapshot {
+    /// A snapshot that knows only a Spar session: its source and the names of
+    /// the functions it declares. For embedders and tests.
+    pub fn for_session(cwd: PathBuf, session_source: &str, functions: &[(&str, &[&str])]) -> Self {
+        let mut snapshot = Self { cwd, ..Self::default() };
+        snapshot.session_source = session_source.to_string();
+        for (name, params) in functions {
+            snapshot.spar_identifiers.insert((*name).to_string());
+            snapshot
+                .spar_functions
+                .insert((*name).to_string(), params.iter().map(|p| (*p).to_string()).collect());
+        }
+        snapshot
+    }
+
     #[cfg(test)]
     fn fixture() -> Self {
         Self {
@@ -633,10 +647,24 @@ fn complete_function_parameters(
     {
         return None;
     }
-    let params = snapshot.spar_functions.get(function)?;
+    let signature = call_signature(snapshot, line, cursor).filter(|info| info.name == function);
+    let params: Vec<String> = match snapshot.spar_functions.get(function) {
+        Some(names) => names.clone(),
+        None => signature.as_ref()?.params.iter().map(|p| p.name.clone()).collect(),
+    };
     if params.is_empty() {
         return Some(Vec::new());
     }
+    let describe = |name: &str| -> String {
+        signature
+            .as_ref()
+            .and_then(|info| info.params.iter().find(|p| p.name == name))
+            .map(|p| match &p.default {
+                Some(default) => format!("{} = {default}", p.ty),
+                None => p.ty.clone(),
+            })
+            .unwrap_or_else(|| format!("parameter of {function}"))
+    };
 
     let args = &prefix[open + 1..];
     let segment_start = args.rfind(',').map_or(0, |index| index + 1);
@@ -675,11 +703,72 @@ fn complete_function_parameters(
         .map(|name| CompletionItem {
             replacement: format!("{name}: "),
             span: active_start..cursor,
-            description: Some(format!("parameter of {function}")),
+            description: Some(describe(name)),
             kind: None,
         })
         .collect();
     Some(items)
+}
+
+/// The signature of the Spar call the cursor is inside, from the cached
+/// session analysis. `None` outside a call, in a command line, or for a
+/// callee the session does not know.
+fn call_signature(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+) -> Option<spar::intel::SignatureInfo> {
+    let mut cursor = cursor.min(line.len());
+    while !line.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let prefix = &line[..cursor];
+    unmatched_call_open(prefix)?;
+    if !spar_member_statement(snapshot, prefix) {
+        return None;
+    }
+    let analysis = session_analysis(&snapshot.session_source, &snapshot.cwd)?;
+    let source = format!("{}\n{line}", snapshot.session_source);
+    let offset = snapshot.session_source.len() + 1 + cursor;
+    spar::intel::signature_at_with(&analysis, &source, offset)
+}
+
+/// A call signature for display and the parameter the cursor is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureHint {
+    /// `build(profile: str, release: bool = false)`.
+    pub text: String,
+    /// Index of the active parameter.
+    pub active: usize,
+    /// Byte range of the active parameter inside `text`.
+    pub active_range: Range<usize>,
+}
+
+/// The signature of the call around the cursor with the active parameter
+/// located, or `None` when the cursor is not inside a known call.
+pub fn signature_hint_info(snapshot: &CompletionSnapshot, line: &str, cursor: usize) -> Option<SignatureHint> {
+    let info = call_signature(snapshot, line, cursor)?;
+    let prefix = if info.is_async { "async " } else { "" };
+    let mut text = format!("{prefix}{}(", info.name);
+    let mut active_range = text.len()..text.len();
+    for (index, param) in info.params.iter().enumerate() {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        let start = text.len();
+        text.push_str(&param.label());
+        if index == info.active_param {
+            active_range = start..text.len();
+        }
+    }
+    text.push(')');
+    Some(SignatureHint { text, active: info.active_param, active_range })
+}
+
+/// `build(profile: str, release: bool = false)` for the call around the
+/// cursor; see [`signature_hint_info`] for the active parameter.
+pub fn signature_hint(snapshot: &CompletionSnapshot, line: &str, cursor: usize) -> Option<String> {
+    signature_hint_info(snapshot, line, cursor).map(|hint| hint.text)
 }
 
 fn unmatched_call_open(prefix: &str) -> Option<usize> {
@@ -2058,5 +2147,96 @@ mod tests {
         let _ = member_names(&session, "p.");
         let closed = format!("{SESSION}\nfn f() -> int {{\n    return 1;\n}};");
         assert!(member_names(&closed, "p.").contains(&"name".to_string()));
+    }
+
+    // ── Signature hint ─────────────────────────────────────────────────────
+
+    const BUILD: &str = "fn build(profile: str, release: bool = false) -> int { return 0; };";
+
+    fn call_snapshot(session: &str) -> CompletionSnapshot {
+        let mut snapshot = member_snapshot(session);
+        snapshot.spar_functions.insert("build".into(), vec!["profile".into(), "release".into()]);
+        snapshot
+    }
+
+    #[test]
+    fn signature_hint_shows_the_session_signature_with_the_active_parameter() {
+        let snapshot = call_snapshot(BUILD);
+        let line = "build(profile: ";
+        let hint = signature_hint_info(&snapshot, line, line.len()).expect("hint");
+        assert_eq!(hint.text, "build(profile: str, release: bool = false)");
+        assert_eq!(hint.active, 0);
+        assert_eq!(&hint.text[hint.active_range.clone()], "profile: str");
+        assert_eq!(signature_hint(&snapshot, line, line.len()).as_deref(), Some(hint.text.as_str()));
+
+        let line = "build(profile: \"x\", ";
+        let hint = signature_hint_info(&snapshot, line, line.len()).expect("hint");
+        assert_eq!(hint.active, 1);
+        assert_eq!(&hint.text[hint.active_range], "release: bool = false");
+    }
+
+    #[test]
+    fn signature_hint_is_none_outside_a_call() {
+        let snapshot = call_snapshot(BUILD);
+        for line in ["build", "build(profile: \"x\")", "ls -la", "echo build(", "", "var x = 1"] {
+            assert_eq!(signature_hint(&snapshot, line, line.len()), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn signature_hint_is_none_for_unknown_callee_and_cursor_in_a_string() {
+        let snapshot = call_snapshot(BUILD);
+        assert_eq!(signature_hint(&snapshot, "nothing(", 8), None);
+        assert_eq!(signature_hint(&snapshot, "var s = \"build(", 15), None);
+    }
+
+    #[test]
+    fn signature_hint_works_for_a_nested_call_and_a_mid_line_cursor() {
+        let session = format!("{BUILD}\nfn two(a: int, b: int) -> int {{ return a; }};");
+        let snapshot = call_snapshot(&session);
+        let line = "two(a: build(profile: \"p\", ";
+        let hint = signature_hint_info(&snapshot, line, line.len()).expect("hint");
+        assert!(hint.text.starts_with("build("), "{}", hint.text);
+        let line = "build(profile: \"x\") + 1";
+        // The cursor right after the opening parenthesis is inside the call.
+        assert!(signature_hint(&snapshot, line, 6).is_some());
+        // A multi-byte character before the cursor does not panic.
+        let _ = signature_hint(&snapshot, "build(\u{e9}", "build(\u{e9}".len() - 1);
+    }
+
+    #[test]
+    fn signature_hint_reuses_the_cached_session_analysis() {
+        let snapshot = call_snapshot(&format!("{BUILD}\nvar unique_hint_cache: int = 1;"));
+        let analyses = || MEMBER_ANALYSES.with(|count| count.get());
+        let _ = signature_hint(&snapshot, "build(", 6);
+        let before = analyses();
+        for line in ["build(profile: ", "build(profile: \"a\", ", "build("] {
+            assert!(signature_hint(&snapshot, line, line.len()).is_some());
+        }
+        assert_eq!(analyses(), before);
+    }
+
+    #[test]
+    fn named_parameter_items_describe_type_and_default() {
+        let snapshot = call_snapshot(BUILD);
+        let items = complete(&snapshot, CompletionRequest { line: "build(", cursor: 6 });
+        assert_eq!(items.len(), 1, "{items:?}");
+        let line = "build(profile: \"x\", re";
+        let items = complete(&snapshot, CompletionRequest { line, cursor: line.len() });
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].replacement, "release: ");
+        assert_eq!(items[0].description.as_deref(), Some("bool = false"));
+        let line = "build(pro";
+        let items = complete(&snapshot, CompletionRequest { line, cursor: line.len() });
+        assert_eq!(items[0].replacement, "profile: ");
+        assert_eq!(items[0].description.as_deref(), Some("str"));
+    }
+
+    #[test]
+    fn parameter_items_fall_back_when_the_session_does_not_know_the_function() {
+        let mut snapshot = CompletionSnapshot::fixture();
+        snapshot.spar_functions.insert("create".into(), vec!["name".into()]);
+        let items = complete(&snapshot, CompletionRequest { line: "create(na", cursor: 9 });
+        assert_eq!(items[0].description.as_deref(), Some("parameter of create"));
     }
 }
