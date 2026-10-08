@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use sparsh_core::{SessionMode, ShellResult, ShellSession, StartupMode};
 use sparsh_ui::{
-    edit_buffer_file, render_command_diagnostic, render_error, render_result, render_sequence,
+    edit_buffer_file, render_command_diagnostic, render_error, render_outcome, render_result,
     run_interactive, run_noninteractive_loop, ColorPolicy, Theme,
 };
 
@@ -75,13 +75,19 @@ fn run_one_command(startup: StartupMode, input: String) -> i32 {
     let mut err = stderr.lock();
     load_config_or_report(&mut session, &mut err);
 
-    match session.submit_script(&input) {
+    let mut stream_failed = false;
+    let submitted = session.submit_script_streaming(&input, &mut |outcome| {
+        if render_outcome(outcome, &Theme::plain(), false, &mut out, &mut err).is_err() {
+            stream_failed = true;
+        }
+    });
+    if stream_failed {
+        return 1;
+    }
+    match submitted {
         Ok(result) => {
             let status = result_status(&result);
-            if let ShellResult::Sequence(outcomes) = &result {
-                if render_sequence(outcomes, &Theme::plain(), false, &mut out, &mut err).is_err() {
-                    return 1;
-                }
+            if let ShellResult::Sequence(_) = &result {
                 return status;
             }
             if let Err(error) = render_result(&result, &Theme::plain(), false, &mut out) {

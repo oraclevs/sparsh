@@ -132,24 +132,35 @@ pub fn render_sequence<W: Write, E: Write>(
     err: &mut E,
 ) -> io::Result<()> {
     for outcome in outcomes {
-        match &outcome.result {
-            Ok(ShellResult::Sequence(inner)) => {
-                render_sequence(inner, theme, interactive, out, err)?
-            }
-            Ok(result) => {
-                render_result(result, theme, interactive, out)?;
-                if let ShellResult::CommandStatus {
-                    diagnostic: Some(diagnostic),
-                    ..
-                } = result
-                {
-                    render_command_diagnostic(diagnostic, Some(&outcome.source), theme, err)?;
-                }
-            }
-            Err(error) => render_error(error, Some(&outcome.source), theme, err)?,
-        }
+        render_outcome(outcome, theme, interactive, out, err)?;
     }
     Ok(())
+}
+
+/// Renders one statement of a multi-statement submission. Used as the
+/// session's per-statement sink so output appears in statement order.
+pub fn render_outcome<W: Write, E: Write>(
+    outcome: &sparsh_core::StatementOutcome,
+    theme: &Theme,
+    interactive: bool,
+    out: &mut W,
+    err: &mut E,
+) -> io::Result<()> {
+    match &outcome.result {
+        Ok(ShellResult::Sequence(inner)) => render_sequence(inner, theme, interactive, out, err),
+        Ok(result) => {
+            render_result(result, theme, interactive, out)?;
+            if let ShellResult::CommandStatus {
+                diagnostic: Some(diagnostic),
+                ..
+            } = result
+            {
+                render_command_diagnostic(diagnostic, Some(&outcome.source), theme, err)?;
+            }
+            Ok(())
+        }
+        Err(error) => render_error(error, Some(&outcome.source), theme, err),
+    }
 }
 
 pub fn render_command_diagnostic<W: Write>(
@@ -191,14 +202,23 @@ where
             return Ok(session.last_status());
         }
         let submitted = line.trim_end_matches(['\r', '\n']);
-        match session.submit_script(submitted) {
+        let mut stream_failure = None;
+        let submitted_result = session.submit_script_streaming(submitted, &mut |outcome| {
+            if let Err(error) = render_outcome(outcome, &theme, false, out, err) {
+                stream_failure.get_or_insert(error);
+            }
+        });
+        if let Some(error) = stream_failure {
+            return Err(error);
+        }
+        match submitted_result {
             Ok(result) => {
                 let exit_status = match result.leaf() {
                     Some(ShellResult::Exit(status)) => Some(*status),
                     _ => None,
                 };
-                if let ShellResult::Sequence(outcomes) = &result {
-                    render_sequence(outcomes, &theme, false, out, err)?;
+                if let ShellResult::Sequence(_) = &result {
+                    // Each statement was rendered as it completed.
                     if let Some(status) = exit_status {
                         return Ok(status);
                     }

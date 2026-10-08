@@ -1064,3 +1064,68 @@ fn struct_string_and_map_mutations_persist_across_submissions() {
     assert!(stdout.contains("a!"), "{stdout}");
     assert!(stdout.trim_end().ends_with('2'), "{stdout}");
 }
+
+#[test]
+fn command_output_before_a_block_is_written_before_the_block_output() {
+    let home = tempfile::tempdir().unwrap();
+    let output = sparsh()
+        .env("HOME", home.path())
+        .args(["-c", "echo pre; if true { echo once }"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "pre\nonce\n");
+}
+
+#[test]
+fn a_map_literal_in_a_for_header_does_not_panic() {
+    let home = tempfile::tempdir().unwrap();
+    let output = sparsh()
+        .env("HOME", home.path())
+        .args(["-c", "for k in {\"a\": 1} { print(value: \"x\") }"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(output.status.code(), Some(101), "{stderr}");
+    assert!(!stderr.contains("panicked") && !stderr.contains("unreachable"), "{stderr}");
+}
+
+#[test]
+fn a_set_literal_in_a_for_header_does_not_leak_the_marker() {
+    let home = tempfile::tempdir().unwrap();
+    let output = sparsh()
+        .env("HOME", home.path())
+        .args(["-c", "for k in { a: 1; } { print(value: \"x\") }"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("found \u{27}~\u{27}"), "{stderr}");
+}
+
+fn run_c_in_temp_home(script: &str) -> (String, String) {
+    let home = tempfile::tempdir().unwrap();
+    let output = sparsh()
+        .env("HOME", home.path())
+        .args(["-c", script])
+        .output()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn removed_shell_block_forms_show_the_migration_message() {
+    for script in ["shell { echo hi }", "exec shell { echo hi }"] {
+        let (_, stderr) = run_c_in_temp_home(script);
+        assert!(stderr.contains("ShellResult"), "{script}: {stderr}");
+        assert!(!stderr.contains("bare brace"), "{script}: {stderr}");
+    }
+}
+
+#[test]
+fn an_open_quote_in_a_command_says_unterminated_quote() {
+    let (_, stderr) = run_c_in_temp_home("echo it\u{27}s");
+    assert!(stderr.contains("unterminated quote"), "{stderr}");
+    assert!(!stderr.contains("shell block"), "{stderr}");
+}

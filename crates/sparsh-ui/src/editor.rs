@@ -522,7 +522,21 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                     let result = if mode == EditorMode::Repl && !stealth_control {
                         session.submit_spar(&submission)
                     } else {
-                        session.submit(&submission)
+                        let stdout = io::stdout();
+                        let mut out = stdout.lock();
+                        let mut err = io::stderr().lock();
+                        let mut stream_failure = None;
+                        let result = session.submit_streaming(&submission, &mut |outcome| {
+                            if let Err(error) =
+                                crate::render_outcome(outcome, &theme, true, &mut out, &mut err)
+                            {
+                                stream_failure.get_or_insert(error);
+                            }
+                        });
+                        if let Some(error) = stream_failure {
+                            return Err(error.into());
+                        }
+                        result
                     };
                     match result {
                         Ok(result) => {
@@ -544,14 +558,8 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                                 break;
                             }
                             let stdout = io::stdout();
-                            if let ShellResult::Sequence(outcomes) = &result {
-                                crate::render_sequence(
-                                    outcomes,
-                                    &theme,
-                                    true,
-                                    &mut stdout.lock(),
-                                    &mut io::stderr().lock(),
-                                )?;
+                            if let ShellResult::Sequence(_) = &result {
+                                // Rendered per statement while it ran.
                             } else {
                                 render_result(&result, &theme, true, &mut stdout.lock())?;
                             }

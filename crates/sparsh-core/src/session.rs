@@ -573,6 +573,27 @@ impl ShellSession {
     }
 
     pub fn submit(&mut self, input: &str) -> Result<ShellResult, ShellError> {
+        self.submit_streaming(input, &mut |_| {})
+    }
+
+    /// Like `submit`, but hands each statement outcome of a multi-statement
+    /// submission to `sink` as soon as it completes, so captured command
+    /// output appears in order relative to output that Spar blocks stream.
+    /// The returned `Sequence` still lists every outcome.
+    pub fn submit_streaming(
+        &mut self,
+        input: &str,
+        sink: &mut dyn FnMut(&StatementOutcome),
+    ) -> Result<ShellResult, ShellError> {
+        self.submit_inner(input, sink, false)
+    }
+
+    fn submit_inner(
+        &mut self,
+        input: &str,
+        sink: &mut dyn FnMut(&StatementOutcome),
+        script: bool,
+    ) -> Result<ShellResult, ShellError> {
         self.poll_jobs()?;
         // Heredocs and line continuations span lines on purpose; keep them
         // as one statement.
@@ -626,10 +647,19 @@ impl ShellSession {
                 &result,
                 Ok(ShellResult::Exit(_)) | Ok(ShellResult::EditorMode(_))
             );
-            outcomes.push(StatementOutcome {
+            let result = if script && total > 1 {
+                result.map(|result| script_result(result, &original))
+            } else {
+                result
+            };
+            let outcome = StatementOutcome {
                 source: original,
                 result,
-            });
+            };
+            if total > 1 {
+                sink(&outcome);
+            }
+            outcomes.push(outcome);
             if stop {
                 break;
             }
@@ -663,6 +693,20 @@ impl ShellSession {
     pub fn submit_script(&mut self, input: &str) -> Result<ShellResult, ShellError> {
         let result = self.submit(input)?;
         Ok(script_result(result, input))
+    }
+
+    /// `submit_script` with per-statement streaming; see `submit_streaming`.
+    pub fn submit_script_streaming(
+        &mut self,
+        input: &str,
+        sink: &mut dyn FnMut(&StatementOutcome),
+    ) -> Result<ShellResult, ShellError> {
+        let result = self.submit_inner(input, sink, true)?;
+        Ok(match result {
+            // Already converted per statement as each one completed.
+            sequence @ ShellResult::Sequence(_) => sequence,
+            other => script_result(other, input),
+        })
     }
 
     fn finish_submission(
