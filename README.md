@@ -574,7 +574,9 @@ Completion depends on the command and on the Spar code around the cursor.
 - While the cursor is inside a call, the signature is shown after the buffer,
   with the active parameter in bold (`build(profile: str, release: bool =
   false)`). Tab inside the call offers named parameters with types and
-  defaults.
+  defaults. The hint only shows when the cursor is at the end of the buffer
+  (reedline calls the hinter only then); inside a Spar call it replaces the
+  history hint, and it is never inserted.
 - The menu shows a short kind tag and the detail, colored by kind.
 
 Limits: the command table is built in and has no user overrides. `sudo cat`

@@ -3299,7 +3299,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         session
             .services
             .aliases
-            .define("ls", vec!["eza".into(), "-la".into()])
+            .define("ls", vec!["true".into()])
             .unwrap();
         let result = session.submit("ls").unwrap();
         assert!(
@@ -3342,7 +3342,7 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
         session
             .services
             .aliases
-            .define("ll", vec!["eza".into(), "-la".into()])
+            .define("ll", vec!["true".into()])
             .unwrap();
         let result = session.submit("ll").unwrap();
         assert!(

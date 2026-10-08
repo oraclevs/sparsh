@@ -197,6 +197,13 @@ fn member_context(
     if before.ends_with('.') {
         return None;
     }
+    // `3.` is a number being typed, not a receiver.
+    let receiver_start = before
+        .rfind(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .map_or(0, |index| index + before[index..].chars().next().map_or(1, char::len_utf8));
+    if receiver_start < before.len() && before[receiver_start..].bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     if !spar_member_statement(snapshot, prefix) {
         return None;
     }
@@ -472,10 +479,8 @@ fn statement_before(line: &str, end: usize) -> &str {
                         start = index + 1;
                     }
                 }
-                '}' => {
-                    if braces.pop().unwrap_or(true) {
-                        start = index + 1;
-                    }
+                '}' if braces.pop().unwrap_or(true) => {
+                    start = index + 1;
                 }
                 _ => {}
             },
@@ -903,73 +908,117 @@ fn complete_scope_names(
     items
 }
 
-/// Cached unfiltered export lists keyed by what the answer depends on.
-type ExportKey = (
-    bool,
-    String,
-    PathBuf,
-    bool,
-    Option<(std::time::SystemTime, u64)>,
-);
+/// What an export list depends on: (package, name, cwd, type_only).
+type ExportKey = (bool, String, PathBuf, bool);
+/// Resolved file, modification time and length of an export list's source.
+type ExportStamp = Option<(PathBuf, std::time::SystemTime, u64)>;
 const EXPORT_CACHE_LIMIT: usize = 16;
+/// Slow targets get this long in the background worker; the prompt never waits for it.
+const EXPORT_WORKER_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+/// Transitively imported files are not stamped, so entries also expire.
+#[cfg(not(test))]
+const EXPORT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_EXPORT_WORKERS: usize = 4;
+
+struct ExportEntry {
+    key: ExportKey,
+    stamp: ExportStamp,
+    stored: std::time::Instant,
+    items: Vec<spar::intel::ExportItem>,
+}
 
 #[derive(Default)]
 struct ExportState {
-    cache: Vec<(ExportKey, Vec<spar::intel::ExportItem>)>,
-    in_flight: bool,
+    cache: Vec<ExportEntry>,
+    in_flight: Vec<ExportKey>,
+}
+
+type SharedExportState = std::sync::Arc<std::sync::Mutex<ExportState>>;
+
+#[cfg(not(test))]
+fn export_state() -> SharedExportState {
+    static STATE: std::sync::OnceLock<SharedExportState> = std::sync::OnceLock::new();
+    STATE.get_or_init(Default::default).clone()
+}
+
+// Tests run in parallel threads; keep their state per thread (workers get a clone).
+#[cfg(test)]
+fn export_state() -> SharedExportState {
+    thread_local! {
+        static STATE: SharedExportState = Default::default();
+    }
+    STATE.with(Clone::clone)
+}
+
+fn with_export_state<R>(f: impl FnOnce(&mut ExportState) -> R) -> R {
+    let state = export_state();
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
 }
 
 #[cfg(not(test))]
-fn with_export_state<R>(f: impl FnOnce(&mut ExportState) -> R) -> R {
-    use std::sync::Mutex;
-    static STATE: Mutex<ExportState> = Mutex::new(ExportState {
-        cache: Vec::new(),
-        in_flight: false,
-    });
-    f(&mut STATE.lock().unwrap_or_else(|e| e.into_inner()))
-}
-
-// Tests run in parallel threads; keep their state per thread.
-#[cfg(test)]
-fn with_export_state<R>(f: impl FnOnce(&mut ExportState) -> R) -> R {
-    thread_local! {
-        static STATE: std::cell::RefCell<ExportState> = std::cell::RefCell::new(ExportState::default());
-    }
-    STATE.with(|state| f(&mut state.borrow_mut()))
+fn export_ttl() -> std::time::Duration {
+    EXPORT_TTL
 }
 
 #[cfg(test)]
 thread_local! {
     static EXPORT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXPORT_TTL_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) };
+    static EXPORT_WORKER_HOOK: std::cell::RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Marks an export worker as running; released on every exit path (drop).
-struct InFlight;
+#[cfg(test)]
+fn export_ttl() -> std::time::Duration {
+    EXPORT_TTL_OVERRIDE.with(|ttl| ttl.get()).unwrap_or(std::time::Duration::from_secs(5))
+}
+
+/// Marks an export worker as running for one key. Owned (and dropped) by the
+/// worker thread, so it is released on success, error and panic alike.
+struct InFlight {
+    state: SharedExportState,
+    key: ExportKey,
+}
 
 impl InFlight {
-    fn acquire() -> Option<Self> {
-        with_export_state(|state| {
-            if state.in_flight {
-                None
-            } else {
-                state.in_flight = true;
-                Some(InFlight)
+    fn acquire(key: &ExportKey) -> Option<Self> {
+        let state = export_state();
+        {
+            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.in_flight.contains(key) || guard.in_flight.len() >= MAX_EXPORT_WORKERS {
+                return None;
             }
-        })
+            guard.in_flight.push(key.clone());
+        }
+        Some(InFlight { state, key: key.clone() })
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        with_export_state(|state| state.in_flight = false);
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = guard.in_flight.iter().position(|key| *key == self.key) {
+            guard.in_flight.remove(index);
+        }
     }
 }
 
+fn export_stamp(path: Option<PathBuf>) -> ExportStamp {
+    let path = path?;
+    let meta = std::fs::metadata(&path).ok()?;
+    Some((path, meta.modified().ok()?, meta.len()))
+}
+
+/// Export names of `target`, cached. A miss runs the compile on a background
+/// worker (which owns the in-flight guard and fills the cache even after this
+/// call has given up); this call waits at most `wait` and returns nothing on a
+/// timeout, so a later Tab finds the cache filled.
 fn cached_exports(
     target: &spar::intel::ImportTarget,
     cwd: &Path,
     type_only: bool,
-    budget: std::time::Duration,
+    wait: std::time::Duration,
 ) -> Vec<spar::intel::ExportItem> {
     use spar::intel::ImportTarget;
     let (package, name) = match target {
@@ -977,47 +1026,69 @@ fn cached_exports(
         ImportTarget::Package(name) => (true, name),
         ImportTarget::Missing => return Vec::new(),
     };
-    let stamp = if package {
-        None
-    } else {
-        std::fs::metadata(cwd.join(name))
-            .ok()
-            .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
-    };
-    let key: ExportKey = (package, name.clone(), cwd.to_path_buf(), type_only, stamp);
-    let hit = with_export_state(|state| {
+    let key: ExportKey = (package, name.clone(), cwd.to_path_buf(), type_only);
+    let stamp = export_stamp(spar::intel::resolve_import_path(target, cwd));
+    let ttl = export_ttl();
+    // `Some((items, fresh))` when an entry for this key and file state exists.
+    let cached = with_export_state(|state| {
         state
             .cache
             .iter()
-            .find(|(cached, _)| *cached == key)
-            .map(|(_, items)| items.clone())
+            .find(|entry| entry.key == key && entry.stamp == stamp)
+            .map(|entry| (entry.items.clone(), entry.stored.elapsed() < ttl))
     });
-    if let Some(items) = hit {
-        return items;
+    if let Some((items, true)) = &cached {
+        return items.clone();
     }
-    let Some(_guard) = InFlight::acquire() else {
-        return Vec::new();
+    // An expired entry for an unchanged file is better than nothing while refreshing.
+    let stale = cached.map(|(items, _)| items).unwrap_or_default();
+    let Some(guard) = InFlight::acquire(&key) else {
+        return stale;
     };
     #[cfg(test)]
     EXPORT_CALLS.with(|calls| calls.set(calls.get() + 1));
-    match spar::intel::exports_of_with_budget(
-        target,
-        cwd,
-        type_only,
-        &std::collections::HashSet::new(),
-        budget,
-    ) {
-        Ok(items) => {
-            with_export_state(|state| {
-                state.cache.retain(|(cached, _)| *cached != key);
+    #[cfg(test)]
+    let hook = EXPORT_WORKER_HOOK.with(|hook| hook.borrow().clone());
+    let (target, cwd) = (target.clone(), cwd.to_path_buf());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("sparsh-import-exports".into())
+        .spawn(move || {
+            let guard = guard;
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook();
+            }
+            let result = spar::intel::exports_of_with_budget(
+                &target,
+                &cwd,
+                type_only,
+                &std::collections::HashSet::new(),
+                EXPORT_WORKER_BUDGET,
+            );
+            if let Ok(items) = &result {
+                let entry = ExportEntry {
+                    key: guard.key.clone(),
+                    stamp,
+                    stored: std::time::Instant::now(),
+                    items: items.clone(),
+                };
+                let mut state = guard.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.cache.retain(|cached| cached.key != entry.key);
                 if state.cache.len() >= EXPORT_CACHE_LIMIT {
                     state.cache.remove(0);
                 }
-                state.cache.push((key, items.clone()));
-            });
-            items
-        }
-        Err(_) => Vec::new(),
+                state.cache.push(entry);
+            }
+            drop(guard);
+            let _ = tx.send(result);
+        });
+    if spawned.is_err() {
+        return stale;
+    }
+    match rx.recv_timeout(wait) {
+        Ok(Ok(items)) => items,
+        _ => stale,
     }
 }
 
@@ -1834,23 +1905,113 @@ mod tests {
         assert!(names.contains(&"extra_name".to_string()), "{names:?}");
     }
 
+    fn wait_idle() {
+        for _ in 0..500 {
+            if with_export_state(|s| s.in_flight.is_empty()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("export worker never finished");
+    }
+
+    fn set_worker_hook(hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+        EXPORT_WORKER_HOOK.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+
     #[test]
-    fn a_timeout_is_not_cached_and_a_busy_worker_returns_nothing() {
+    fn a_slow_target_is_not_respawned_and_its_late_result_lands_in_the_cache() {
         let dir = temp_dir_with("lib.spar", LIB);
         let target = spar::intel::ImportTarget::File("lib.spar".into());
-        let timed_out = cached_exports(&target, dir.path(), false, std::time::Duration::ZERO);
-        assert!(timed_out.is_empty());
-        with_export_state(|s| assert!(s.cache.is_empty() && !s.in_flight));
-        assert_eq!(cached_exports(&target, dir.path(), false, std::time::Duration::from_millis(500)).len(), 2);
-        // A running worker blocks a new uncached lookup but not a cached one.
-        let guard = InFlight::acquire().unwrap();
-        let other = spar::intel::ImportTarget::File("other.spar".into());
+        set_worker_hook(Some(std::sync::Arc::new(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300))
+        })));
         let before = calls();
-        assert!(cached_exports(&other, dir.path(), false, std::time::Duration::from_millis(500)).is_empty());
+        let short = std::time::Duration::from_millis(10);
+        assert!(cached_exports(&target, dir.path(), false, short).is_empty());
+        // Further Tabs while the worker runs return at once and spawn nothing.
+        assert!(cached_exports(&target, dir.path(), false, short).is_empty());
+        assert!(cached_exports(&target, dir.path(), false, short).is_empty());
+        assert_eq!(calls() - before, 1);
+        wait_idle();
+        set_worker_hook(None);
+        // The late result is cached: the next call needs no new worker.
+        assert_eq!(cached_exports(&target, dir.path(), false, short).len(), 2);
+        assert_eq!(calls() - before, 1);
+    }
+
+    #[test]
+    fn the_guard_is_released_after_a_worker_panic() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let target = spar::intel::ImportTarget::File("lib.spar".into());
+        set_worker_hook(Some(std::sync::Arc::new(|| panic!("worker boom"))));
+        assert!(cached_exports(&target, dir.path(), false, WAIT).is_empty());
+        wait_idle();
+        with_export_state(|s| assert!(s.cache.is_empty()));
+        set_worker_hook(None);
+        assert_eq!(cached_exports(&target, dir.path(), false, WAIT).len(), 2);
+    }
+
+    #[test]
+    fn the_guard_is_released_after_an_error_and_errors_are_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = spar::intel::ImportTarget::File("missing.spar".into());
+        assert!(cached_exports(&missing, dir.path(), false, WAIT).is_empty());
+        wait_idle();
+        with_export_state(|s| assert!(s.cache.is_empty()));
+    }
+
+    #[test]
+    fn a_zero_wait_gives_nothing_now_and_the_cache_fills_afterwards() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let target = spar::intel::ImportTarget::File("lib.spar".into());
+        assert!(cached_exports(&target, dir.path(), false, std::time::Duration::ZERO).is_empty());
+        wait_idle();
+        let before = calls();
+        assert_eq!(cached_exports(&target, dir.path(), false, WAIT).len(), 2);
         assert_eq!(calls(), before);
-        assert_eq!(cached_exports(&target, dir.path(), false, std::time::Duration::from_millis(500)).len(), 2);
-        drop(guard);
-        with_export_state(|s| assert!(!s.in_flight));
+    }
+
+    #[test]
+    fn an_extensionless_import_sees_edits_to_the_resolved_file() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let snap = snapshot_in(dir.path());
+        let line = "import { } from \"lib\";";
+        assert_eq!(import_names(&snap, line, 9), vec!["greet", "port"]);
+        std::fs::write(
+            dir.path().join("lib.spar"),
+            format!("{LIB}export var extra_name: int = 3;\n"),
+        )
+        .unwrap();
+        let names = import_names(&snap, line, 9);
+        assert!(names.contains(&"extra_name".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn package_targets_are_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = spar::intel::ImportTarget::Package("std/fs".into());
+        let before = calls();
+        let first = cached_exports(&target, dir.path(), false, WAIT);
+        assert!(!first.is_empty());
+        assert_eq!(cached_exports(&target, dir.path(), false, WAIT).len(), first.len());
+        assert_eq!(calls() - before, 1);
+    }
+
+    #[test]
+    fn cache_entries_expire_after_the_ttl() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let target = spar::intel::ImportTarget::File("lib.spar".into());
+        EXPORT_TTL_OVERRIDE.with(|ttl| ttl.set(Some(std::time::Duration::from_millis(100))));
+        let before = calls();
+        assert_eq!(cached_exports(&target, dir.path(), false, WAIT).len(), 2);
+        assert_eq!(cached_exports(&target, dir.path(), false, WAIT).len(), 2);
+        assert_eq!(calls() - before, 1);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(cached_exports(&target, dir.path(), false, WAIT).len(), 2);
+        assert_eq!(calls() - before, 2);
     }
 
     #[test]
@@ -2048,6 +2209,16 @@ mod tests {
         let names = member_names(SESSION, "echo p.");
         assert!(!names.contains(&"name".to_string()) && !names.contains(&"port".to_string()), "{names:?}");
         assert!(member_names(SESSION, "ls -l p.").iter().all(|n| n != "name"));
+    }
+
+    #[test]
+    fn an_int_literal_is_not_a_receiver() {
+        assert!(member_names(SESSION, "x = 3.").is_empty());
+        assert!(member_names(SESSION, "x = 3.1").is_empty());
+        assert!(member_names(SESSION, "var y = 3.").is_empty());
+        // A name ending in digits is still a receiver.
+        let session = "struct P { name: str = \"\"; };\nvar p2: P = P();";
+        assert!(member_names(session, "x = p2.").contains(&"name".to_string()));
     }
 
     #[test]
