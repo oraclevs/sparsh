@@ -15,6 +15,25 @@ pub struct CompletionItem {
     pub replacement: String,
     pub span: Range<usize>,
     pub description: Option<String>,
+    pub kind: Option<ItemKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    Command,
+    Alias,
+    Builtin,
+    Function,
+    Variable,
+    Field,
+    Method,
+    Struct,
+    Enum,
+    Type,
+    Keyword,
+    Parameter,
+    File,
+    Directory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +91,9 @@ pub fn complete(
     let cursor = request.cursor.min(request.line.len());
     if !request.line.is_char_boundary(cursor) {
         return Vec::new();
+    }
+    if let Some(items) = complete_import_names(snapshot, request.line, cursor) {
+        return items;
     }
     if let Some(items) = complete_function_parameters(snapshot, request.line, cursor) {
         return items;
@@ -473,6 +495,7 @@ fn complete_function_parameters(
                 .join(", "),
             span: cursor..cursor,
             description: Some("function parameters".into()),
+            kind: None,
         }]);
     }
 
@@ -487,6 +510,7 @@ fn complete_function_parameters(
             replacement: format!("{name}: "),
             span: active_start..cursor,
             description: Some(format!("parameter of {function}")),
+            kind: None,
         })
         .collect();
     Some(items)
@@ -533,6 +557,7 @@ fn complete_commands(
                 replacement: name.clone(),
                 span: span.clone(),
                 description: Some(description.clone()),
+                kind: None,
             });
         }
     }
@@ -542,6 +567,7 @@ fn complete_commands(
                 replacement: name.clone(),
                 span: span.clone(),
                 description: Some("alias".into()),
+                kind: None,
             });
         }
     }
@@ -551,6 +577,7 @@ fn complete_commands(
                 replacement: name.clone(),
                 span: span.clone(),
                 description: Some("external command".into()),
+                kind: None,
             });
         }
     }
@@ -560,6 +587,7 @@ fn complete_commands(
                 replacement: format!("{name}("),
                 span: span.clone(),
                 description: Some("Spar function".into()),
+                kind: None,
             });
         }
     }
@@ -579,8 +607,51 @@ fn complete_spar_identifiers(
             replacement: name.clone(),
             span: span.clone(),
             description: Some("Spar identifier".into()),
+            kind: None,
         })
         .collect()
+}
+
+/// Names exported by the target of a Spar `import { | } from "x"` statement.
+/// `None` when the cursor is not between the braces of a Spar import, so the
+/// normal classifier handles the line. Failures and timeouts give no items.
+fn complete_import_names(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+) -> Option<Vec<CompletionItem>> {
+    let import = spar::intel::import_context(line, cursor)?;
+    let exports = spar::intel::exports_of(
+        &import.target,
+        &snapshot.cwd,
+        import.type_only,
+        &import.already,
+    )
+    .unwrap_or_default();
+    let mut items: Vec<CompletionItem> = exports
+        .into_iter()
+        .filter(|export| export.name.starts_with(&import.typed))
+        .map(|export| CompletionItem {
+            span: import.replace_start..cursor,
+            description: export.detail,
+            kind: Some(import_item_kind(export.kind)),
+            replacement: export.name,
+        })
+        .collect();
+    items.sort_by(|left, right| left.replacement.cmp(&right.replacement));
+    items.dedup_by(|left, right| left.replacement == right.replacement);
+    Some(items)
+}
+
+fn import_item_kind(kind: spar::intel::ExportKind) -> ItemKind {
+    use spar::intel::ExportKind;
+    match kind {
+        ExportKind::Function | ExportKind::Callable | ExportKind::Group => ItemKind::Function,
+        ExportKind::Variable => ItemKind::Variable,
+        ExportKind::Struct => ItemKind::Struct,
+        ExportKind::Enum => ItemKind::Enum,
+        ExportKind::Type => ItemKind::Type,
+    }
 }
 
 fn complete_imports(
@@ -588,7 +659,7 @@ fn complete_imports(
     prefix: &str,
     span: Range<usize>,
 ) -> Vec<CompletionItem> {
-    if path_like(prefix) || prefix.is_empty() {
+    if path_like(prefix) || prefix.is_empty() || prefix.starts_with(['"', '\'']) {
         complete_paths(
             snapshot,
             prefix,
@@ -613,6 +684,7 @@ fn complete_paths(
                 replacement: quote_completion("~/", quote, true),
                 span,
                 description: Some("home directory".into()),
+                kind: None,
             }]
         });
     }
@@ -646,6 +718,7 @@ fn complete_paths(
             replacement: quote_completion(&replacement, quote, is_dir),
             span: span.clone(),
             description: Some(if is_dir { "directory" } else { "file" }.into()),
+            kind: None,
         });
     }
     items
@@ -1200,5 +1273,119 @@ mod tests {
         for c in ["man", "alias", "export", "unset", "history"] {
             assert!(fixture_names(&format!("{c} ")).is_empty(), "{c}");
         }
+    }
+
+    fn temp_dir_with(name: &str, contents: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(name), contents).unwrap();
+        dir
+    }
+
+    fn snapshot_in(dir: &Path) -> CompletionSnapshot {
+        CompletionSnapshot {
+            cwd: dir.to_path_buf(),
+            home: None,
+            ..CompletionSnapshot::default()
+        }
+    }
+
+    fn complete_at(snapshot: &CompletionSnapshot, line: &str, cursor: usize) -> Vec<CompletionItem> {
+        complete(snapshot, CompletionRequest { line, cursor })
+    }
+
+    fn import_names(snapshot: &CompletionSnapshot, line: &str, cursor: usize) -> Vec<String> {
+        complete_at(snapshot, line, cursor)
+            .into_iter()
+            .map(|item| item.replacement)
+            .collect()
+    }
+
+    const LIB: &str = "export var port: int = 80;\nfunction greet(name: str) -> str { return name; };\nvar hidden: int = 1;\n";
+
+    #[test]
+    fn import_braces_list_exports_of_the_target_file() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let line = "import { ";
+        let full = format!("{line}}} from \"lib.spar\";");
+        let items = complete_at(&snapshot_in(dir.path()), &full, line.len());
+        let names: Vec<_> = items.iter().map(|i| i.replacement.as_str()).collect();
+        assert!(names.contains(&"port") && names.contains(&"greet"), "{names:?}");
+        assert!(!names.contains(&"hidden"), "{names:?}");
+        let port = items.iter().find(|i| i.replacement == "port").unwrap();
+        assert_eq!(port.kind, Some(ItemKind::Variable));
+        assert!(port.description.as_deref().is_some_and(|d| d.contains("int")));
+        let greet = items.iter().find(|i| i.replacement == "greet").unwrap();
+        assert_eq!(greet.kind, Some(ItemKind::Function));
+        assert_eq!(greet.span, line.len()..line.len());
+    }
+
+    #[test]
+    fn import_braces_filter_by_typed_prefix_and_skip_listed_names() {
+        let dir = temp_dir_with(
+            "lib.spar",
+            "export var port: int = 80;\nexport var pool: int = 1;\n",
+        );
+        let full = "import { port, po } from \"lib.spar\";";
+        let names = import_names(&snapshot_in(dir.path()), full, "import { port, po".len());
+        assert_eq!(names, vec!["pool"]);
+    }
+
+    #[test]
+    fn import_braces_with_missing_target_return_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = snapshot_in(dir.path());
+        assert!(import_names(&snap, "import { } from \"nope.spar\";", "import { ".len()).is_empty());
+        assert!(import_names(&snap, "import { ", "import { ".len()).is_empty());
+        std::fs::create_dir(dir.path().join("d")).unwrap();
+        assert!(import_names(&snap, "import { } from \"d\";", "import { ".len()).is_empty());
+    }
+
+    #[test]
+    fn import_braces_work_across_lines_and_for_packages() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let snap = snapshot_in(dir.path());
+        let full = "var a: int = 1;\nimport {\n  gr\n} from \"lib.spar\";";
+        let cursor = full.find("gr").unwrap() + 2;
+        assert_eq!(import_names(&snap, full, cursor), vec!["greet"]);
+        let pkg = "import pkg { } from \"std/fs\";";
+        assert!(!import_names(&snap, pkg, "import pkg { ".len()).is_empty());
+    }
+
+    #[test]
+    fn import_path_after_from_still_completes_files() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let snap = snapshot_in(dir.path());
+        let line = "import { port } from \"li";
+        assert_eq!(import_names(&snap, line, line.len()), vec!["\"lib.spar\""]);
+        let line = "import \"li";
+        assert_eq!(import_names(&snap, line, line.len()), vec!["\"lib.spar\""]);
+        let line = "import { port } from \"./li";
+        assert_eq!(import_names(&snap, line, line.len()), vec!["\"./lib.spar\""]);
+    }
+
+    #[test]
+    fn ordinary_lines_mentioning_import_do_not_trigger_name_completion() {
+        let dir = temp_dir_with("lib.spar", LIB);
+        let snap = snapshot_in(dir.path());
+        for line in [
+            "echo import { ",
+            "~ import { ",
+            "ls | import { ",
+            "import -window root { ",
+        ] {
+            let names = import_names(&snap, line, line.len());
+            assert!(!names.contains(&"port".to_string()), "{line}: {names:?}");
+            assert!(!names.contains(&"greet".to_string()), "{line}: {names:?}");
+        }
+        let full = "echo import { } from \"lib.spar\"";
+        let names = import_names(&snap, full, "echo import { ".len());
+        assert!(!names.contains(&"port".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn existing_producers_have_no_kind() {
+        let items = complete_at(&CompletionSnapshot::fixture(), "p", 1);
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|item| item.kind.is_none()));
     }
 }

@@ -1143,3 +1143,26 @@ fn a_struct_with_an_empty_option_field_keeps_later_submissions_working() {
     assert!(stdout.contains("a\n") && stdout.contains("b\n"), "{stdout}");
     assert!(stdout.trim_end().ends_with('5'), "{stdout}");
 }
+
+#[test]
+fn editor_snapshot_completes_import_names_relative_to_the_session_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.spar"),
+        "export var port: int = 80;\nvar hidden: int = 1;\n",
+    )
+    .unwrap();
+    let mut session = sparsh_core::ShellSession::new();
+    session.submit(&format!("cd {}", dir.path().display())).unwrap();
+    let snapshot = session.completion_snapshot();
+    let line = "import { } from \"lib.spar\";";
+    let items = sparsh_core::complete(
+        &snapshot,
+        sparsh_core::CompletionRequest {
+            line,
+            cursor: "import { ".len(),
+        },
+    );
+    let names: Vec<_> = items.iter().map(|item| item.replacement.as_str()).collect();
+    assert_eq!(names, vec!["port"]);
+}
