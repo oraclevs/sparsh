@@ -1,15 +1,18 @@
-// Copy as ~/.sparsh/src/config.spar and place sparsh-types.spar beside it.
+// Copy as ~/.sparsh/src/config.spar, place sparsh-types.spar beside it and
+// theme.spar (this repo's examples/theme.spar) as modules/theme.spar.
 import { SparshAlias, SparshEnvironmentVariable, SparshPromptPath, SparshPromptGit, SparshPromptTime, SparshPromptSlot, SparshPromptThreshold, SparshPromptThresholds, SparshPromptRight, SparshPrompt, SparshHistory, SparshCompletion, SparshKeybinding, SparshPagerKeybinding, SparshConfig } from "./sparsh-types";
+import { shellTheme } from "./modules/theme.spar";
 
-struct Config {
-    aliases: List<SparshAlias> = [SparshAlias(name: "gs", command: ["git", "status"]), SparshAlias(name: "ll", command: ["eza", "-la", "--icons", "--git"])];
-    environment: List<SparshEnvironmentVariable> = [SparshEnvironmentVariable(name: "EDITOR", value: some(value: "nvim")), SparshEnvironmentVariable(name: "PATH", prepend: some(value: ["/opt/android-sdk/platform-tools", "$HOME/DevTools/flutter/bin", "$HOME/.cargo/bin", "$HOME/.local/bin"]), append: some(value: ["$HOME/.pub-cache/bin"]))];
-    prompt: SparshPrompt = SparshPrompt(showStatus: some(value: true), path: some(value: SparshPromptPath(enabled: some(value: true))), git: some(value: SparshPromptGit(enabled: some(value: true), showBranch: some(value: true), showAheadBehind: some(value: true))), right: some(value: SparshPromptRight(slot1: some(value: SparshPromptSlot(text: "{duration}", color: some(value: "yellow"))), slot2: some(value: SparshPromptSlot(text: " {cpu}%   {ram}%", color: some(value: "cyan"))), slot3: some(value: SparshPromptSlot(text: " {date:%a %d %b}   {time:%I:%M %p}")), separator: some(value: "  "), thresholds: some(value: SparshPromptThresholds(cpu: some(value: SparshPromptThreshold(warn: some(value: 70), critical: some(value: 90))), battery: some(value: SparshPromptThreshold(warn: some(value: 30), critical: some(value: 15))))))));
-    history: SparshHistory = SparshHistory(maxEntries: some(value: 10000), dedupeConsecutive: some(value: true));
-    completion: SparshCompletion = SparshCompletion(enabled: some(value: true));
-    keybindings: List<SparshKeybinding> = [SparshKeybinding(key: "ctrl+r", action: "historySearch"), SparshKeybinding(key: "alt+e", action: "openEditor"), SparshKeybinding(key: "alt+v", action: "pager")];
-    pagerKeybindings: List<SparshPagerKeybinding> = [SparshPagerKeybinding(key: "ctrl+n", action: "lineDown"), SparshPagerKeybinding(key: "ctrl+p", action: "lineUp")];
-};
+var configuration: SparshConfig = SparshConfig(
+    aliases: some(value: [SparshAlias(name: "gs", command: ["git", "status"]), SparshAlias(name: "ll", command: ["eza", "-la", "--icons", "--git"])]),
+    environment: some(value: [SparshEnvironmentVariable(name: "EDITOR", value: some(value: "nvim")), SparshEnvironmentVariable(name: "PATH", prepend: some(value: ["/opt/android-sdk/platform-tools", "$HOME/DevTools/flutter/bin", "$HOME/.cargo/bin", "$HOME/.local/bin"]), append: some(value: ["$HOME/.pub-cache/bin"]))]),
+    prompt: some(value: SparshPrompt(showStatus: some(value: true), path: some(value: SparshPromptPath(enabled: some(value: true))), git: some(value: SparshPromptGit(enabled: some(value: true), showBranch: some(value: true), showAheadBehind: some(value: true))), right: some(value: SparshPromptRight(slot1: some(value: SparshPromptSlot(text: "{duration}", color: some(value: "yellow"))), slot2: some(value: SparshPromptSlot(text: " {cpu}%   {ram}%", color: some(value: "cyan"))), slot3: some(value: SparshPromptSlot(text: " {date:%a %d %b}   {time:%I:%M %p}")), separator: some(value: "  "), thresholds: some(value: SparshPromptThresholds(cpu: some(value: SparshPromptThreshold(warn: some(value: 70), critical: some(value: 90))), battery: some(value: SparshPromptThreshold(warn: some(value: 30), critical: some(value: 15))))))))),
+    history: some(value: SparshHistory(maxEntries: some(value: 10000), dedupeConsecutive: some(value: true))),
+    completion: some(value: SparshCompletion(enabled: some(value: true))),
+    keybindings: some(value: [SparshKeybinding(key: "ctrl+r", action: "historySearch"), SparshKeybinding(key: "alt+e", action: "openEditor"), SparshKeybinding(key: "alt+v", action: "pager")]),
+    pagerKeybindings: some(value: [SparshPagerKeybinding(key: "ctrl+n", action: "lineDown"), SparshPagerKeybinding(key: "ctrl+p", action: "lineUp")]),
+    theme: some(value: shellTheme),
+);
 
 fn startup() -> ShellResult<int, str> {
     path append $(npm prefix -g)/bin;

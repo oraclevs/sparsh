@@ -1227,3 +1227,175 @@ fn editor_snapshot_shows_the_signature_of_session_functions() {
     assert_eq!(sparsh_core::signature_hint(&snapshot, "build", 5), None);
     assert_eq!(sparsh_core::signature_hint(&snapshot, "echo build(", 11), None);
 }
+
+#[test]
+fn theme_direct_and_dash_c_share_status_and_list() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [vec!["theme"], vec!["-c", "theme"]] {
+        let output = sparsh().env("HOME", home.path()).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("default"));
+        assert!(!output.stdout.contains(&0x1b));
+    }
+    let output = sparsh().env("HOME", home.path()).args(["theme", "list"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("default"));
+}
+
+#[test]
+fn theme_rejects_bad_name_missing_home_and_symlink_target() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [vec!["theme", "set", "../escape"], vec!["theme", "set", ".hidden"]] {
+        let output = sparsh().env("HOME", home.path()).args(args).output().unwrap();
+        assert!(!output.status.success());
+    }
+    let missing = sparsh().args(["theme", "set", "ocean"]).output().unwrap();
+    assert!(!missing.status.success());
+    let target = home.path().join("exported.spar");
+    let link = home.path().join("link.spar");
+    std::fs::write(&target, "untouched").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let output = sparsh().env("HOME", home.path()).args(["theme", "export", link.to_str().unwrap(), "--force"]).output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+}
+
+const STATE_FILE: &str = "var themeState: Record = { source: { kind: \"external\"; }; theme: { palette: { accent: \"#112233\"; }; }; };\n";
+
+fn home_with_registry() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let src = home.path().join(".sparsh/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("sparsh-types.spar"), include_str!("../examples/sparsh-types.spar")).unwrap();
+    std::fs::write(
+        src.join("config.spar"),
+        r##"import { SparshConfig, SparshThemeKind, SparshTheme, SparshThemePalette } from "./sparsh-types.spar";
+
+var configuration: SparshConfig = SparshConfig(
+    themes: some(value: [
+        SparshThemeKind(name: "gruvbox", description: some(value: "warm"), theme: SparshTheme(palette: some(value: SparshThemePalette(accent: some(value: "#fabd2f"))))),
+        SparshThemeKind(name: "royal", theme: SparshTheme(palette: some(value: SparshThemePalette(accent: some(value: "#e0b84c"))))),
+    ]),
+);
+"##,
+    )
+    .unwrap();
+    home
+}
+
+#[test]
+fn theme_registry_lists_sets_and_reports_source() {
+    let home = home_with_registry();
+    let list = sparsh().env("HOME", home.path()).args(["theme", "list"]).output().unwrap();
+    assert!(list.status.success(), "{}", String::from_utf8_lossy(&list.stderr));
+    assert_eq!(String::from_utf8_lossy(&list.stdout), "* default\tbuilt-in colors\n  gruvbox\twarm\n  royal\n");
+    let set = sparsh().env("HOME", home.path()).args(["theme", "set", "gruvbox"]).output().unwrap();
+    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    let active = home.path().join(".sparsh/src/theme.generated.spar");
+    assert_eq!(std::fs::metadata(&active).unwrap().permissions().mode() & 0o777, 0o600);
+    let status = sparsh().env("HOME", home.path()).args(["-c", "theme"]).output().unwrap();
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.starts_with("theme\tgruvbox\nsource\tregistered\n"), "{text}");
+    let unknown = sparsh().env("HOME", home.path()).args(["theme", "set", "nope"]).output().unwrap();
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("gruvbox"));
+    let clear = sparsh().env("HOME", home.path()).args(["theme", "set", "default"]).output().unwrap();
+    assert!(clear.status.success());
+    assert!(!active.exists());
+}
+
+#[test]
+fn theme_import_export_round_trip_and_force_rules() {
+    let home = home_with_registry();
+    let source = home.path().join("ocean.spar");
+    std::fs::write(&source, STATE_FILE).unwrap();
+    let command = format!("theme import {}", source.display());
+    let imported = sparsh().env("HOME", home.path()).args(["-c", &command]).output().unwrap();
+    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
+    let active = home.path().join(".sparsh/src/theme.generated.spar");
+    let text = std::fs::read_to_string(&active).unwrap();
+    assert!(text.contains("#112233") && text.contains("kind: \"external\"") && text.contains("ocean"), "{text}");
+    let exported = home.path().join("exported.spar");
+    let output = sparsh().env("HOME", home.path()).args(["theme", "export", exported.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(std::fs::read_to_string(&exported).unwrap().contains("#112233"));
+    let again = sparsh().env("HOME", home.path()).args(["theme", "export", exported.to_str().unwrap()]).output().unwrap();
+    assert!(!again.status.success());
+    let forced = sparsh().env("HOME", home.path()).args(["theme", "export", exported.to_str().unwrap(), "--force"]).output().unwrap();
+    assert!(forced.status.success());
+}
+
+#[test]
+fn theme_refuses_symlinked_state_file_and_symlinked_parent() {
+    let home = home_with_registry();
+    let src = home.path().join(".sparsh/src");
+    let outside = home.path().join("outside.spar");
+    std::fs::write(&outside, "outside remains").unwrap();
+    std::os::unix::fs::symlink(&outside, src.join("theme.generated.spar")).unwrap();
+    let result = sparsh().env("HOME", home.path()).args(["theme", "set", "gruvbox"]).output().unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside remains");
+    let other = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&src, other.path().join(".sparsh")).unwrap();
+    let output = sparsh().env("HOME", other.path()).args(["theme", "set", "default"]).output().unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn theme_export_holds_only_the_overrides_in_effect() {
+    let home = tempfile::tempdir().unwrap();
+    let output_file = home.path().join("theme-export.spar");
+    let accent = sparsh().env("HOME", home.path()).args(["theme", "set", "--accent", "#8ab4f8"]).output().unwrap();
+    assert!(accent.status.success(), "{}", String::from_utf8_lossy(&accent.stderr));
+    let output = sparsh().env("HOME", home.path()).args(["theme", "export", output_file.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let source = std::fs::read_to_string(output_file).unwrap();
+    assert!(source.contains("accent:") && source.lines().count() < 20, "{source}");
+}
+
+#[test]
+fn theme_export_can_be_reimported_without_original_layers() {
+    let home = tempfile::tempdir().unwrap();
+    let src = home.path().join(".sparsh/src");
+    std::fs::create_dir_all(&src).unwrap();
+    let exported = src.join("complete.spar");
+    let output = sparsh().env("HOME", home.path()).args(["theme", "export", exported.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let checked = Command::new("spar").args(["check", exported.to_str().unwrap()]).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+    let imported = sparsh().env("HOME", home.path()).args(["theme", "import", exported.to_str().unwrap()]).output().unwrap();
+    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
+    assert!(src.join("theme.generated.spar").is_file());
+}
+
+#[test]
+fn theme_accent_and_pywal_errors_preserve_active_file() {
+    let home = tempfile::tempdir().unwrap();
+    let active = home.path().join(".sparsh/src/theme.generated.spar");
+    let accent = sparsh().env("HOME", home.path()).args(["theme", "set", "--accent", "#8ab4f8"]).output().unwrap();
+    assert!(accent.status.success(), "{}", String::from_utf8_lossy(&accent.stderr));
+    let first = std::fs::read(&active).unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("accent:"));
+    let checked = Command::new("spar").args(["check", active.to_str().unwrap()]).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+
+    let bad = sparsh().env("HOME", home.path()).args(["theme", "set", "--accent", "#oops"]).output().unwrap();
+    assert!(!bad.status.success());
+    let missing = sparsh().env("HOME", home.path()).args(["theme", "import", "pywal"]).output().unwrap();
+    assert!(!missing.status.success());
+    assert_eq!(std::fs::read(&active).unwrap(), first);
+
+    let cache = home.path().join(".cache/wal");
+    std::fs::create_dir_all(&cache).unwrap();
+    let colors = cache.join("colors.json");
+    std::fs::write(&colors, "{bad").unwrap();
+    let malformed = sparsh().env("HOME", home.path()).args(["theme", "import", "pywal"]).output().unwrap();
+    assert!(!malformed.status.success());
+    assert_eq!(std::fs::read(&active).unwrap(), first);
+
+    std::fs::write(&colors, r##"{"special":{"foreground":"#eeeeee","background":"#111111"},"colors":{"color1":"#dd4444","color2":"#44bb66","color3":"#ddaa44","color4":"#4488dd","color6":"#44aacc","color8":"#777777","color12":"#88aaff"}}"##).unwrap();
+    let imported = sparsh().env("HOME", home.path()).args(["theme", "import", "pywal"]).output().unwrap();
+    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
+    assert_ne!(std::fs::read(&active).unwrap(), first);
+    assert!(String::from_utf8_lossy(&imported.stdout).contains("colors.json"));
+}

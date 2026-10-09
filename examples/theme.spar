@@ -1,0 +1,14 @@
+// Your own theme. Sparsh never writes this file.
+// Tools (theme set, theme import pywal, wallpaper scripts) write
+// ~/.sparsh/src/theme.generated.spar, which is layered on top of this one.
+// Copy as ~/.sparsh/src/modules/theme.spar.
+import { SparshTheme, SparshThemePalette, SparshThemeStyle, SparshThemePrompt } from "../sparsh-types.spar";
+
+export var shellTheme: SparshTheme = SparshTheme(
+    palette: some(value: SparshThemePalette(
+        accent: some(value: "#8ab4f8"),
+    )),
+    prompt: some(value: SparshThemePrompt(
+        cwd: some(value: SparshThemeStyle(bold: some(value: true))),
+    )),
+);

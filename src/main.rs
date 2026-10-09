@@ -13,6 +13,7 @@ Sparsh — the Spar shell
 usage:
   sparsh
   sparsh -c <input>
+  sparsh theme [list | set NAME | import FILE | export FILE]
   sparsh --login
   sparsh --remote-command <input>
   sparsh --help
@@ -28,6 +29,7 @@ fn version_string() -> String {
 enum CliMode {
     Default,
     EditBuffer(PathBuf),
+    Theme(Vec<String>),
     Startup(StartupMode),
     Help,
     Version,
@@ -37,6 +39,7 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<CliMode, St
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     match arguments.as_slice() {
         [] => Ok(CliMode::Default),
+        [name, args @ ..] if name == "theme" => Ok(CliMode::Theme(args.to_vec())),
         [flag] if flag == "--help" => Ok(CliMode::Help),
         [flag] if flag == "--version" => Ok(CliMode::Version),
         [flag] if flag == "--login" => Ok(CliMode::Startup(StartupMode::Login)),
@@ -117,6 +120,29 @@ fn run_one_command(startup: StartupMode, input: String) -> i32 {
     }
 }
 
+fn run_theme_cli(args: Vec<String>) -> i32 {
+    let startup = StartupMode::Command("theme".into());
+    let mut session = match ShellSession::try_new_for(&startup, false, false) {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = render_error(&error, None, &Theme::plain(), &mut io::stderr().lock());
+            return error.status();
+        }
+    };
+    load_config_or_report(&mut session, &mut io::stderr().lock());
+    match session.run_theme_command(&args) {
+        Ok(output) => {
+            let _ = io::stdout().lock().write_all(&output.stdout);
+            let _ = io::stderr().lock().write_all(&output.stderr);
+            output.status
+        }
+        Err(error) => {
+            let _ = render_error(&error, None, &Theme::plain(), &mut io::stderr().lock());
+            error.status()
+        }
+    }
+}
+
 fn run_stream(startup: StartupMode) -> i32 {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -169,7 +195,8 @@ fn result_status(result: &ShellResult) -> i32 {
         | ShellResult::ReloadConfig
         | ShellResult::ReloadConfigWith(_)
         | ShellResult::ExecRequest { .. }
-        | ShellResult::SourceRequest(_) => 0,
+        | ShellResult::SourceRequest(_)
+        | ShellResult::ThemeRequest(_) => 0,
         ShellResult::Builtin(output) => output.status,
         ShellResult::Process(outcome) => outcome.exit_code,
         ShellResult::BackgroundJob { .. } => 0,
@@ -193,6 +220,7 @@ fn run() -> i32 {
             };
             run_stream(startup)
         }
+        Ok(CliMode::Theme(args)) => run_theme_cli(args),
         Ok(CliMode::EditBuffer(path)) => match edit_buffer_file(&path) {
             Ok(()) => 0,
             Err(error) => {

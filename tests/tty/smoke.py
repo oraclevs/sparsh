@@ -2,7 +2,7 @@
 """Drives the real sparsh binary through a pseudo-terminal and checks the
 completion features that unit tests cannot see (the editor decides what text
 the completer receives). Usage: SPARSH_BIN=target/release/sparsh python3 tests/tty/smoke.py"""
-import fcntl, os, pty, select, struct, sys, tempfile, termios, time
+import fcntl, os, pty, re, select, struct, sys, tempfile, termios, time
 
 BIN = os.environ.get("SPARSH_BIN", "sparsh")
 
@@ -121,10 +121,13 @@ class Screen:
             self.reply(f"\x1b[{self.r + 1};{self.c + 1}R")
 
 
-def run(steps, cwd, wait=0.8, rows=40, cols=120):
+def run(steps, cwd, wait=0.8, rows=40, cols=120, home=None, env_overrides=None, include_raw=False):
     """Runs sparsh, sends each step as keystrokes and returns the emulated
     screen text after startup and after every step."""
-    env = dict(os.environ, HOME=tempfile.mkdtemp(), TERM="xterm-256color")
+    env = dict(os.environ, HOME=str(home or tempfile.mkdtemp()), TERM="xterm-256color")
+    env.pop("NO_COLOR", None)
+    if env_overrides:
+        env.update(env_overrides)
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(cwd)
@@ -133,6 +136,7 @@ def run(steps, cwd, wait=0.8, rows=40, cols=120):
     screen = Screen(rows, cols, lambda text: os.write(fd, text.encode()))
 
     def drain(seconds):
+        raw = bytearray()
         end = time.time() + seconds
         while time.time() < end:
             ready, _, _ = select.select([fd], [], [], 0.1)
@@ -144,18 +148,30 @@ def run(steps, cwd, wait=0.8, rows=40, cols=120):
                 break
             if not data:
                 break
+            raw.extend(data)
             screen.feed(data)
-        return screen.text()
+        return screen.text(), bytes(raw)
 
-    shots = [drain(2.0)]
+    first, first_raw = drain(2.0)
+    shots, captures = [first], [first_raw]
     for step in steps:
-        os.write(fd, step.encode())
-        shots.append(drain(wait))
+        if callable(step):
+            step(env["HOME"])
+        else:
+            os.write(fd, step.encode())
+        shot, raw = drain(wait)
+        shots.append(shot)
+        captures.append(raw)
     try:
         os.kill(pid, 9)
     except OSError:
         pass
-    return shots
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+    os.close(fd)
+    return (shots, captures) if include_raw else shots
 
 
 def check(label, steps, cwd, expect, forbid=()):
@@ -221,6 +237,129 @@ def menu_checks(d):
     return results
 
 
+def theme_source(base):
+    return f'''var themeState: Record = {{
+    source: {{ kind: "external"; origin: "smoke"; }};
+    theme: {{
+        prompt: {{ cwd: {{ foreground: "{base + 1}"; }}; }};
+        syntax: {{ functionName: {{ foreground: "{base + 2}"; }}; }};
+        completion: {{
+            menuSelected: {{ background: "{base + 3}"; }};
+            hintSignature: {{ foreground: "{base + 4}"; }};
+        }};
+        data: {{ tableHeader: {{ foreground: "{base + 5}"; }}; }};
+    }};
+}};
+'''
+
+
+def theme_checks(cwd):
+    with tempfile.TemporaryDirectory() as home:
+        src = os.path.join(home, ".sparsh", "src")
+        os.makedirs(src)
+        active = os.path.join(src, "theme.generated.spar")
+        with open(active, "w") as target:
+            target.write(theme_source(200))
+
+        def rewrite(base):
+            def apply(_):
+                with open(active, "w") as target:
+                    target.write(theme_source(base))
+            return apply
+
+        def partial(_):
+            with open(active, "w") as target:
+                target.write("var themeState: Record = {")
+
+        steps = [
+            'fn build(profile: str) -> str { return profile; };\r',
+            'build(profile: ', '\x03', 'b\t', '\x03', 'dirs\r',
+            rewrite(210), '\r', 'build(profile: ', '\x03', 'b\t', '\x03', 'dirs\r',
+            partial, '\r', rewrite(220), '\r',
+        ]
+        _, raw = run(steps, cwd, wait=1.0, home=home,
+                     env_overrides={"COLORTERM": ""}, include_raw=True)
+        cases = [
+            ("theme prompt starts with file role", b"38;5;201", raw[0]),
+            ("theme syntax reaches editor", b"38;5;202", raw[1] + raw[2]),
+            ("theme signature hint uses role", b"38;5;204", raw[2]),
+            ("theme menu background uses role", b"48;5;203", raw[4]),
+            ("theme table header uses role", b"38;5;205", raw[6]),
+            ("theme prompt reloads after rewrite", b"38;5;211", raw[8]),
+            ("theme syntax reloads", b"38;5;212", raw[9]),
+            ("theme hint reloads", b"38;5;214", raw[9]),
+            ("theme menu reloads", b"48;5;213", raw[11]),
+            ("theme table reloads", b"38;5;215", raw[13]),
+            ("bad rewrite keeps last valid theme", b"38;5;211", raw[15]),
+            ("valid rewrite recovers", b"38;5;221", raw[17]),
+        ]
+        results = []
+        for label, token, output in cases:
+            ok = token in output
+            print(("ok   " if ok else "FAIL ") + label)
+            if not ok:
+                print(output[-1000:].decode("utf8", "replace"))
+            results.append(ok)
+        _, plain_raw = run(['dirs\r'], cwd, wait=0.6, home=home,
+                           env_overrides={"NO_COLOR": "1", "COLORTERM": ""}, include_raw=True)
+        no_color = not any(re.search(rb"\x1b\[(?!0(?:;0)*m)[0-9][0-9;]*m", output) for output in plain_raw)
+        print(("ok   " if no_color else "FAIL ") + "NO_COLOR suppresses theme styles")
+        results.append(no_color)
+        return results
+
+
+def theme_menu_check(cwd):
+    """`theme set <Tab>` offers the themes registered in configuration.themes."""
+    with tempfile.TemporaryDirectory() as home:
+        src = os.path.join(home, ".sparsh", "src")
+        os.makedirs(src)
+        schema = os.path.join(os.path.dirname(__file__), "..", "..", "examples", "sparsh-types.spar")
+        with open(schema) as source, open(os.path.join(src, "sparsh-types.spar"), "w") as target:
+            target.write(source.read())
+        with open(os.path.join(src, "config.spar"), "w") as target:
+            target.write('''import { SparshConfig, SparshThemeKind, SparshTheme } from "./sparsh-types.spar";
+var configuration: SparshConfig = SparshConfig(
+    themes: some(value: [
+        SparshThemeKind(name: "gruvbox", theme: SparshTheme()),
+        SparshThemeKind(name: "royal", theme: SparshTheme()),
+    ]),
+);
+''')
+        screen = run(["theme set ", "\t"], cwd, wait=1.0, home=home)[-1]
+        ok = all(name in screen for name in ["gruvbox", "royal", "default", "--accent"])
+        print(("ok   " if ok else "FAIL ") + "theme set offers registered theme names")
+        if not ok:
+            print(screen)
+        table = run(["theme list\r"], cwd, wait=1.0, home=home)[-1]
+        shown = ("name" in table and "description" in table and "active" in table
+                 and "gruvbox" in table and "royal" in table and "│" in table)
+        print(("ok   " if shown else "FAIL ") + "theme list is a table")
+        if not shown:
+            print(table)
+        return [ok, shown]
+
+
+def startup_builtin_check(cwd):
+    """A startup() that calls state-changing builtins sees them take effect."""
+    with tempfile.TemporaryDirectory() as home:
+        src = os.path.join(home, ".sparsh", "src")
+        os.makedirs(src)
+        with open(os.path.join(src, "config.spar"), "w") as target:
+            target.write('''fn startup() -> ShellResult<int, int> {
+    path append "/tmp/sparsh-smoke-startup-dir";
+    export SPARSH_SMOKE_STARTUP=from_startup;
+    return ok(value: 0, quiet: true);
+};
+''')
+        screen = run(["path\r", "echo $SPARSH_SMOKE_STARTUP\r"], cwd, wait=1.2, home=home)[-1]
+        ok = ("/tmp/sparsh-smoke-startup-dir" in screen and "from_startup" in screen
+              and "could not run" not in screen)
+        print(("ok   " if ok else "FAIL ") + "startup can call path and export")
+        if not ok:
+            print(screen)
+        return [ok]
+
+
 def main():
     d = tempfile.mkdtemp()
     open(d + "/a.txt", "w").write("x")
@@ -243,6 +382,9 @@ def main():
         check("mixed line runs", ["echo hi; var a: int = 2; a + 1\r"], d, ["hi", "3"]),
     ]
     results += menu_checks(d)
+    results += theme_checks(d)
+    results += theme_menu_check(d)
+    results += startup_builtin_check(d)
     sys.exit(0 if all(results) else 1)
 
 
