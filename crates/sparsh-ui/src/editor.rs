@@ -6,10 +6,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use nu_ansi_term::{Color, Style};
 use reedline::{
     default_emacs_keybindings, EditCommand, EditMode, Emacs,
-    FileBackedHistory, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle,
+    KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, MenuTextStyle,
     OutputMode, PromptEditMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
 };
 use sparsh_core::{
@@ -23,7 +22,7 @@ use crate::{
     active_python_environment, detect_projects, is_multiline_paste_candidate,
     multiline_submissions, render_command_diagnostic, render_error, render_prompt_issues,
     render_result, review_multiline_paste, ColorPolicy, GitProbe, LocalTime, PromptData,
-    PromptState, SparshCompleter, SparshHighlighter, SparshHinter, SparshValidator, SystemSampler, Theme,
+    PromptState, SemanticRole, SparshCompleter, SparshHighlighter, SparshHinter, SparshValidator, SystemSampler, Theme,
 };
 
 const PRIVATE_EDITOR_BLOCKED: &str = "sparsh:private-editor-blocked";
@@ -191,13 +190,13 @@ fn reedline_action(action: KeybindingAction) -> ReedlineEvent {
     }
 }
 
-fn completion_menu_text_style() -> MenuTextStyle {
-    let selected = Style::new().fg(Color::Black).on(Color::LightCyan).bold();
+fn completion_menu_text_style(theme: &Theme) -> MenuTextStyle {
+    let selected = theme.style(SemanticRole::MenuSelected);
     MenuTextStyle {
-        text_style: Style::new().fg(Color::White),
+        text_style: theme.style(SemanticRole::MenuText),
         selected_text_style: selected,
-        description_style: Style::new().fg(Color::LightBlue),
-        match_style: Style::new().fg(Color::LightYellow).bold(),
+        description_style: theme.style(SemanticRole::MenuFooter),
+        match_style: theme.style(SemanticRole::MenuMatch),
         selected_match_style: selected,
     }
 }
@@ -206,7 +205,8 @@ fn completion_menu(theme: &Theme) -> BorderedMenu {
     BorderedMenu::new(
         "completion_menu",
         &crate::prompt::prompt_indicator(theme),
-        completion_menu_text_style(),
+        completion_menu_text_style(theme),
+        theme.clone(),
     )
 }
 
@@ -293,7 +293,7 @@ fn build_editor(
     session.set_history_access(Arc::new(history.clone()));
 
     let highlighter = SparshHighlighter::new(snapshot, theme.clone());
-    let hinter = SparshHinter::new(Arc::clone(&completion_snapshot));
+    let hinter = SparshHinter::new(Arc::clone(&completion_snapshot), theme.clone());
     let completer = SparshCompleter::new(completion_snapshot).with_theme(theme.clone());
     let mut buffer_editor = Command::new(std::env::current_exe()?);
     buffer_editor.arg("--edit-buffer");
@@ -361,7 +361,7 @@ fn open_pager(
         &crate::data_view::RenderOptions::unbounded(),
     );
     let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
-    crate::pager::run(&lines, &session.pager_keybindings())
+    crate::pager::run(&lines, &session.pager_keybindings(), theme)
 }
 
 pub(crate) fn terminal_width() -> usize {
@@ -382,7 +382,15 @@ pub(crate) fn terminal_width() -> usize {
 }
 
 pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Result<i32> {
-    let theme = color.theme();
+    let initial_refresh = session.refresh_theme(false);
+    if let Some(notice) = initial_refresh.notice {
+        writeln!(io::stderr().lock(), "theme: {notice}")?;
+    }
+    let mut theme = Theme::from_layers(
+        color == ColorPolicy::Auto,
+        session.theme_file_layer(),
+        session.config_theme_layer(),
+    );
     let snapshot = Arc::new(RwLock::new(session.ui_snapshot()));
     let completion_snapshot = Arc::new(RwLock::new(session.completion_snapshot()));
     let editor_mode = Arc::new(RwLock::new(EditorMode::Normal));
@@ -400,6 +408,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
         &buffer_file,
     )?;
     let mut active_config_generation = session.config_generation();
+    let mut active_theme_generation = session.theme_generation();
     let mut git = GitProbe::new();
     // Lives across prompts: `cpu` needs the previous sample to compute a delta.
     let mut sampler = SystemSampler::new();
@@ -420,7 +429,18 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
     }
 
     loop {
-        if active_config_generation != session.config_generation() {
+        let refresh = session.refresh_theme(false);
+        if let Some(notice) = refresh.notice {
+            writeln!(io::stderr().lock(), "theme: {notice}")?;
+        }
+        if active_config_generation != session.config_generation()
+            || active_theme_generation != session.theme_generation()
+        {
+            theme = Theme::from_layers(
+                color == ColorPolicy::Auto,
+                session.theme_file_layer(),
+                session.config_theme_layer(),
+            );
             editor = build_editor(
                 session,
                 color,
@@ -432,6 +452,7 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 &buffer_file,
             )?;
             active_config_generation = session.config_generation();
+            active_theme_generation = session.theme_generation();
         }
 
         if reported_generation != Some(session.config_generation()) {
@@ -666,7 +687,7 @@ mod tests {
     use crate::history::{SharedHistory, SparshHistory};
     use crossterm::event::{Event, KeyEvent};
     use nu_ansi_term::{Color, Style};
-    use reedline::{EditCommand, EditMode, KeyCode, KeyModifiers, ReedlineEvent, ReedlineRawEvent};
+        use reedline::{EditCommand, EditMode, KeyCode, KeyModifiers, ReedlineEvent, ReedlineRawEvent};
     use sparsh_core::{EditorMode, KeyChord, KeybindingAction, KeybindingConfig};
     use std::sync::{atomic::AtomicBool, Arc};
 
@@ -859,7 +880,7 @@ mod tests {
 
     #[test]
     fn completion_menu_uses_high_contrast_option_styles() {
-        let styles = completion_menu_text_style();
+        let styles = completion_menu_text_style(&crate::Theme::colored());
 
         assert_eq!(styles.text_style, Style::new().fg(Color::White));
         assert_eq!(styles.description_style, Style::new().fg(Color::LightBlue));

@@ -119,6 +119,7 @@ pub fn render_result<W: Write>(
         | ShellResult::ReloadConfigWith(_)
         | ShellResult::ExecRequest { .. }
         | ShellResult::SourceRequest(_)
+        | ShellResult::ThemeRequest(_)
         | ShellResult::Process(_)
         | ShellResult::CommandStatus { .. }
         | ShellResult::Exit(_) => Ok(()),

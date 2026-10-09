@@ -13,6 +13,7 @@ use reedline::{
 };
 
 use crate::width::{display_width, truncate_display};
+use crate::{SemanticRole, Theme};
 
 /// Most item rows shown at once; the window scrolls to follow the selection.
 pub(crate) const MAX_ROWS: usize = 8;
@@ -41,6 +42,19 @@ pub(crate) struct BoxStyles {
     pub footer: Style,
     /// The `n/total` marker in the bottom border: bright, so it is never mistaken for border.
     pub count: Style,
+}
+
+impl BoxStyles {
+    pub(crate) fn from_theme(theme: &Theme) -> Self {
+        Self {
+            border: theme.style(SemanticRole::MenuBorder),
+            text: theme.style(SemanticRole::MenuText),
+            selected: theme.style(SemanticRole::MenuSelected),
+            detail: theme.style(SemanticRole::MenuDetail),
+            footer: theme.style(SemanticRole::MenuFooter),
+            count: theme.style(SemanticRole::MenuCount),
+        }
+    }
 }
 
 /// Whether the terminal is wide enough for the box.
@@ -277,7 +291,7 @@ pub(crate) fn render_box(
 pub(crate) struct BorderedMenu {
     inner: ColumnarMenu,
     indicator: String,
-    styles: MenuTextStyle,
+    theme: Theme,
     selected: usize,
     first: usize,
     width: usize,
@@ -289,7 +303,7 @@ impl BorderedMenu {
     /// `indicator` is what the prompt shows in place of its own marker while
     /// the menu is open; pass the prompt's own marker so the prompt does not
     /// change.
-    pub(crate) fn new(name: &str, indicator: &str, styles: MenuTextStyle) -> Self {
+    pub(crate) fn new(name: &str, indicator: &str, styles: MenuTextStyle, theme: Theme) -> Self {
         let inner = ColumnarMenu::default()
             .with_name(name)
             // The completer needs the text after the cursor too
@@ -303,7 +317,7 @@ impl BorderedMenu {
         Self {
             inner,
             indicator: indicator.to_string(),
-            styles,
+            theme,
             selected: 0,
             first: 0,
             width: 0,
@@ -376,14 +390,7 @@ impl BorderedMenu {
 
     fn lines(&self, ansi: bool) -> Vec<String> {
         let (rows, kind_styles) = self.rows();
-        let box_styles = BoxStyles {
-            border: Style::new().fg(nu_ansi_term::Color::DarkGray),
-            text: self.styles.text_style,
-            selected: self.styles.selected_text_style,
-            detail: Style::new().dimmed(),
-            footer: self.styles.description_style,
-            count: Style::new().bold().fg(nu_ansi_term::Color::LightCyan),
-        };
+        let box_styles = BoxStyles::from_theme(&self.theme);
         render_box(
             &rows,
             self.selected,
@@ -495,6 +502,18 @@ impl Menu for BorderedMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_styles_follow_theme_roles() {
+        let theme = crate::Theme::colored();
+        let styles = BoxStyles::from_theme(&theme);
+        assert_eq!(styles.selected, theme.style(crate::SemanticRole::MenuSelected));
+        assert_eq!(styles.border, theme.style(crate::SemanticRole::MenuBorder));
+        assert_eq!(styles.detail, theme.style(crate::SemanticRole::MenuDetail));
+        assert_eq!(styles.footer, theme.style(crate::SemanticRole::MenuFooter));
+        assert_eq!(styles.count, theme.style(crate::SemanticRole::MenuCount));
+    }
+
     use nu_ansi_term::Color;
 
     fn row(label: &str, detail: &str, kind: &str) -> Row {

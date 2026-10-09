@@ -1,96 +1,26 @@
 use nu_ansi_term::{Color, Style};
-use sparsh_core::{ColorSpec, TextStyle};
+use sparsh_core::{ColorSpec, PaletteKey, TextStyle, ThemeColor, ThemeLayer, ThemeStyleSpec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticRole {
-    Cwd,
-    GitBranch,
-    GitDirty,
-    GitClean,
-    GitStaged,
-    GitModified,
-    GitUntracked,
-    GitConflict,
-    GitAhead,
-    GitBehind,
-    Success,
-    Time,
-    Failure,
-    Duration,
-    PromptMarker,
-    Secondary,
-    Warning,
-    Error,
-    Builtin,
-    Alias,
-    ExternalCommand,
-    UnknownCommand,
-    Argument,
-    Path,
-    Function,
-    Parameter,
-    Option,
-    QuotedString,
-    Operator,
-    SparSyntax,
-    /// `// comments` in Spar source typed at the prompt.
-    Comment,
-    /// Type names in Spar source: `int`, `List`, declared structs and enums.
-    TypeName,
-    VirtualEnvironment,
-    ProjectPython,
-    ProjectRust,
-    ProjectFlutter,
-    ProjectDart,
-    ProjectNode,
-    ProjectGo,
-    /// Keys of records, JSON objects, YAML and TOML.
-    DataKey,
-    DataString,
-    DataNumber,
-    DataBool,
-    DataNull,
-    /// Brackets, commas, colons and other structure in rendered data.
-    DataPunct,
-    TableHeader,
-    TableIndex,
-    TableBorder,
-    /// Directory names in a structured `ls` listing.
-    FileDirectory,
-    /// Executable files in a structured `ls` listing.
-    FileExecutable,
-    /// Symbolic links in a structured `ls` listing.
-    FileSymlink,
-    /// Sockets, pipes and devices in a structured `ls` listing.
-    FileSpecial,
-    /// Completion menu: functions and methods.
-    CompletionFunction,
-    /// Completion menu: variables, fields and parameters.
-    CompletionVariable,
-    /// Completion menu: structs, enums and type names.
-    CompletionType,
-    /// Completion menu: keywords.
-    CompletionKeyword,
-    /// Completion menu: file names.
-    CompletionPath,
-    /// Completion menu: directory names.
-    CompletionDirectory,
-    /// Completion menu: external commands.
-    CompletionCommand,
-}
+pub use sparsh_core::ThemeRole as SemanticRole;
 
 #[derive(Clone, Debug)]
 pub struct Theme {
     enabled: bool,
+    file: ThemeLayer,
+    config: ThemeLayer,
 }
 
 impl Theme {
     pub fn colored() -> Self {
-        Self { enabled: true }
+        Self::from_layers(true, &ThemeLayer::default(), &ThemeLayer::default())
     }
 
     pub fn plain() -> Self {
-        Self { enabled: false }
+        Self::from_layers(false, &ThemeLayer::default(), &ThemeLayer::default())
+    }
+
+    pub fn from_layers(enabled: bool, file: &ThemeLayer, config: &ThemeLayer) -> Self {
+        Self { enabled, file: file.clone(), config: config.clone() }
     }
 
     pub fn enabled(&self) -> bool {
@@ -137,6 +67,15 @@ impl Theme {
         if !self.enabled {
             return Style::new();
         }
+        let mut style = self.default_style(role);
+        // `file` is the tool-generated layer and outranks the user's config theme.
+        let mut merged_palette = self.config.palette.clone();
+        merged_palette.extend(self.file.palette.iter().map(|(key, value)| (*key, *value)));
+        style = apply_layer(style, role, &self.config, &merged_palette);
+        apply_layer(style, role, &self.file, &merged_palette)
+    }
+
+    fn default_style(&self, role: SemanticRole) -> Style {
         match role {
             SemanticRole::Cwd => Style::new().fg(Color::LightBlue).bold(),
             SemanticRole::GitBranch => Style::new().fg(Color::LightMagenta),
@@ -192,13 +131,36 @@ impl Theme {
             SemanticRole::FileSpecial => Style::new().fg(Color::Yellow),
             // The completion roles default to the colors of the matching
             // highlight roles, so the menu agrees with the buffer.
-            SemanticRole::CompletionFunction => self.style(SemanticRole::Function),
-            SemanticRole::CompletionVariable => self.style(SemanticRole::Parameter),
-            SemanticRole::CompletionType => self.style(SemanticRole::TypeName),
-            SemanticRole::CompletionKeyword => self.style(SemanticRole::SparSyntax),
-            SemanticRole::CompletionPath => self.style(SemanticRole::Path),
-            SemanticRole::CompletionDirectory => self.style(SemanticRole::FileDirectory),
-            SemanticRole::CompletionCommand => self.style(SemanticRole::ExternalCommand),
+            SemanticRole::CompletionFunction => self.default_style(SemanticRole::Function),
+            SemanticRole::CompletionVariable => self.default_style(SemanticRole::Parameter),
+            SemanticRole::CompletionType => self.default_style(SemanticRole::TypeName),
+            SemanticRole::CompletionKeyword => self.default_style(SemanticRole::SparSyntax),
+            SemanticRole::CompletionPath => self.default_style(SemanticRole::Path),
+            SemanticRole::CompletionDirectory => self.default_style(SemanticRole::FileDirectory),
+            SemanticRole::CompletionCommand => self.default_style(SemanticRole::ExternalCommand),
+            SemanticRole::MenuBorder => Style::new().fg(Color::DarkGray),
+            SemanticRole::MenuText => Style::new().fg(Color::White),
+            SemanticRole::MenuSelected => Style::new().fg(Color::Black).on(Color::LightCyan).bold(),
+            SemanticRole::MenuDetail => Style::new().dimmed(),
+            SemanticRole::MenuFooter => Style::new().fg(Color::LightBlue),
+            SemanticRole::MenuCount => Style::new().fg(Color::LightCyan).bold(),
+            SemanticRole::MenuMatch => Style::new().fg(Color::LightYellow).bold(),
+            SemanticRole::HintHistory => Style::new().fg(Color::Fixed(243)),
+            SemanticRole::HintSignature => Style::new().fg(Color::DarkGray),
+            SemanticRole::HintActive => Style::new().fg(Color::LightCyan).bold(),
+            SemanticRole::HelpTitle => Style::new().fg(Color::LightCyan).bold(),
+            SemanticRole::HelpHeading => Style::new().fg(Color::LightGreen).bold(),
+            SemanticRole::HelpBody => Style::new(),
+            SemanticRole::HelpOption => Style::new().fg(Color::LightYellow),
+            SemanticRole::HelpExample => Style::new().fg(Color::LightGreen).bold(),
+            SemanticRole::HelpCrossReference => Style::new().fg(Color::LightCyan).bold(),
+            SemanticRole::EditorHeader => Style::new().fg(Color::Cyan).bold(),
+            SemanticRole::EditorPosition => Style::new().fg(Color::White),
+            SemanticRole::EditorStatus => Style::new().fg(Color::Black).on(Color::Cyan),
+            SemanticRole::EditorSelection => Style::new().reverse(),
+            SemanticRole::PagerStatus => Style::new().reverse(),
+            SemanticRole::PagerSearch => Style::new().reverse(),
+            SemanticRole::PagerSelected => Style::new().fg(Color::Black).on(Color::LightCyan),
         }
     }
 }
@@ -247,6 +209,77 @@ mod tests {
     use sparsh_core::{ColorSpec, TextStyle};
 
     use super::{rgb_to_ansi256, SemanticRole, Theme};
+
+    #[test]
+    fn exported_defaults_match_the_ui_default_style_table() {
+        use nu_ansi_term::Color;
+        use sparsh_core::{ThemeColor, ThemeLayer, ThemeRole};
+        let exported = ThemeLayer::resolved(&ThemeLayer::default(), &ThemeLayer::default());
+        let theme = Theme::colored();
+        let index = |color: Color| -> Option<ColorSpec> {
+            let value = match color {
+                Color::Black => 0, Color::Red => 1, Color::Green => 2,
+                Color::Yellow => 3, Color::Blue => 4, Color::Purple | Color::Magenta => 5,
+                Color::Cyan => 6, Color::White => 7, Color::DarkGray => 8,
+                Color::LightRed => 9, Color::LightGreen => 10, Color::LightYellow => 11,
+                Color::LightBlue => 12, Color::LightPurple | Color::LightMagenta => 13,
+                Color::LightCyan => 14, Color::LightGray => 15,
+                Color::Fixed(value) => value,
+                Color::Rgb(r, g, b) => return Some(ColorSpec::Rgb(r, g, b)),
+                Color::Default => return None,
+            };
+            Some(ColorSpec::Indexed(value))
+        };
+        for role in ThemeRole::ALL {
+            let actual = theme.style(*role);
+            let spec = &exported.roles[role];
+            assert_eq!(actual.foreground.and_then(index).map(ThemeColor::Literal), spec.foreground, "{role:?} foreground");
+            assert_eq!(actual.background.and_then(index).map(ThemeColor::Literal), spec.background, "{role:?} background");
+            assert_eq!(actual.is_bold, spec.bold.unwrap_or(false), "{role:?} bold");
+            assert_eq!(actual.is_dimmed, spec.dim.unwrap_or(false), "{role:?} dim");
+            assert_eq!(actual.is_italic, spec.italic.unwrap_or(false), "{role:?} italic");
+        }
+    }
+
+    #[test]
+    fn explicit_prompt_slot_style_has_the_last_word() {
+        let mut file = sparsh_core::ThemeLayer::default();
+        file.palette.insert(sparsh_core::PaletteKey::Info, ColorSpec::Indexed(31));
+        let theme = Theme::from_layers(true, &file, &sparsh_core::ThemeLayer::default());
+        assert_ne!(theme.paint(SemanticRole::Path, "x"), Theme::colored().paint(SemanticRole::Path, "x"));
+        let slot = theme.paint_spec(Some(ColorSpec::Indexed(201)), TextStyle::default(), "x");
+        assert!(slot.contains("38;5;201"), "{slot:?}");
+        assert!(!slot.contains("38;5;31"), "{slot:?}");
+    }
+
+    #[test]
+    fn pager_default_reverses_only_without_a_color_override() {
+        let default = Theme::colored();
+        assert!(default.style(SemanticRole::PagerStatus).is_reverse);
+        let mut config = sparsh_core::ThemeLayer::default();
+        config.roles.insert(SemanticRole::PagerStatus, sparsh_core::ThemeStyleSpec {
+            background: Some(sparsh_core::ThemeColor::Literal(ColorSpec::Indexed(55))),
+            ..Default::default()
+        });
+        let changed = Theme::from_layers(true, &sparsh_core::ThemeLayer::default(), &config);
+        assert!(!changed.style(SemanticRole::PagerStatus).is_reverse);
+        assert_eq!(changed.style(SemanticRole::PagerStatus).background, Some(nu_ansi_term::Color::Fixed(55)));
+    }
+
+    #[test]
+    fn pager_search_color_override_keeps_colors_in_their_requested_positions() {
+        let mut config = sparsh_core::ThemeLayer::default();
+        config.roles.insert(SemanticRole::PagerSearch, sparsh_core::ThemeStyleSpec {
+            foreground: Some(sparsh_core::ThemeColor::Literal(ColorSpec::Indexed(201))),
+            background: Some(sparsh_core::ThemeColor::Literal(ColorSpec::Indexed(202))),
+            ..Default::default()
+        });
+        let changed = Theme::from_layers(true, &sparsh_core::ThemeLayer::default(), &config);
+        let style = changed.style(SemanticRole::PagerSearch);
+        assert!(!style.is_reverse);
+        assert_eq!(style.foreground, Some(nu_ansi_term::Color::Fixed(201)));
+        assert_eq!(style.background, Some(nu_ansi_term::Color::Fixed(202)));
+    }
 
     #[test]
     fn paint_spec_applies_color_and_style_or_nothing_when_plain() {
@@ -306,4 +339,61 @@ mod tests {
         );
         assert_eq!(Theme::plain().paint(SemanticRole::Cwd, "cwd"), "cwd");
     }
+}
+
+fn palette_role(role: SemanticRole) -> PaletteKey {
+    role.palette_key()
+}
+
+fn ansi_color(spec: ColorSpec) -> Color {
+    match spec {
+        ColorSpec::Indexed(index) => Color::Fixed(index),
+        ColorSpec::Rgb(r, g, b) if truecolor_supported() => Color::Rgb(r, g, b),
+        ColorSpec::Rgb(r, g, b) => Color::Fixed(rgb_to_ansi256(r, g, b)),
+    }
+}
+
+fn apply_layer(
+    mut style: Style,
+    role: SemanticRole,
+    layer: &ThemeLayer,
+    merged_palette: &std::collections::BTreeMap<PaletteKey, ColorSpec>,
+) -> Style {
+    let mut has_color_override = false;
+    if let Some(color) = layer.palette.get(&palette_role(role)) {
+        style.foreground = Some(ansi_color(*color));
+        has_color_override = true;
+    }
+    if palette_role(role) == PaletteKey::SelectionFg {
+        if let Some(color) = layer.palette.get(&PaletteKey::SelectionBg) {
+            style.background = Some(ansi_color(*color));
+            has_color_override = true;
+        }
+    }
+    if let Some(spec) = layer.roles.get(&role) {
+        let resolve = |value: ThemeColor| match value {
+            ThemeColor::Literal(color) => Some(color),
+            ThemeColor::Palette(key) => merged_palette.get(&key).copied(),
+        };
+        if let Some(color) = spec.foreground.and_then(resolve) {
+            style.foreground = Some(ansi_color(color));
+            has_color_override = true;
+        }
+        if let Some(color) = spec.background.and_then(resolve) {
+            style.background = Some(ansi_color(color));
+            has_color_override = true;
+        }
+        merge_attributes(&mut style, spec);
+    }
+    if has_color_override && matches!(role, SemanticRole::PagerStatus | SemanticRole::PagerSearch | SemanticRole::EditorSelection) {
+        style.is_reverse = false;
+    }
+    style
+}
+
+fn merge_attributes(style: &mut Style, spec: &ThemeStyleSpec) {
+    if let Some(value) = spec.bold { style.is_bold = value; }
+    if let Some(value) = spec.dim { style.is_dimmed = value; }
+    if let Some(value) = spec.italic { style.is_italic = value; }
+    if let Some(value) = spec.underline { style.is_underline = value; }
 }

@@ -3,25 +3,28 @@
 
 use std::sync::{Arc, RwLock};
 
-use nu_ansi_term::{Color, Style};
 use reedline::{DefaultHinter, Hinter, History};
 use sparsh_core::{signature_hint_info, CompletionSnapshot, SignatureHint};
+
+use crate::{SemanticRole, Theme};
 
 pub struct SparshHinter {
     snapshot: Arc<RwLock<CompletionSnapshot>>,
     history: DefaultHinter,
+    theme: Theme,
     /// True while the last hint was a signature, which must never be inserted
     /// into the buffer by the "accept hint" keys.
     showing_signature: bool,
 }
 
 impl SparshHinter {
-    pub fn new(snapshot: Arc<RwLock<CompletionSnapshot>>) -> Self {
+    pub fn new(snapshot: Arc<RwLock<CompletionSnapshot>>, theme: Theme) -> Self {
         // The history suggestion is dim gray (xterm 243): readable if you look, but
         // clearly not typed text, so a backspace visibly removes what was there.
         Self {
             snapshot,
-            history: DefaultHinter::default().with_style(Style::new().fg(Color::Fixed(243))),
+            history: DefaultHinter::default().with_style(theme.style(SemanticRole::HintHistory)),
+            theme,
             showing_signature: false,
         }
     }
@@ -29,12 +32,12 @@ impl SparshHinter {
 
 /// `  build(profile: str, release: bool = false)` with the active parameter in
 /// bold when colors are on.
-pub fn render_signature_hint(hint: &SignatureHint, use_ansi_coloring: bool) -> String {
-    if !use_ansi_coloring {
+pub fn render_signature_hint(hint: &SignatureHint, theme: &Theme) -> String {
+    if !theme.enabled() {
         return format!("  {}", hint.text);
     }
-    let dim = Style::new().fg(Color::DarkGray);
-    let active = Style::new().fg(Color::LightCyan).bold();
+    let dim = theme.style(SemanticRole::HintSignature);
+    let active = theme.style(SemanticRole::HintActive);
     let range = &hint.active_range;
     format!(
         "  {}{}{}",
@@ -60,7 +63,10 @@ impl Hinter for SparshHinter {
             .and_then(|snapshot| signature_hint_info(&snapshot, line, pos));
         self.showing_signature = signature.is_some();
         match signature {
-            Some(hint) => render_signature_hint(&hint, use_ansi_coloring),
+            Some(hint) => {
+                let plain = Theme::plain();
+                render_signature_hint(&hint, if use_ansi_coloring { &self.theme } else { &plain })
+            },
             None => self.history.handle(line, pos, history, use_ansi_coloring, cwd),
         }
     }
@@ -98,7 +104,7 @@ mod tests {
     #[test]
     fn the_signature_is_the_hint_inside_a_call_and_is_never_accepted() {
         let history = FileBackedHistory::new(10).unwrap();
-        let mut hinter = SparshHinter::new(snapshot());
+        let mut hinter = SparshHinter::new(snapshot(), Theme::plain());
         let line = "build(profile: ";
         let hint = hinter.handle(line, line.len(), &history, false, ".");
         assert_eq!(hint, "  build(profile: str, release: bool = false)");
@@ -109,7 +115,7 @@ mod tests {
     #[test]
     fn outside_a_call_the_history_hint_is_used() {
         let history = FileBackedHistory::new(10).unwrap();
-        let mut hinter = SparshHinter::new(snapshot());
+        let mut hinter = SparshHinter::new(snapshot(), Theme::plain());
         assert_eq!(hinter.handle("build", 5, &history, false, "."), "");
         assert!(!hinter.showing_signature);
     }
@@ -117,9 +123,9 @@ mod tests {
     #[test]
     fn the_active_parameter_is_bold_when_colors_are_on() {
         let hint = SignatureHint { text: "f(a: int, b: str)".into(), active: 1, active_range: 10..16 };
-        let plain = render_signature_hint(&hint, false);
+        let plain = render_signature_hint(&hint, &Theme::plain());
         assert_eq!(plain, "  f(a: int, b: str)");
-        let colored = render_signature_hint(&hint, true);
+        let colored = render_signature_hint(&hint, &Theme::colored());
         assert!(colored.contains("\u{1b}["), "{colored:?}");
         assert!(colored.contains("b: str"));
     }

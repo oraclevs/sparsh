@@ -80,7 +80,7 @@ fn table(
                 border("│"),
                 theme.paint(first_role, &pad(cell_a, left)),
                 border("│"),
-                pad(cell_b, right),
+                theme.paint(SemanticRole::HelpBody, &pad(cell_b, right)),
                 border("│"),
             ));
         }
@@ -92,40 +92,40 @@ fn table(
 
 pub(crate) fn render_help(page: &HelpPage, theme: &Theme, width: usize) -> String {
     let width = width.clamp(40, 110);
-    let heading = |text: &str| format!("{}\n", theme.paint(SemanticRole::TableHeader, text));
+    let heading = |text: &str| format!("{}\n", theme.paint(SemanticRole::HelpHeading, text));
     let mut out = format!(
         "\n{}  {}\n",
-        theme.paint(SemanticRole::Builtin, &page.name),
-        page.summary
+        theme.paint(SemanticRole::HelpTitle, &page.name),
+        theme.paint(SemanticRole::HelpBody, &page.summary)
     );
     if !page.details.is_empty() {
         out.push('\n');
         for line in wrap(&page.details, width.saturating_sub(2)) {
-            out.push_str(&format!("  {line}\n"));
+            out.push_str(&format!("  {}\n", theme.paint(SemanticRole::HelpBody, &line)));
         }
     }
     out.push('\n');
     out.push_str(&heading("USAGE"));
     for line in &page.usage {
-        out.push_str(&format!("  {}\n", theme.paint(SemanticRole::Argument, line)));
+        out.push_str(&format!("  {}\n", theme.paint(SemanticRole::HelpBody, line)));
     }
     if !page.options.is_empty() {
         out.push('\n');
         out.push_str(&heading("OPTIONS"));
-        out.push_str(&table(["option", "what it does"], &page.options, SemanticRole::Option, theme, width));
+        out.push_str(&table(["option", "what it does"], &page.options, SemanticRole::HelpOption, theme, width));
     }
     if !page.examples.is_empty() {
         out.push('\n');
         out.push_str(&heading("EXAMPLES"));
-        out.push_str(&table(["type this", "what happens"], &page.examples, SemanticRole::Success, theme, width));
+        out.push_str(&table(["type this", "what happens"], &page.examples, SemanticRole::HelpExample, theme, width));
     }
     if !page.see_also.is_empty() {
         let names: Vec<String> = page
             .see_also
             .iter()
-            .map(|name| theme.paint(SemanticRole::Builtin, name))
+            .map(|name| theme.paint(SemanticRole::HelpCrossReference, name))
             .collect();
-        out.push_str(&format!("\n{} {}\n", theme.paint(SemanticRole::TableHeader, "SEE ALSO"), names.join(", ")));
+        out.push_str(&format!("\n{} {}\n", theme.paint(SemanticRole::HelpHeading, "SEE ALSO"), names.join(", ")));
     }
     out.push('\n');
     out
@@ -144,6 +144,15 @@ mod tests {
             assert!(text.contains(part), "{part}\n{text}");
         }
         assert!(text.lines().all(|line| line.width() <= 80), "{text}");
+    }
+
+    #[test]
+    fn help_heading_uses_theme_role() {
+        let registry = sparsh_core::builtin::BuiltinRegistry::new();
+        let page = sparsh_core::help_page("z", &registry).unwrap();
+        let theme = Theme::colored();
+        let text = render_help(&page, &theme, 80);
+        assert!(text.contains(&theme.paint(SemanticRole::HelpHeading, "USAGE")));
     }
 
     #[test]

@@ -9,18 +9,20 @@ use std::io::{self, IsTerminal, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, Print, SetAttribute};
+use crossterm::style::Print;
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
 use sparsh_core::{KeyChord, KeybindingKey, PagerAction, PagerKeybindingConfig};
 use unicode_width::UnicodeWidthChar;
+
+use crate::{SemanticRole, Theme};
 
 /// Horizontal scroll step in columns.
 const SIDEWAYS_STEP: usize = 8;
 
 /// Pages `lines` (already painted with ANSI colors). Without a terminal the
 /// lines are written straight to stdout.
-pub fn run(lines: &[String], keys: &[PagerKeybindingConfig]) -> io::Result<()> {
+pub fn run(lines: &[String], keys: &[PagerKeybindingConfig], theme: &Theme) -> io::Result<()> {
     let mut stdout = io::stdout();
     if !stdout.is_terminal() || !io::stdin().is_terminal() {
         for line in lines {
@@ -32,7 +34,7 @@ pub fn run(lines: &[String], keys: &[PagerKeybindingConfig]) -> io::Result<()> {
     let (width, height) = terminal::size()?;
     let mut state = PagerState::new(lines, usize::from(width), usize::from(height));
     loop {
-        draw(&mut stdout, &state)?;
+        draw(&mut stdout, &state, theme)?;
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if state.search_input.is_some() {
@@ -125,6 +127,7 @@ struct PagerState<'a> {
     height: usize,
     max_width: usize,
     query: String,
+    selected: Option<usize>,
     search_input: Option<String>,
     status: Option<String>,
 }
@@ -155,6 +158,7 @@ impl<'a> PagerState<'a> {
             height,
             max_width,
             query: String::new(),
+            selected: None,
             search_input: None,
             status: None,
         };
@@ -242,7 +246,13 @@ impl<'a> PagerState<'a> {
 
     fn find(&mut self, forward: bool) {
         if self.query.is_empty() {
+            self.selected = None;
             self.status = Some("no search pattern; press / to search".into());
+            return;
+        }
+        if self.plain.is_empty() {
+            self.selected = None;
+            self.status = Some(format!("pattern not found: {}", self.query));
             return;
         }
         let needle = self.query.to_lowercase();
@@ -259,10 +269,14 @@ impl<'a> PagerState<'a> {
         });
         match hit {
             Some(index) => {
+                self.selected = Some(index);
                 self.top = index.saturating_sub(self.body_height() / 3);
                 self.status = Some(format!("/{}  line {}", self.query, index + 1));
             }
-            None => self.status = Some(format!("pattern not found: {}", self.query)),
+            None => {
+                self.selected = None;
+                self.status = Some(format!("pattern not found: {}", self.query));
+            }
         }
         self.clamp();
     }
@@ -296,24 +310,36 @@ impl<'a> PagerState<'a> {
     }
 }
 
-fn draw(out: &mut io::Stdout, state: &PagerState) -> io::Result<()> {
+fn draw(out: &mut io::Stdout, state: &PagerState, theme: &Theme) -> io::Result<()> {
     queue!(out, MoveTo(0, 0), Clear(ClearType::All))?;
-    for (row, line) in state.visible().enumerate() {
+    for (row, _) in state.visible().enumerate() {
         queue!(
             out,
             MoveTo(0, row as u16),
-            Print(slice_columns(line, state.left, state.width))
+            Print(render_line(state, if row < state.pinned { row } else { state.top + row - state.pinned }, theme))
         )?;
     }
     let status = truncate(&state.status_line(), state.width);
+    let role = if state.search_input.is_some() {
+        SemanticRole::PagerSearch
+    } else {
+        SemanticRole::PagerStatus
+    };
     queue!(
         out,
         MoveTo(0, (state.height - 1) as u16),
-        SetAttribute(Attribute::Reverse),
-        Print(format!("{status:<width$}", width = state.width)),
-        SetAttribute(Attribute::Reset)
+        Print(theme.paint(role, &format!("{status:<width$}", width = state.width)))
     )?;
     out.flush()
+}
+
+fn render_line(state: &PagerState<'_>, index: usize, theme: &Theme) -> String {
+    if state.selected == Some(index) {
+        let text = slice_columns(&state.plain[index], state.left, state.width);
+        theme.paint(SemanticRole::PagerSelected, &text)
+    } else {
+        slice_columns(&state.lines[index], state.left, state.width)
+    }
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -460,6 +486,26 @@ mod tests {
         state.query = "nothing like this".into();
         state.apply(PagerAction::SearchNext);
         assert!(state.status_line().contains("not found"));
+    }
+
+    #[test]
+    fn found_line_uses_the_selected_role() {
+        let lines = numbered(20);
+        let mut state = PagerState::new(&lines, 40, 8);
+        state.query = "row 12".into();
+        state.find(true);
+        assert_eq!(state.selected, Some(12));
+        let mut config = sparsh_core::ThemeLayer::default();
+        config.roles.insert(SemanticRole::PagerSelected, sparsh_core::ThemeStyleSpec {
+            background: Some(sparsh_core::ThemeColor::Literal(sparsh_core::ColorSpec::Indexed(203))),
+            ..Default::default()
+        });
+        let themed = Theme::from_layers(true, &sparsh_core::ThemeLayer::default(), &config);
+        let selected = render_line(&state, 12, &themed);
+        assert!(selected.contains("48;5;203"), "{selected:?}");
+        assert_eq!(render_line(&state, 11, &themed), "row 11");
+        let plain = Theme::plain();
+        assert_eq!(render_line(&state, 12, &plain), "row 12");
     }
 
     #[test]

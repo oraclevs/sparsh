@@ -9,13 +9,13 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::queue;
-use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::{Print, ResetColor};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use sparsh_core::{ShellSession, ShellUiSnapshot};
 use unicode_width::UnicodeWidthChar;
 
 use crate::highlight::paint_range;
-use crate::Theme;
+use crate::{SemanticRole, Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditorAction {
@@ -558,26 +558,15 @@ fn render(
     }
 
     queue!(output, Hide, MoveTo(0, 0), Clear(ClearType::All))?;
-    if theme.enabled() {
-        queue!(
-            output,
-            SetForegroundColor(Color::Cyan),
-            SetAttribute(Attribute::Bold),
-            Print("Sparsh Editor"),
-            SetAttribute(Attribute::Reset),
-            ResetColor,
-            Print("  "),
-            SetForegroundColor(Color::White),
-            Print(format!("line {}:{}", buffer.row + 1, buffer.column + 1)),
-            ResetColor,
-        )?;
-    } else {
-        queue!(
-            output,
-            Print("Sparsh Editor  "),
-            Print(format!("line {}:{}", buffer.row + 1, buffer.column + 1)),
-        )?;
-    }
+    queue!(
+        output,
+        Print(theme.paint(SemanticRole::EditorHeader, "Sparsh Editor")),
+        Print("  "),
+        Print(theme.paint(
+            SemanticRole::EditorPosition,
+            &format!("line {}:{}", buffer.row + 1, buffer.column + 1),
+        )),
+    )?;
 
     let editor_width = width.saturating_sub(1);
     // Whole-file highlighting: lex once, then slice the spans per row.
@@ -620,9 +609,10 @@ fn render(
             queue!(
                 output,
                 Print(chars[..from].iter().collect::<String>()),
-                SetAttribute(Attribute::Reverse),
-                Print(chars[from..to_cells].iter().collect::<String>()),
-                SetAttribute(Attribute::NoReverse),
+                Print(theme.paint(
+                    SemanticRole::EditorSelection,
+                    &chars[from..to_cells].iter().collect::<String>(),
+                )),
                 Print(chars[to_cells..].iter().collect::<String>()),
             )?;
         } else if theme.enabled() {
@@ -679,17 +669,10 @@ fn render(
         }
     };
     queue!(output, MoveTo(0, status_row), Clear(ClearType::CurrentLine))?;
-    if theme.enabled() {
-        queue!(
-            output,
-            SetForegroundColor(Color::Black),
-            crossterm::style::SetBackgroundColor(Color::Cyan),
-            Print(truncate_to_width(help, width)),
-            ResetColor,
-        )?;
-    } else {
-        queue!(output, Print(truncate_to_width(help, width)))?;
-    }
+    queue!(
+        output,
+        Print(theme.paint(SemanticRole::EditorStatus, &truncate_to_width(help, width))),
+    )?;
     queue!(
         output,
         MoveTo(
