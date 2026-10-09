@@ -98,7 +98,8 @@ pub fn render_error<W: Write>(
     theme: &Theme,
     err: &mut W,
 ) -> io::Result<()> {
-    err.write_all(render_error_text(error, source, theme).as_bytes())
+    // Module-isolation names (`SparModule<hash>Name`) are compiler plumbing.
+    err.write_all(spar::naming::demangle(&render_error_text(error, source, theme)).as_bytes())
 }
 
 #[cfg(test)]

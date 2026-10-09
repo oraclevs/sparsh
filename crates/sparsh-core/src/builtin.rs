@@ -101,6 +101,24 @@ impl BuiltinRegistry {
                     cd
                 ),
                 builtin!(
+                    "z",
+                    "Jump to a directory you have visited before",
+                    "z [words...] | z --set NAME [DIR] | z --unset NAME | z --list",
+                    "directory",
+                    true,
+                    false,
+                    z
+                ),
+                builtin!(
+                    "repl",
+                    "Edit this session's imports, variables and functions as a file",
+                    "repl [--editor]",
+                    "session",
+                    false,
+                    false,
+                    repl
+                ),
+                builtin!(
                     "pwd",
                     "Print current directory",
                     "pwd",
@@ -412,13 +430,13 @@ impl BuiltinRegistry {
                     deactivate
                 ),
                 builtin!(
-                    "repl",
-                    "Enter multiline Spar REPL mode",
-                    "repl",
+                    "srepl",
+                    "Private multiline Spar REPL: nothing is saved, everything is discarded on exit",
+                    "srepl",
                     "session",
-                    true,
                     false,
-                    repl
+                    false,
+                    srepl
                 ),
                 builtin!(
                     "pkg",
@@ -511,6 +529,111 @@ fn cd(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) ->
         .change(&target, &mut context.services.environment)
         .map_err(error)?;
     Ok(success(None))
+}
+
+fn z(args: &[String], context: &mut BuiltinContext<'_>, registry: &BuiltinRegistry) -> BuiltinResult {
+    let direct = args.len() == 1
+        && !args[0].starts_with("--")
+        && (args[0] == "-" || args[0].starts_with(['/', '~', '.']));
+    if args.is_empty() || direct {
+        return cd(args, context, registry);
+    }
+    let history = context
+        .services
+        .history
+        .clone()
+        .ok_or_else(|| error("z: no directory history in this session"))?;
+    let current = context.services.directories.current().to_path_buf();
+    match args[0].as_str() {
+        "--set" => {
+            let usage = "z --set NAME [DIRECTORY]";
+            let name = args.get(1).ok_or_else(|| usage_error(usage))?;
+            if args.len() > 3
+                || name.starts_with('-')
+                || name.contains(|ch: char| ch.is_whitespace() || ch == '/')
+            {
+                return Err(usage_error(usage));
+            }
+            let target = match args.get(2) {
+                Some(target) => {
+                    let target = if target == "~" || target.starts_with("~/") {
+                        let home = context
+                            .services
+                            .environment
+                            .get("HOME")
+                            .ok_or_else(|| error("z: HOME is not set"))?;
+                        std::path::PathBuf::from(home).join(target.trim_start_matches('~').trim_start_matches('/'))
+                    } else {
+                        current.join(target)
+                    };
+                    target
+                }
+                None => current,
+            };
+            let target = target
+                .canonicalize()
+                .ok()
+                .filter(|path| path.is_dir())
+                .ok_or_else(|| error(format!("z: {} is not a directory", target.display())))?;
+            history.set_dir_alias(name, &target).map_err(error)?;
+            Ok(success(Some(format!("{name} -> {}\n", target.display()))))
+        }
+        "--unset" => {
+            let name = match args {
+                [_, name] => name,
+                _ => return Err(usage_error("z --unset NAME")),
+            };
+            if history.remove_dir_alias(name).map_err(error)? {
+                Ok(success(None))
+            } else {
+                Err(error(format!("z: no short name `{name}`")))
+            }
+        }
+        "--list" => {
+            let visits = history.directories().map_err(error)?;
+            let aliases = history.dir_aliases().map_err(error)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let mut text = String::new();
+            for (name, visit) in crate::zdir::listing(&visits, &aliases, now) {
+                text.push_str(&format!(
+                    "{:<20} {:>6} {}\n",
+                    name.unwrap_or_default(),
+                    visit.count,
+                    visit.path.display()
+                ));
+            }
+            Ok(success(Some(text)))
+        }
+        flag if flag.starts_with("--") => Err(usage_error("z [words...] | z --set NAME [DIRECTORY] | z --unset NAME | z --list")),
+        _ => {
+            let visits = history.directories().map_err(error)?;
+            let aliases = history.dir_aliases().map_err(error)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let target = crate::zdir::rank(&visits, args, now, Some(&current), &aliases)
+                .into_iter()
+                .find(|path| path.is_dir())
+                .ok_or_else(|| {
+                    error(format!("z: no visited directory matches `{}`", args.join(" ")))
+                })?;
+            context
+                .services
+                .directories
+                .change(&target.to_string_lossy(), &mut context.services.environment)
+                .map_err(error)?;
+            Ok(success(None))
+        }
+    }
+}
+
+fn repl(args: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+    if !(args.is_empty() || args == ["--editor"]) {
+        return Err(usage_error("repl [--editor]"));
+    }
+    Err(error("repl is available in interactive sessions"))
 }
 
 fn deactivate(
@@ -895,8 +1018,8 @@ fn wrapper(_: &[String], _: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> Bui
     Err(error("internal wrapper dispatch failure"))
 }
 
-fn repl(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
-    require_empty(args, "repl")?;
+fn srepl(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+    require_empty(args, "srepl")?;
     context.requested_editor_mode = Some(crate::session::EditorMode::Repl);
     Ok(success(None))
 }
@@ -982,6 +1105,8 @@ mod tests {
         let registry = BuiltinRegistry::new();
         let expected = [
             "cd",
+            "z",
+            "repl",
             "pwd",
             "pushd",
             "popd",
@@ -1016,8 +1141,8 @@ mod tests {
             "logout",
             "source",
             "deactivate",
-            "repl",
             "reload",
+            "srepl",
             "pkg",
             "exit",
         ];

@@ -115,6 +115,11 @@ impl DirectoryService {
         Ok(())
     }
 
+    /// The current directory first, then the `pushd` stack.
+    pub(crate) fn all(&self) -> Vec<PathBuf> {
+        std::iter::once(self.current.clone()).chain(self.stack.iter().cloned()).collect()
+    }
+
     pub(crate) fn render(&self) -> String {
         let mut directories = Vec::with_capacity(self.stack.len() + 1);
         directories.push(self.current.display().to_string());

@@ -164,6 +164,7 @@ fn result_status(result: &ShellResult) -> i32 {
         ShellResult::Empty
         | ShellResult::Value(_)
         | ShellResult::Structured(_)
+        | ShellResult::Help(_)
         | ShellResult::EditorMode(_)
         | ShellResult::ReloadConfig
         | ShellResult::ReloadConfigWith(_)

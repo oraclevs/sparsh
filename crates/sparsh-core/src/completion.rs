@@ -43,6 +43,8 @@ pub enum CompletionContext {
     Argument,
     Path,
     Directory,
+    /// After `z`: directories from the visit history, best first.
+    Frecent,
     File,
     NoPaths,
     SparIdentifier,
@@ -67,6 +69,12 @@ pub struct CompletionSnapshot {
     pub(crate) executables: BTreeSet<String>,
     pub(crate) spar_identifiers: BTreeSet<String>,
     pub(crate) spar_functions: BTreeMap<String, Vec<String>>,
+    /// Names of `async` functions: what `await` can be followed by.
+    pub(crate) async_functions: BTreeSet<String>,
+    /// Directories the shell has entered, for `z` completion.
+    pub(crate) visited_dirs: Vec<crate::DirVisit>,
+    /// Short names from `z --set`.
+    pub(crate) dir_aliases: Vec<crate::DirAlias>,
     /// Everything the Spar session has committed so far, as source text.
     pub(crate) session_source: String,
 }
@@ -100,6 +108,9 @@ impl CompletionSnapshot {
             spar_identifiers: BTreeSet::from(["build".into(), "project".into()]),
             spar_functions: BTreeMap::from([("build".into(), vec!["profile".into()])]),
             session_source: String::new(),
+            visited_dirs: Vec::new(),
+            dir_aliases: Vec::new(),
+            async_functions: BTreeSet::new(),
         }
     }
 }
@@ -115,6 +126,9 @@ pub fn complete(
     if let Some(items) = complete_import_names(snapshot, request.line, cursor) {
         return items;
     }
+    if let Some(items) = complete_pipeline_position(snapshot, request.line, cursor) {
+        return items;
+    }
     if let Some(items) = complete_function_parameters(snapshot, request.line, cursor) {
         return items;
     }
@@ -122,6 +136,7 @@ pub fn complete(
         .or_else(|| interpolation_context(request.line, cursor))
         .unwrap_or_else(|| classify(request.line, cursor));
     let token = &request.line[span.clone()];
+    let keep_order = context == CompletionContext::Frecent;
     let mut items = match context {
         CompletionContext::Command => {
             let mut items = complete_commands(snapshot, token, span.clone());
@@ -142,6 +157,7 @@ pub fn complete(
         CompletionContext::Directory => {
             complete_paths(snapshot, token, span, PathCompletionMode::DirectoriesOnly)
         }
+        CompletionContext::Frecent => complete_frecent(snapshot, request.line, token, span),
         CompletionContext::NoPaths => Vec::new(),
         CompletionContext::File => {
             complete_paths(snapshot, token, span, PathCompletionMode::FilesOnly)
@@ -164,13 +180,15 @@ pub fn complete(
             }
         }
     };
-    items.sort_by(|left, right| {
+    if !keep_order {
+        items.sort_by(|left, right| {
         let left_exact = left.replacement == token;
         let right_exact = right.replacement == token;
         right_exact
             .cmp(&left_exact)
             .then_with(|| left.replacement.cmp(&right.replacement))
-    });
+        });
+    }
     items.dedup_by(|left, right| left.replacement == right.replacement);
     items
 }
@@ -369,12 +387,193 @@ pub fn classify(line: &str, cursor: usize) -> (CompletionContext, Range<usize>) 
         let path = path_like(token);
         match statement_kind(statement) {
             Some(ArgumentKind::Directories) => (CompletionContext::Directory, span),
+            Some(ArgumentKind::Frecent) => (CompletionContext::Frecent, span),
             Some(ArgumentKind::Files) => (CompletionContext::File, span),
             Some(ArgumentKind::Nothing) if path => (CompletionContext::NoPaths, span),
             _ if path => (CompletionContext::Path, span),
             _ => (CompletionContext::Argument, span),
         }
     }
+}
+
+/// Completion by what precedes the word: after `await` the async functions,
+/// after `|>` the functions that can be a stage, after `| from` / `|> from`
+/// the decoders, after `| to` / `|> to` the encoders. `None` elsewhere.
+fn complete_pipeline_position(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+) -> Option<Vec<CompletionItem>> {
+    let prefix = &line[..cursor];
+    let start = active_token_start(prefix);
+    let token = &prefix[start..];
+    let before = prefix[..start].trim_end();
+    // Only when whitespace separates the word from what precedes it.
+    if before.len() == prefix[..start].len() && !before.is_empty() {
+        return None;
+    }
+    let span = start..cursor;
+    let last_word = before
+        .rsplit(|c: char| c.is_whitespace() || c == '|' || c == '>')
+        .next()
+        .unwrap_or("");
+    let function_items = |names: Vec<&String>, tag: &str| -> Vec<CompletionItem> {
+        names
+            .into_iter()
+            .filter(|name| name.starts_with(token) && !name.starts_with("Sparsh"))
+            .map(|name| {
+                let params = snapshot.spar_functions.get(name).map(|p| p.join(", ")).unwrap_or_default();
+                CompletionItem {
+                    replacement: name.clone(),
+                    span: span.clone(),
+                    description: Some(format!("{tag}({params})")),
+                    kind: Some(ItemKind::Function),
+                }
+            })
+            .collect()
+    };
+    let after_pipe = |text: &str| text.trim_end().ends_with('|') || text.trim_end().ends_with("|>");
+    let items = if last_word == "await" && before.ends_with("await") {
+        function_items(snapshot.async_functions.iter().collect(), "async ")
+    } else if before.ends_with("|>") {
+        function_items(snapshot.spar_functions.keys().collect(), "")
+    } else if (last_word == "from" || last_word == "to") && before.ends_with(last_word)
+        && after_pipe(&before[..before.len() - last_word.len()])
+    {
+        let mut formats: Vec<(String, String)> = Vec::new();
+        if last_word == "from" {
+            for descriptor in spar::StructuredInputRegistry::builtin().descriptors() {
+                formats.push((descriptor.name.clone(), descriptor.description.clone()));
+            }
+        } else {
+            for descriptor in spar::StructuredFormatRegistry::builtin().descriptors() {
+                formats.push((descriptor.name().to_string(), "encode as this format".to_string()));
+            }
+        }
+        formats.sort();
+        formats.dedup_by(|a, b| a.0 == b.0);
+        formats
+            .into_iter()
+            .filter(|(name, _)| name.starts_with(token))
+            .map(|(name, description)| CompletionItem {
+                replacement: name,
+                span: span.clone(),
+                description: Some(description),
+                kind: Some(ItemKind::Keyword),
+            })
+            .collect()
+    } else {
+        return None;
+    };
+    (!items.is_empty()).then_some(items)
+}
+
+/// `z` completion: remembered directories matching every word typed so far,
+/// best first. The replacement covers all of `z`'s words, so the result is a
+/// plain path that `z` jumps to directly.
+fn complete_frecent(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    token: &str,
+    span: Range<usize>,
+) -> Vec<CompletionItem> {
+    if token.starts_with('-') {
+        return [
+            ("--set", "give a directory a short name"),
+            ("--unset", "remove a short name"),
+            ("--list", "list short names"),
+        ]
+        .into_iter()
+        .filter(|(flag, _)| flag.starts_with(token))
+        .map(|(flag, help)| CompletionItem {
+            replacement: flag.into(),
+            span: span.clone(),
+            description: Some(help.into()),
+            kind: Some(ItemKind::Keyword),
+        })
+        .collect();
+    }
+    let statement = statement_before(line, span.start);
+    let mut words: Vec<String> = parse_statement(statement)
+        .map(|(_, args)| args.into_iter().filter(|word| !word.starts_with('-')).collect())
+        .unwrap_or_default();
+    let path_only = words.is_empty() && path_like(token);
+    let path_span = span.clone();
+    let from = if words.is_empty() {
+        span.start
+    } else {
+        let base = statement.as_ptr() as usize - line.as_ptr() as usize;
+        let lead = statement.len() - statement.trim_start().len();
+        let after_command = statement[lead..]
+            .find(char::is_whitespace)
+            .map_or(statement.len(), |index| lead + index);
+        let rest = &statement[after_command..];
+        base + after_command + (rest.len() - rest.trim_start().len())
+    };
+    // A path already inserted by an earlier Tab narrows by prefix instead of by name.
+    let prefix = if token.starts_with('/') || token.starts_with('~') {
+        let expanded = match (token.strip_prefix('~'), snapshot.home.as_deref()) {
+            (Some(rest), Some(home)) => format!("{}{rest}", home.display()),
+            _ => token.to_string(),
+        };
+        words.clear();
+        Some(expanded)
+    } else {
+        if !token.is_empty() {
+            words.push(token.to_string());
+        }
+        None
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let mut ranked = crate::zdir::rank(
+        &snapshot.visited_dirs,
+        &words,
+        now,
+        // The menu lists every known directory, the current one included;
+        // only a jump skips it.
+        None,
+        &snapshot.dir_aliases,
+    );
+    // Aliased directories are always offered, even before they were visited.
+    if words.is_empty() && prefix.is_none() {
+        for (_, path) in &snapshot.dir_aliases {
+            if !ranked.contains(path) {
+                ranked.insert(0, path.clone());
+            }
+        }
+    }
+    let items: Vec<CompletionItem> = ranked
+        .into_iter()
+        .filter(|path| prefix.as_ref().map_or(true, |prefix| path.to_string_lossy().starts_with(prefix.as_str())))
+        .filter(|path| path.is_dir())
+        .take(200)
+        .map(|path| {
+            let shown = match snapshot.home.as_deref().and_then(|home| path.strip_prefix(home).ok()) {
+                Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+                Some(rest) => format!("~/{}", rest.display()),
+                None => path.display().to_string(),
+            };
+            // Two columns in the menu: a short name to type, and where it goes.
+            // An ambiguous folder name falls back to the full path.
+            let name = match &prefix {
+                Some(_) => None,
+                None => crate::zdir::short_name(&path, &snapshot.dir_aliases, &snapshot.visited_dirs),
+            };
+            CompletionItem {
+                replacement: quote_completion(name.as_deref().unwrap_or(&shown), None, false),
+                span: from..span.end,
+                description: Some(shown),
+                kind: Some(ItemKind::Directory),
+            }
+        })
+        .collect();
+    // Nothing remembered under that path: offer the directories on disk instead.
+    if items.is_empty() && path_only {
+        return complete_paths(snapshot, token, path_span, PathCompletionMode::DirectoriesOnly);
+    }
+    items
 }
 
 /// Kind of argument being typed at the end of `line[..cursor]`, if a command is present.
@@ -2431,5 +2630,62 @@ mod tests {
         let files = complete_in_fixture_dir("cat ");
         assert!(files.iter().all(|i| i.kind == Some(ItemKind::File)));
         assert_eq!(kind_of(&files, "a.txt"), Some(ItemKind::File));
+    }
+
+    #[test]
+    fn z_completes_visited_directories_ranked_and_widens_to_all_typed_words() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("alpha");
+        let b = root.path().join("alpine");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut snapshot = snapshot_in(root.path());
+        snapshot.visited_dirs = vec![
+            crate::DirVisit { path: a.clone(), count: 1, last: 0 },
+            crate::DirVisit { path: b.clone(), count: 9, last: 0 },
+            crate::DirVisit { path: root.path().join("gone"), count: 99, last: 0 },
+        ];
+        let all = complete_at(&snapshot, "z ", 2);
+        let names: Vec<_> = all.iter().map(|item| item.replacement.clone()).collect();
+        assert_eq!(names, ["alpine", "alpha"]);
+        assert_eq!(all[0].description.as_deref(), Some(b.display().to_string().as_str()));
+        let one = complete_at(&snapshot, "z alph", 6);
+        assert_eq!(one.len(), 1);
+        let two = complete_at(&snapshot, "z tmp alph", 10);
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].span, 2..10);
+        let prefix = format!("z {}", root.path().display());
+        assert_eq!(complete_at(&snapshot, &prefix, prefix.len()).len(), 2);
+        // A shared folder name is ambiguous, so the full path is inserted instead.
+        let other = root.path().join("x").join("alpha");
+        std::fs::create_dir_all(&other).unwrap();
+        snapshot.visited_dirs.push(crate::DirVisit { path: other.clone(), count: 1, last: 0 });
+        let shared: Vec<_> = complete_at(&snapshot, "z alpha", 7).iter().map(|i| i.replacement.clone()).collect();
+        assert!(shared.contains(&a.display().to_string()), "{shared:?}");
+        // A short name set with `z --set` is what the menu shows and inserts.
+        snapshot.dir_aliases = vec![("web".into(), a.clone())];
+        let named: Vec<_> = complete_at(&snapshot, "z ", 2).iter().map(|i| i.replacement.clone()).collect();
+        assert!(named.contains(&"web".to_string()), "{named:?}");
+    }
+
+    #[test]
+    fn await_offers_async_functions_pipes_offer_stages_and_formats() {
+        let mut snapshot = CompletionSnapshot::fixture();
+        snapshot.spar_functions.insert("dadJokes".into(), vec!["term".into(), "limit".into()]);
+        snapshot.spar_functions.insert("select".into(), vec!["fields".into()]);
+        snapshot.async_functions.insert("dadJokes".into());
+        let names = |line: &str| -> Vec<String> {
+            complete(&snapshot, CompletionRequest { line, cursor: line.len() })
+                .into_iter()
+                .map(|item| item.replacement)
+                .collect()
+        };
+        assert_eq!(names("await "), ["dadJokes"]);
+        assert_eq!(names("await dad"), ["dadJokes"]);
+        assert!(names("dadJokes() |> sel").contains(&"select".to_string()));
+        assert!(names("dadJokes() | from js").contains(&"json".to_string()));
+        assert!(names("dadJokes() |> to y").contains(&"yaml".to_string()));
+        // Not an `await` position: ordinary completion still applies.
+        assert!(!names("build ").contains(&"dadJokes".to_string()));
     }
 }

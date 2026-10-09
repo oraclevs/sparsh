@@ -39,6 +39,8 @@ pub(crate) struct BoxStyles {
     pub selected: Style,
     pub detail: Style,
     pub footer: Style,
+    /// The `n/total` marker in the bottom border: bright, so it is never mistaken for border.
+    pub count: Style,
 }
 
 /// Whether the terminal is wide enough for the box.
@@ -254,16 +256,18 @@ pub(crate) fn render_box(
     }
 
     let indicator = format!(" {}/{} ", selected + 1, total);
+    let count_style = styles.map(|s| s.count);
     let bottom = if display_width(&indicator) + 2 <= inner {
         format!(
-            "╰{}{}╯",
-            "─".repeat(inner - display_width(&indicator)),
-            indicator
+            "{}{}{}",
+            paint(border, &format!("╰{}", "─".repeat(inner - display_width(&indicator)))),
+            paint(count_style, &indicator),
+            paint(border, "╯")
         )
     } else {
-        format!("╰{}╯", "─".repeat(inner))
+        paint(border, &format!("╰{}╯", "─".repeat(inner)))
     };
-    out.push(format!(" {}", paint(border, &bottom)));
+    out.push(format!(" {bottom}"));
     out
 }
 
@@ -378,6 +382,7 @@ impl BorderedMenu {
             selected: self.styles.selected_text_style,
             detail: Style::new().dimmed(),
             footer: self.styles.description_style,
+            count: Style::new().bold().fg(nu_ansi_term::Color::LightCyan),
         };
         render_box(
             &rows,
@@ -669,6 +674,7 @@ mod tests {
             selected: Style::new().fg(Color::Black).on(Color::LightCyan).bold(),
             detail: Style::new().dimmed(),
             footer: Style::new(),
+            count: Style::new().bold().fg(Color::LightCyan),
         };
         let kinds = vec![Some(Style::new().fg(Color::Green)); 3];
         let styled = render_box(&sample(), 1, 0, MAX_ROWS, 80, Some(&styles), &kinds);

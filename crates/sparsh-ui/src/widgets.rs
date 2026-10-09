@@ -330,13 +330,32 @@ fn render_widget(
     }
 }
 
+/// How long a command took, readable at a glance: `2.4s`, `3s`, then once past
+/// a minute whole units (`1m 5s`, `2h 3m`, `1d 4h 12m`). Zero units are
+/// skipped and at most the three largest are shown.
 pub fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs_f64();
-    if seconds.fract() < 0.05 {
-        format!("{}s", seconds.round() as u64)
-    } else {
-        format!("{seconds:.1}s")
+    if seconds < 59.5 {
+        return if seconds.fract() < 0.05 {
+            format!("{}s", seconds.round() as u64)
+        } else {
+            format!("{seconds:.1}s")
+        };
     }
+    let total = seconds.round() as u64;
+    let parts = [
+        (total / 86_400, "d"),
+        (total % 86_400 / 3_600, "h"),
+        (total % 3_600 / 60, "m"),
+        (total % 60, "s"),
+    ];
+    parts
+        .iter()
+        .filter(|(value, _)| *value > 0)
+        .take(3)
+        .map(|(value, unit)| format!("{value}{unit}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn format_uptime(seconds: u64) -> String {
@@ -496,6 +515,19 @@ mod tests {
         assert_eq!(render_with("{duration}", &i).unwrap(), "2.4s");
         i.last_duration = Some(Duration::from_secs(3));
         assert_eq!(render_with("{duration}", &i).unwrap(), "3s");
+        for (seconds, expected) in [
+            (59.4, "59.4s"),
+            (60.0, "1m"),
+            (65.2, "1m 5s"),
+            (105.8, "1m 46s"),
+            (3_600.0, "1h"),
+            (3_725.0, "1h 2m 5s"),
+            (86_400.0, "1d"),
+            (90_061.0, "1d 1h 1m"),
+        ] {
+            i.last_duration = Some(Duration::from_secs_f64(seconds));
+            assert_eq!(render_with("{duration}", &i).unwrap(), expected, "{seconds}");
+        }
     }
 
     #[test]

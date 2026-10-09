@@ -249,8 +249,11 @@ impl Emitter {
             Value::String(text) => {
                 self.scalar(Some(SemanticRole::DataString), json_string(text));
             }
-            Value::Option(Some(inner)) | Value::Result(Ok(inner)) => {
+            Value::Option(Some(inner)) => {
                 self.write_value(inner, depth);
+            }
+            Value::Result(Ok(inner)) => {
+                self.write_value(&inner.value, depth);
             }
             other => self.scalar(
                 Some(SemanticRole::DataString),

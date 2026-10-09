@@ -35,11 +35,33 @@ pub(crate) fn default_history_path(environment: &EnvironmentService) -> PathBuf 
     PathBuf::from(".sparsh_history")
 }
 
+/// One remembered command with what was recorded about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryRecord {
+    pub line: usize,
+    /// Unix seconds; 0 when unknown (converted from the old plain-text history).
+    pub time: u64,
+    pub command: String,
+    pub directory: String,
+    pub kind: String,
+}
+
 pub trait HistoryAccess: Send + Sync {
     fn list(&self, limit: Option<usize>) -> Result<Vec<(usize, String)>, String>;
+    /// Like `list`, with the time, directory and kind of each command.
+    fn records(&self, limit: Option<usize>) -> Result<Vec<HistoryRecord>, String>;
     fn delete_line(&self, line: usize) -> Result<usize, String>;
     fn delete_matching(&self, text: &str, exact: bool) -> Result<usize, String>;
     fn clear(&self) -> Result<(), String>;
+    /// Remember that the shell entered `path` (also the cwd later commands are logged under).
+    /// Nothing is recorded in stealth mode.
+    fn record_dir(&self, path: &std::path::Path) -> Result<(), String>;
+    /// Every directory the shell has entered, with visit counts.
+    fn directories(&self) -> Result<Vec<crate::DirVisit>, String>;
+    /// Short names set with `z --set`.
+    fn dir_aliases(&self) -> Result<Vec<crate::DirAlias>, String>;
+    fn set_dir_alias(&self, name: &str, path: &std::path::Path) -> Result<(), String>;
+    fn remove_dir_alias(&self, name: &str) -> Result<bool, String>;
     fn stealth_mode(&self) -> Result<bool, String>;
     fn set_stealth_mode(&self, enabled: bool) -> Result<(), String>;
 }

@@ -55,6 +55,19 @@ pub fn scan(line: &str, snapshot: &ShellUiSnapshot) -> Vec<HighlightSpan> {
         if let Some(spans) = spar_scan(line, snapshot) {
             return spans;
         }
+        // Half-typed (an open string, bracket or call): close it virtually so
+        // the part already typed keeps its colors instead of falling back to
+        // the shell scanner.
+        for closing in ["\"", ")", "\")", "\"]", "]", "\"]", "}", "\")]"] {
+            let closed = format!("{line}{closing}");
+            if let Some(mut spans) = spar_scan(&closed, snapshot) {
+                spans.retain(|span| span.range.start < line.len());
+                for span in &mut spans {
+                    span.range.end = span.range.end.min(line.len());
+                }
+                return spans;
+            }
+        }
     }
     shell_scan(line, snapshot)
 }
@@ -104,6 +117,28 @@ fn spar_scan(line: &str, snapshot: &ShellUiSnapshot) -> Option<Vec<HighlightSpan
         let role = match &token.token {
             Token::IntLit(_) | Token::FloatLit(_) => SemanticRole::DataNumber,
             Token::True | Token::False => SemanticRole::DataBool,
+            // Bare shell statements inside Spar functions: the first word is the
+            // command, the rest are options, paths and plain arguments.
+            Token::ShellWord(_) | Token::ShellLiteralWord(_) => {
+                let continues = index
+                    .checked_sub(1)
+                    .and_then(|previous| tokens.get(previous))
+                    .is_some_and(|previous| {
+                        matches!(
+                            previous.token,
+                            Token::ShellWord(_) | Token::ShellLiteralWord(_) | Token::ShellFragment(_)
+                        )
+                    });
+                if !continues {
+                    command_role(snapshot, text)
+                } else if text.starts_with('-') {
+                    SemanticRole::Option
+                } else if text.contains('/') {
+                    SemanticRole::Path
+                } else {
+                    SemanticRole::Argument
+                }
+            }
             // The lexer's spans for string pieces are not reliable; strings
             // are painted from their regions below.
             Token::StringStart
@@ -119,6 +154,33 @@ fn spar_scan(line: &str, snapshot: &ShellUiSnapshot) -> Option<Vec<HighlightSpan
             | Token::TypeBool
             | Token::TypeVoid
             | Token::TypeShell => SemanticRole::TypeName,
+            Token::Ident(name)
+                if matches!(
+                    index.checked_sub(1).and_then(|i| tokens.get(i)).map(|t| &t.token),
+                    Some(Token::StructuredPipe)
+                ) =>
+            {
+                // A stage of a value pipeline: `|> select(...)`, `|> take(...)`.
+                let _ = name;
+                SemanticRole::Function
+            }
+            Token::Ident(name)
+                if matches!(name.as_str(), "from" | "to")
+                    && matches!(
+                        index.checked_sub(1).and_then(|i| tokens.get(i)).map(|t| &t.token),
+                        Some(Token::Pipe | Token::StructuredPipe)
+                    ) =>
+            {
+                SemanticRole::SparSyntax
+            }
+            Token::Ident(_)
+                if index >= 2
+                    && matches!(&tokens[index - 1].token, Token::Ident(word) if word == "from" || word == "to")
+                    && matches!(&tokens[index - 2].token, Token::Pipe | Token::StructuredPipe) =>
+            {
+                // The format after `from` / `to`: `| from json`, `|> to yaml`.
+                SemanticRole::Builtin
+            }
             Token::Ident(name) => {
                 let called = matches!(next, Some(Token::LParen));
                 let named = paren_depth > 0 && matches!(next, Some(Token::Colon));
@@ -473,10 +535,27 @@ fn is_structured_codec(word: &str) -> bool {
     )
 }
 
+/// Highlight spans for a whole Spar file (byte offsets into `source`), lexed
+/// once so multi-line functions, strings and shell statements color correctly.
+/// `None` while the text does not lex (mid-edit).
+pub(crate) fn scan_source(source: &str, snapshot: &ShellUiSnapshot) -> Option<Vec<HighlightSpan>> {
+    spar_scan(source, snapshot)
+}
+
 pub(crate) fn paint_range(
     line: &str,
     range: Range<usize>,
     snapshot: &ShellUiSnapshot,
+    theme: &Theme,
+) -> String {
+    paint_spans(line, range, &scan(line, snapshot), theme)
+}
+
+/// Paints `line[range]` with spans given in line coordinates.
+pub(crate) fn paint_spans(
+    line: &str,
+    range: Range<usize>,
+    spans: &[HighlightSpan],
     theme: &Theme,
 ) -> String {
     let start = range.start.min(line.len());
@@ -487,7 +566,7 @@ pub(crate) fn paint_range(
 
     let mut rendered = String::new();
     let mut cursor = start;
-    for span in scan(line, snapshot) {
+    for span in spans {
         let span_start = span.range.start.max(start);
         let span_end = span.range.end.min(end);
         if span_start >= span_end {
@@ -1109,5 +1188,23 @@ mod tests {
             let painted = paint_range(input, 0..input.len(), &snapshot, &Theme::plain());
             assert_eq!(painted, input, "{input:?}");
         }
+    }
+
+    #[test]
+    fn pipeline_stages_and_formats_are_colored_after_a_call() {
+        let mut session = ShellSession::new();
+        session.submit_spar("async fn dadJokes(limit: int = 5) -> List<int> { return []; };").unwrap();
+        let snapshot = session.ui_snapshot();
+        let role_of = |line: &str, word: &str| {
+            let spans = scan(line, &snapshot);
+            let start = line.find(word).unwrap();
+            spans.into_iter().find(|s| s.range.start == start).map(|s| s.role)
+        };
+        let piped = "await dadJokes(limit: 4) |> select(fields: [\"joke\"])";
+        assert_eq!(role_of(piped, "select"), Some(SemanticRole::Function));
+        assert_eq!(role_of("dadJokes(limit: 4) | from json", "from"), Some(SemanticRole::SparSyntax));
+        assert_eq!(role_of("dadJokes(limit: 4) | from json", "json"), Some(SemanticRole::Builtin));
+        // Half-typed: the call keeps its colors.
+        assert_eq!(role_of("await dadJokes(limit: 4, term: \"so", "dadJokes"), Some(SemanticRole::Function));
     }
 }

@@ -17,7 +17,13 @@ pub struct SparshHinter {
 
 impl SparshHinter {
     pub fn new(snapshot: Arc<RwLock<CompletionSnapshot>>) -> Self {
-        Self { snapshot, history: DefaultHinter::default(), showing_signature: false }
+        // The history suggestion is dim gray (xterm 243): readable if you look, but
+        // clearly not typed text, so a backspace visibly removes what was there.
+        Self {
+            snapshot,
+            history: DefaultHinter::default().with_style(Style::new().fg(Color::Fixed(243))),
+            showing_signature: false,
+        }
     }
 }
 

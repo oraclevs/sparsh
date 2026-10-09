@@ -158,7 +158,7 @@ fn piped_stdin_can_call_a_persistent_spar_function() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"function answer() -> int { return 42; };\nanswer()\n")
+        .write_all(b"function answer() -> int { return 42; };\nprintln(value: \"${answer()}\")\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
 
@@ -256,7 +256,7 @@ fn dash_c_can_call_named_argument_function_declared_in_sparsh_rc() {
 
     let output = sparsh()
         .env("HOME", home.path())
-        .args(["-c", "greet(prefix: \"Hello\", name: \"OCC\")"])
+        .args(["-c", "println(value: greet(prefix: \"Hello\", name: \"OCC\"))"])
         .output()
         .unwrap();
 
@@ -437,7 +437,7 @@ fn piped_stdin_accepts_semicolonless_spar_declarations_and_named_calls() {
         .take()
         .unwrap()
         .write_all(
-            b"var name: str = \"OCC\"\nfunction greet(name: str) -> str { return name; }\ngreet(name: name)\n",
+            b"var name: str = \"OCC\"\nfunction greet(name: str) -> str { return name; }\nprintln(value: greet(name: name))\n",
         )
         .unwrap();
     let output = child.wait_with_output().unwrap();
@@ -537,7 +537,7 @@ fn piped_session_source_spar_persists_function_for_later_named_call() {
         .spawn()
         .unwrap();
     let input = format!(
-        "source \"{}\"\ngreet(prefix: \"Hello\", name: \"OCC\")\n",
+        "source \"{}\"\nprintln(value: greet(prefix: \"Hello\", name: \"OCC\"))\n",
         sourced.display()
     );
     child
@@ -836,7 +836,7 @@ fn piped_stdin_accepts_canonical_fn_and_const() {
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(
-        b"const DIVISOR: int = 3;\nfn remainder(value: int) -> int { return value % DIVISOR; };\nremainder(value: 8)\n"
+        b"const DIVISOR: int = 3;\nfn remainder(value: int) -> int { return value % DIVISOR; };\nprintln(value: \"${remainder(value: 8)}\")\n"
     ).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(

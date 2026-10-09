@@ -4,6 +4,8 @@
 pub(crate) enum ArgumentKind {
     Files,
     Directories,
+    /// `z`: remembered directories, not the file system.
+    Frecent,
     FilesAndDirectories,
     Nothing,
 }
@@ -19,6 +21,7 @@ fn explicit_kind(command: &str) -> Option<ArgumentKind> {
         | "sha256sum" | "md5sum" | "sha1sum" | "sha512sum" | "b3sum" | "nl" | "tac" | "strings"
         | "file" | "xxd" | "od" => ArgumentKind::Files,
         "cd" | "pushd" | "rmdir" => ArgumentKind::Directories,
+        "z" => ArgumentKind::Frecent,
         "echo" | "printf" | "kill" | "which" | "type" | "man" | "alias" | "export" | "unset"
         | "history" => ArgumentKind::Nothing,
         "cp" | "mv" | "rm" | "ls" | "chmod" | "stat" | "du" | "mkdir" => {

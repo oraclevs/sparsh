@@ -245,6 +245,15 @@ struct Cell {
 
 impl Cell {
     fn of(value: &Value) -> Self {
+        // Stored timestamps are ISO 8601; people see `9 October 2026, 10:54 AM`.
+        if let Value::String(stamp) = value {
+            if let Some(then) = sparsh_core::listing::parse_iso8601(stamp) {
+                return Self::text(
+                    Some(SemanticRole::DataString),
+                    sparsh_core::listing::human_datetime(then),
+                );
+            }
+        }
         Self::from_lines(value_lines(value, 0))
     }
 
@@ -692,7 +701,7 @@ fn listing_cell(column: &str, fields: &spar::Record) -> Option<Cell> {
             let then = sparsh_core::listing::parse_iso8601(stamp)?;
             Some(Cell::text(
                 Some(SemanticRole::DataString),
-                sparsh_core::listing::relative_age(then, sparsh_core::listing::now_seconds()),
+                sparsh_core::listing::human_datetime(then),
             ))
         }
         _ => None,
@@ -903,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_tables_show_human_sizes_and_relative_dates() {
+    fn listing_tables_show_human_sizes_and_readable_dates() {
         let output = render_table(&listing_table(), &Theme::plain(), &RenderOptions::new(100));
         let header = output.lines().nth(1).unwrap();
         let positions = ["name", "type", "size", "modified"].map(|name| header.find(name).unwrap());
@@ -913,7 +922,8 @@ mod tests {
         );
         assert!(output.contains("4.1 KB"), "{output}");
         assert!(output.contains("35.1 KB"), "{output}");
-        assert!(output.contains(" years ago"), "{output}");
+        assert!(output.contains("AM") || output.contains("PM"), "{output}");
+        assert!(output.contains(" 2020, ") || output.contains(" 2019, "), "{output}");
         assert!(!output.contains("2020-01-01"), "{output}");
     }
 

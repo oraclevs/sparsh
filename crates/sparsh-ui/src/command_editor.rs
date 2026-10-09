@@ -4,7 +4,9 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
@@ -35,6 +37,10 @@ struct TextBuffer {
     lines: Vec<Vec<char>>,
     row: usize,
     column: usize,
+    /// Source-file editing: Enter keeps the indent, `{` adds a level, `}` removes one.
+    auto_indent: bool,
+    /// Where a selection started; the cursor is its other end.
+    anchor: Option<(usize, usize)>,
 }
 
 impl From<&str> for TextBuffer {
@@ -50,6 +56,8 @@ impl From<&str> for TextBuffer {
             lines,
             row: 0,
             column: 0,
+            auto_indent: false,
+            anchor: None,
         }
     }
 }
@@ -69,6 +77,95 @@ impl fmt::Display for TextBuffer {
 }
 
 impl TextBuffer {
+    /// The selection as ordered `(row, column)` ends, if any text is selected.
+    fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.anchor?;
+        let cursor = (self.row, self.column);
+        if anchor == cursor {
+            return None;
+        }
+        Some(if anchor < cursor { (anchor, cursor) } else { (cursor, anchor) })
+    }
+
+    /// The selected columns of `row`, as a char range.
+    fn selected_columns(&self, row: usize) -> Option<std::ops::Range<usize>> {
+        let ((start_row, start_column), (end_row, end_column)) = self.selection()?;
+        if row < start_row || row > end_row {
+            return None;
+        }
+        let from = if row == start_row { start_column } else { 0 };
+        let to = if row == end_row { end_column } else { self.lines[row].len() };
+        (from < to || (row != end_row && from <= to)).then_some(from..to.max(from))
+    }
+
+    fn selected_text(&self) -> String {
+        let Some(((start_row, start_column), (end_row, end_column))) = self.selection() else {
+            return String::new();
+        };
+        let mut text = String::new();
+        for row in start_row..=end_row {
+            let line = &self.lines[row];
+            let from = if row == start_row { start_column } else { 0 };
+            let to = if row == end_row { end_column } else { line.len() };
+            text.extend(&line[from.min(line.len())..to.min(line.len())]);
+            if row != end_row {
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    /// Removes the selection and puts the cursor where it was; false if none.
+    fn delete_selection(&mut self) -> bool {
+        let Some(((start_row, start_column), (end_row, end_column))) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        let tail = self.lines[end_row][end_column.min(self.lines[end_row].len())..].to_vec();
+        self.lines[start_row].truncate(start_column);
+        self.lines[start_row].extend(tail);
+        self.lines.drain(start_row + 1..=end_row);
+        self.row = start_row;
+        self.column = start_column;
+        self.anchor = None;
+        true
+    }
+
+    fn select_all(&mut self) {
+        self.anchor = Some((0, 0));
+        self.row = self.lines.len() - 1;
+        self.column = self.lines[self.row].len();
+    }
+
+    /// Inserts pasted text exactly as given: no auto-indent, no brace handling.
+    fn insert_text(&mut self, text: &str) {
+        self.delete_selection();
+        for character in text.chars() {
+            match character {
+                '\r' => {}
+                '\n' => {
+                    let column = self.column;
+                    let tail = self.current_line_mut().split_off(column);
+                    self.row += 1;
+                    self.lines.insert(self.row, tail);
+                    self.column = 0;
+                }
+                '\t' => {
+                    for _ in 0..4 {
+                        let column = self.column;
+                        self.current_line_mut().insert(column, ' ');
+                        self.column += 1;
+                    }
+                }
+                other => {
+                    let column = self.column;
+                    self.current_line_mut().insert(column, other);
+                    self.column += 1;
+                }
+            }
+        }
+    }
+
     fn current_line(&self) -> &[char] {
         &self.lines[self.row]
     }
@@ -81,14 +178,45 @@ impl TextBuffer {
         let column = self.column;
         self.current_line_mut().insert(column, character);
         self.column += 1;
+        // A closing brace that starts a line steps back one indent level.
+        if self.auto_indent && character == '}' {
+            let line = self.current_line_mut();
+            let before = &line[..line.len().min(column)];
+            if before.iter().all(|c| *c == ' ') && column >= 4 {
+                line.drain(..4);
+                self.column -= 4;
+            }
+        }
+    }
+
+    fn insert_indent(&mut self) {
+        for _ in 0..4 {
+            self.insert_char(' ');
+        }
+    }
+
+    /// True when Tab should indent rather than complete: at the start of a
+    /// line or after whitespace.
+    fn at_indent_position(&self) -> bool {
+        self.column == 0 || self.current_line()[self.column - 1].is_whitespace()
     }
 
     fn insert_newline(&mut self) {
         let column = self.column;
+        let line = self.current_line();
+        let mut indent: String = line.iter().take_while(|c| **c == ' ').collect();
+        if self.auto_indent && line[..column.min(line.len())].last() == Some(&'{') {
+            indent.push_str("    ");
+        }
         let tail = self.current_line_mut().split_off(column);
         self.row += 1;
         self.lines.insert(self.row, tail);
         self.column = 0;
+        if self.auto_indent {
+            for character in indent.chars() {
+                self.insert_char(character);
+            }
+        }
     }
 
     fn backspace(&mut self) {
@@ -170,7 +298,7 @@ impl TextBuffer {
         } else {
             items
                 .iter()
-                .take(5)
+                .take(8)
                 .map(|item| item.replacement.clone())
                 .collect()
         }
@@ -191,7 +319,7 @@ impl TerminalGuard {
     fn enter(output: &mut impl Write) -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let guard = Self;
-        execute!(output, EnterAlternateScreen, Hide)?;
+        execute!(output, EnterAlternateScreen, Hide, EnableBracketedPaste)?;
         Ok(guard)
     }
 }
@@ -200,7 +328,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
         let mut output = io::stdout();
-        let _ = execute!(output, Show, LeaveAlternateScreen, ResetColor);
+        let _ = execute!(output, DisableBracketedPaste, Show, LeaveAlternateScreen, ResetColor);
     }
 }
 
@@ -224,10 +352,33 @@ pub(crate) fn edit_text(
     snapshot: &ShellUiSnapshot,
     session: &ShellSession,
 ) -> io::Result<Option<EditorResult>> {
+    edit_buffer(initial, allow_execute, false, snapshot, session)
+}
+
+/// The editor for a Spar source file (`repl`): the whole buffer is lexed for
+/// highlighting, Tab indents or completes, Enter keeps the indentation, and
+/// the compiler's first error is shown live.
+pub(crate) fn edit_spar_source(
+    initial: &str,
+    snapshot: &ShellUiSnapshot,
+    session: &ShellSession,
+) -> io::Result<Option<EditorResult>> {
+    edit_buffer(initial, false, true, snapshot, session)
+}
+
+fn edit_buffer(
+    initial: &str,
+    allow_execute: bool,
+    spar_file: bool,
+    snapshot: &ShellUiSnapshot,
+    session: &ShellSession,
+) -> io::Result<Option<EditorResult>> {
     let mut buffer = TextBuffer::from(initial);
+    buffer.auto_indent = spar_file;
     let mut output = io::stdout();
     let _guard = TerminalGuard::enter(&mut output)?;
     let mut viewport_row = 0usize;
+    let mut clipboard = String::new();
     let mut completion_hints = Vec::<String>::new();
     let colors_enabled = std::env::var_os("NO_COLOR").is_none();
     let theme = if colors_enabled {
@@ -241,6 +392,7 @@ pub(crate) fn edit_text(
             &mut output,
             &buffer,
             allow_execute,
+            spar_file,
             snapshot,
             session,
             &completion_hints,
@@ -264,12 +416,42 @@ pub(crate) fn edit_text(
                                 EditorAction::Save,
                             ));
                         }
+                        // Copy when something is selected; otherwise leave the editor.
+                        KeyCode::Char('c') if buffer.selection().is_some() => {
+                            clipboard = buffer.selected_text();
+                            copy_to_terminal_clipboard(&mut output, &clipboard)?;
+                        }
                         KeyCode::Char('c') => return Ok(None),
-                        KeyCode::Char('a') => buffer.move_home(),
-                        KeyCode::Char('e') => buffer.move_end(),
+                        KeyCode::Char('x') if buffer.selection().is_some() => {
+                            clipboard = buffer.selected_text();
+                            copy_to_terminal_clipboard(&mut output, &clipboard)?;
+                            buffer.delete_selection();
+                        }
+                        KeyCode::Char('v') => buffer.insert_text(&clipboard),
+                        KeyCode::Char('a') => {
+                            buffer.anchor = None;
+                            buffer.move_home();
+                        }
+                        KeyCode::Char('e') => {
+                            buffer.anchor = None;
+                            buffer.move_end();
+                        }
                         _ => {}
                     }
                     continue;
+                }
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let movement = matches!(
+                    key.code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End
+                );
+                if movement {
+                    // Shift extends a selection from where it started; a plain move clears it.
+                    if shift {
+                        buffer.anchor.get_or_insert((buffer.row, buffer.column));
+                    } else {
+                        buffer.anchor = None;
+                    }
                 }
 
                 match key.code {
@@ -281,24 +463,65 @@ pub(crate) fn edit_text(
                             EditorAction::Execute,
                         ));
                     }
-                    KeyCode::Char(character) => buffer.insert_char(character),
-                    KeyCode::Enter => buffer.insert_newline(),
-                    KeyCode::Backspace => buffer.backspace(),
-                    KeyCode::Delete => buffer.delete(),
+                    KeyCode::Char('a' | 'A') if key.modifiers.contains(KeyModifiers::ALT) => buffer.select_all(),
+                    KeyCode::Char(character) => {
+                        buffer.delete_selection();
+                        buffer.insert_char(character);
+                    }
+                    KeyCode::Enter => {
+                        buffer.delete_selection();
+                        buffer.insert_newline();
+                    }
+                    KeyCode::Backspace => {
+                        if !buffer.delete_selection() {
+                            buffer.backspace();
+                        }
+                    }
+                    KeyCode::Delete => {
+                        if !buffer.delete_selection() {
+                            buffer.delete();
+                        }
+                    }
                     KeyCode::Left => buffer.move_left(),
                     KeyCode::Right => buffer.move_right(),
                     KeyCode::Up => buffer.move_up(),
                     KeyCode::Down => buffer.move_down(),
                     KeyCode::Home => buffer.move_home(),
                     KeyCode::End => buffer.move_end(),
+                    KeyCode::Tab if spar_file && buffer.at_indent_position() => {
+                        buffer.delete_selection();
+                        buffer.insert_indent();
+                    }
                     KeyCode::Tab => completion_hints = buffer.complete(session),
                     _ => {}
                 }
+            }
+            // Text pasted into the terminal (bracketed paste) arrives as one event.
+            Event::Paste(text) => {
+                completion_hints.clear();
+                buffer.insert_text(&text);
             }
             Event::Resize(_, _) => {}
             _ => {}
         }
     }
+}
+
+/// Asks the terminal to put `text` on the system clipboard (OSC 52).
+fn copy_to_terminal_clipboard(output: &mut impl Write, text: &str) -> io::Result<()> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        encoded.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        encoded.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        encoded.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        encoded.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+    }
+    write!(output, "\x1b]52;c;{encoded}\x07")?;
+    output.flush()
 }
 
 pub fn edit_buffer_file(path: &Path) -> io::Result<()> {
@@ -317,6 +540,7 @@ fn render(
     output: &mut impl Write,
     buffer: &TextBuffer,
     allow_execute: bool,
+    spar_file: bool,
     snapshot: &ShellUiSnapshot,
     session: &ShellSession,
     completion_hints: &[String],
@@ -356,6 +580,18 @@ fn render(
     }
 
     let editor_width = width.saturating_sub(1);
+    // Whole-file highlighting: lex once, then slice the spans per row.
+    let file_spans = if spar_file && theme.enabled() {
+        crate::highlight::scan_source(&buffer.to_string(), snapshot)
+    } else {
+        None
+    };
+    let mut row_starts = Vec::with_capacity(buffer.lines.len());
+    let mut offset = 0usize;
+    for line in &buffer.lines {
+        row_starts.push(offset);
+        offset += line.iter().map(|c| c.len_utf8()).sum::<usize>() + 1;
+    }
     let mut cursor_x = 0usize;
     let mut cursor_y = 1usize;
     for screen_row in 0..content_height {
@@ -374,24 +610,56 @@ fn render(
             cursor_x = x;
             cursor_y = screen_row + 1;
         }
-        if theme.enabled() {
+        if let Some(selected) = buffer.selected_columns(row) {
+            // Selected text is drawn in reverse video over the visible slice.
+            let chars: Vec<char> = visible.chars().collect();
+            let from = selected.start.saturating_sub(start_char).min(chars.len());
+            let to = selected.end.saturating_sub(start_char).clamp(from, chars.len());
+            // An empty selected part (a selected line break) still shows one cell.
+            let to_cells = if from == to && selected.start == selected.end { to } else { to };
+            queue!(
+                output,
+                Print(chars[..from].iter().collect::<String>()),
+                SetAttribute(Attribute::Reverse),
+                Print(chars[from..to_cells].iter().collect::<String>()),
+                SetAttribute(Attribute::NoReverse),
+                Print(chars[to_cells..].iter().collect::<String>()),
+            )?;
+        } else if theme.enabled() {
             let line = buffer.lines[row].iter().collect::<String>();
             let start_byte = char_index_to_byte(&line, start_char);
             let end_byte = start_byte + visible.len();
-            queue!(
-                output,
-                Print(paint_range(&line, start_byte..end_byte, snapshot, theme))
-            )?;
+            let painted = match &file_spans {
+                Some(spans) => {
+                    let base = row_starts[row];
+                    let local: Vec<crate::highlight::HighlightSpan> = spans
+                        .iter()
+                        .filter(|span| span.range.end > base && span.range.start < base + line.len())
+                        .map(|span| crate::highlight::HighlightSpan {
+                            range: span.range.start.saturating_sub(base)
+                                ..(span.range.end - base).min(line.len()),
+                            role: span.role,
+                        })
+                        .collect();
+                    crate::highlight::paint_spans(&line, start_byte..end_byte, &local, theme)
+                }
+                None => paint_range(&line, start_byte..end_byte, snapshot, theme),
+            };
+            queue!(output, Print(painted))?;
         } else {
             queue!(output, Print(visible))?;
         }
     }
 
-    let diagnostics = session.editor_diagnostics(&buffer.to_string());
+    let diagnostics = if spar_file {
+        session.repo_diagnostics(&buffer.to_string())
+    } else {
+        session.editor_diagnostics(&buffer.to_string())
+    };
     let diagnostic_row = height.saturating_sub(2);
     queue!(output, MoveTo(0, diagnostic_row), Clear(ClearType::CurrentLine))?;
     if let Some(error) = diagnostics.first() {
-        let message = format!("{}", error);
+        let message = spar::naming::demangle(&format!("{}", error));
         let text = truncate_to_width(&message, width);
         queue!(output, Print(theme.paint(crate::theme::SemanticRole::Error, &text)))?;
     } else if !completion_hints.is_empty() {
@@ -404,7 +672,11 @@ fn render(
     let help = if allow_execute {
         "Ctrl+S save draft  ·  Alt+E execute  ·  Esc cancel"
     } else {
-        "Ctrl+S save to prompt  ·  Esc cancel"
+        if spar_file {
+            "Ctrl+S apply  ·  Tab indent/complete  ·  Shift+arrows select  ·  Ctrl+C/X/V copy/cut/paste  ·  Esc close"
+        } else {
+            "Ctrl+S save to prompt  ·  Esc cancel"
+        }
     };
     queue!(output, MoveTo(0, status_row), Clear(ClearType::CurrentLine))?;
     if theme.enabled() {
@@ -537,5 +809,56 @@ mod tests {
                 action: EditorAction::Save
             })
         );
+    }
+
+    #[test]
+    fn source_buffers_keep_indentation_and_dedent_closing_braces() {
+        let mut buffer = TextBuffer::from("");
+        buffer.auto_indent = true;
+        for character in "fn f() {".chars() {
+            buffer.insert_char(character);
+        }
+        buffer.insert_newline();
+        assert_eq!(buffer.current_line().iter().collect::<String>(), "    ");
+        assert!(buffer.at_indent_position());
+        buffer.insert_char('}');
+        assert_eq!(buffer.current_line().iter().collect::<String>(), "}");
+        buffer.insert_newline();
+        assert_eq!(buffer.current_line().iter().collect::<String>(), "");
+    }
+
+    #[test]
+    fn pasted_text_is_inserted_verbatim_and_replaces_a_selection() {
+        let mut buffer = TextBuffer::from("one two");
+        buffer.auto_indent = true;
+        buffer.column = 4;
+        buffer.anchor = Some((0, 7));
+        buffer.column = 7;
+        buffer.anchor = Some((0, 4));
+        assert_eq!(buffer.selected_text(), "two");
+        buffer.insert_text("fn f() {\r\n    x;\n}");
+        assert_eq!(buffer.to_string(), "one fn f() {\n    x;\n}");
+        assert_eq!((buffer.row, buffer.column), (2, 1));
+    }
+
+    #[test]
+    fn selection_spans_lines_and_deleting_joins_them() {
+        let mut buffer = TextBuffer::from("abc\ndef\nghi");
+        buffer.anchor = Some((0, 1));
+        buffer.row = 2;
+        buffer.column = 2;
+        assert_eq!(buffer.selected_text(), "bc\ndef\ngh");
+        assert_eq!(buffer.selected_columns(1), Some(0..3));
+        assert!(buffer.delete_selection());
+        assert_eq!(buffer.to_string(), "ai");
+        buffer.select_all();
+        assert_eq!(buffer.selected_text(), "ai");
+    }
+
+    #[test]
+    fn clipboard_sequence_is_base64_osc52() {
+        let mut out = Vec::new();
+        copy_to_terminal_clipboard(&mut out, "hi").unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b]52;c;aGk=\x07");
     }
 }

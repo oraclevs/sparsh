@@ -43,7 +43,7 @@ pub fn parse_request(input: &str) -> Option<ListRequest> {
     parse_words(name, words)
 }
 
-fn word_has_shell_syntax(word: &str) -> bool {
+pub(crate) fn word_has_shell_syntax(word: &str) -> bool {
     word.chars().any(|c| "|&;<>()$`*?[]{}\"'\\~!#".contains(c))
 }
 
@@ -508,6 +508,36 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// Current time, for callers that render relative ages.
+/// A timestamp for people: `9 October 2026, 10:54 AM`, in local time.
+pub fn human_datetime(seconds: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December",
+    ];
+    let time = seconds as libc::time_t;
+    // SAFETY: `localtime_r` only writes into the zeroed `tm` we own.
+    let mut parts: libc::tm = unsafe { std::mem::zeroed() };
+    let converted = unsafe { libc::localtime_r(&time, &mut parts) };
+    if converted.is_null() {
+        return format_iso8601(seconds);
+    }
+    let (hour, meridiem) = match parts.tm_hour {
+        0 => (12, "AM"),
+        1..=11 => (parts.tm_hour, "AM"),
+        12 => (12, "PM"),
+        hour => (hour - 12, "PM"),
+    };
+    format!(
+        "{} {} {}, {}:{:02} {}",
+        parts.tm_mday,
+        MONTHS[parts.tm_mon.clamp(0, 11) as usize],
+        parts.tm_year + 1900,
+        hour,
+        parts.tm_min,
+        meridiem
+    )
+}
+
 pub fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

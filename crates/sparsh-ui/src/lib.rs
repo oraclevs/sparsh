@@ -13,6 +13,8 @@ mod editor;
 mod encoded;
 mod git;
 mod highlight;
+mod help_view;
+mod repo_view;
 mod history;
 mod http_view;
 mod pager;
@@ -105,6 +107,11 @@ pub fn render_result<W: Write>(
             out.write_all(&output.stdout)?;
             Ok(())
         }
+        ShellResult::Help(page) if interactive => {
+            let width = data_view::RenderOptions::for_terminal().width;
+            write!(out, "{}", help_view::render_help(page, theme, width))
+        }
+        ShellResult::Help(page) => write!(out, "{}", sparsh_core::render_help_text(page)),
         ShellResult::BackgroundJob { id, pgid } => writeln!(out, "[{id}] {pgid}"),
         ShellResult::Empty
         | ShellResult::EditorMode(_)

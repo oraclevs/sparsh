@@ -9,7 +9,10 @@ mod dispatch;
 mod environment;
 mod execute;
 mod function_pipeline;
+mod builtin_tables;
+mod help_pages;
 mod history;
+mod zdir;
 mod job;
 mod keybinding;
 pub mod listing;
@@ -31,7 +34,9 @@ pub use config::{
     CompletionConfig, ConfigLoadError, EnvironmentVariableConfig, HistoryConfig, PromptConfig,
     PromptGitConfig, PromptPathConfig, PromptTimeConfig, SparshConfig,
 };
-pub use history::{HistoryAccess, HistorySettings};
+pub use help_pages::{help_page, render_text as render_help_text, HelpPage};
+pub use history::{HistoryAccess, HistoryRecord, HistorySettings};
+pub use zdir::{rank as rank_directories, DirAlias, DirVisit};
 pub use job::{JobId, JobState, ShellJob};
 pub use keybinding::{
     default_pager_keybindings, merged_pager_keybindings, KeyChord, KeybindingAction,

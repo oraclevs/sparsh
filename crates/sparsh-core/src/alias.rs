@@ -106,6 +106,10 @@ impl AliasService {
         ))
     }
 
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.entries.iter().map(|(name, words)| (name.as_str(), words.as_slice()))
+    }
+
     pub(crate) fn render(&self) -> String {
         let mut output = String::new();
         for (name, expansion) in &self.entries {

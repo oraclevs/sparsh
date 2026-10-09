@@ -131,6 +131,8 @@ pub enum ShellResult {
     #[doc(hidden)]
     SourceRequest(crate::builtin::SourceRequest),
     Builtin(BuiltinOutput),
+    /// `help NAME` at a terminal: the UI draws it with colors and tables.
+    Help(Box<crate::HelpPage>),
     Process(spar::ShellPlanOutcome),
     BackgroundJob {
         id: u64,
@@ -259,6 +261,11 @@ pub struct ShellSession {
     config: crate::SparshConfig,
     config_generation: u64,
     interactive_source: String,
+    /// `repo` is open: the buffer redeclares the session, so the editor must not
+    /// flag those names as duplicates.
+    repo_editing: bool,
+    /// The config-only session `repl` checks its buffer against (no interactive declarations).
+    repo_base: Option<spar::Session>,
     last_interactive_value: Option<spar::Value>,
     config_notices: Vec<String>,
 }
@@ -280,6 +287,8 @@ impl ShellSession {
             config: crate::SparshConfig::default(),
             config_generation: 0,
             interactive_source: String::new(),
+            repo_editing: false,
+            repo_base: None,
             last_interactive_value: None,
             config_notices: Vec::new(),
         })
@@ -347,6 +356,46 @@ impl ShellSession {
                 .to_string()
         };
         append_fragment(&mut self.interactive_source, &appended);
+        // A `Result` is shown as what it carries: `Ok(x)` as `x`, `Err(e)` as an
+        // error with its exit code, never wrapped in `Ok(...)`.
+        let result = match result {
+            spar::InteractivePreviewResult::RuntimeValue(mut preview)
+                if matches!(preview.value, spar::Value::Result(_)) =>
+            {
+                let spar::Value::Result(inner) = preview.value.clone() else { unreachable!() };
+                match inner {
+                    Ok(ok) if ok.quiet => spar::InteractivePreviewResult::Empty,
+                    Ok(ok) => {
+                        preview.value = *ok.value;
+                        spar::InteractivePreviewResult::RuntimeValue(preview)
+                    }
+                    Err(error) => {
+                        let message = format!("{}\n", error.value.render_display());
+                        eprint!("{message}");
+                        self.last_status = error.exit_code;
+                        return Ok(ShellResult::Builtin(crate::BuiltinOutput {
+                            stdout: Vec::new(),
+                            stderr: message.into_bytes(),
+                            status: error.exit_code,
+                        }));
+                    }
+                }
+            }
+            spar::InteractivePreviewResult::Value(spar::ConfigValue::Result(inner)) => match inner {
+                Ok(value) => spar::InteractivePreviewResult::Value(*value),
+                Err(error) => {
+                    let message = format!("{}\n", spar::Value::from_config(*error).render_display());
+                    eprint!("{message}");
+                    self.last_status = 1;
+                    return Ok(ShellResult::Builtin(crate::BuiltinOutput {
+                        stdout: Vec::new(),
+                        stderr: message.into_bytes(),
+                        status: 1,
+                    }));
+                }
+            },
+            other => other,
+        };
         let result = match result {
             spar::InteractivePreviewResult::Empty => ShellResult::Empty,
             spar::InteractivePreviewResult::Value(value) => self.handle_interactive_value(value)?,
@@ -365,10 +414,15 @@ impl ShellSession {
         {
             return Vec::new();
         }
-        self.spar
+        let mut errors = self
+            .spar
             .check_interactive_fragment(source, self.last_interactive_value.as_ref())
             .err()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.repo_editing {
+            errors.retain(|error| !is_redeclaration(error));
+        }
+        errors
     }
 
     /// Runs one statement. `forced` is the kind the statement splitter chose;
@@ -413,6 +467,52 @@ impl ShellSession {
             }
             let result = self.submit_spar(input);
             return self.finish_submission(result);
+        }
+        if self.mode == SessionMode::InteractiveTty {
+            let words: Vec<&str> = input.trim().trim_end_matches(';').split_whitespace().collect();
+            if let ["help", name] = words.as_slice() {
+                if self.services.aliases.get("help").is_none() {
+                    if let Some(page) = crate::help_page(name, &self.builtins) {
+                        return self.finish_submission(Ok(ShellResult::Help(Box::new(page))));
+                    }
+                }
+            }
+        }
+        if self.mode == SessionMode::InteractiveTty {
+            if let Some(table) = self.builtin_table(input) {
+                let result = match table {
+                    Ok(value) => ShellResult::Structured(spar::InteractiveRuntimeValue {
+                        value,
+                        stream_preview: false,
+                        truncated: false,
+                        presentation: spar::InteractivePresentation::Pipeline,
+                    }),
+                    Err(message) => listing_error(message),
+                };
+                return self.finish_submission(Ok(result));
+            }
+        }
+        // `z --list` is a table like `ls`; non-interactive runs get the plain text.
+        if self.mode == SessionMode::InteractiveTty
+            && input.trim().trim_end_matches(';').split_whitespace().collect::<Vec<_>>() == ["z", "--list"]
+        {
+            if let Some(history) = self.services.history.clone() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                let visits = history.directories().map_err(|message| ShellError::Process { message, status: 1 })?;
+                let aliases = history.dir_aliases().map_err(|message| ShellError::Process { message, status: 1 })?;
+                let result = match crate::zdir::listing_table(&visits, &aliases, now) {
+                    Ok(value) => ShellResult::Structured(spar::InteractiveRuntimeValue {
+                        value,
+                        stream_preview: false,
+                        truncated: false,
+                        presentation: spar::InteractivePresentation::Pipeline,
+                    }),
+                    Err(message) => listing_error(message),
+                };
+                return self.finish_submission(Ok(result));
+            }
         }
         if self.mode == SessionMode::InteractiveTty && self.allows_native_listing(input) {
             if let Some(result) = self.value_pipeline_from_structured_source(input, &cwd) {
@@ -462,18 +562,22 @@ impl ShellSession {
             if matches!(self.spar.function_return_type(name),
                 Some(spar::ast::SparType::Applied { name, arguments }) if name == "ShellResult" && arguments.len() == 2)
             {
-                let value = self.spar.eval_transient_with_context(call, &cwd, &environment)
-                    .map_err(|errors| ShellError::from_spar(errors, call))?;
-                let output = crate::function_pipeline::shell_result_output(value)?;
-                if !output.stderr.is_empty() {
-                    use std::io::Write;
-                    std::io::stderr().lock().write_all(&output.stderr).map_err(|error| ShellError::Process { message: error.to_string(), status: 1 })?;
-                }
-                return self.finish_submission(Ok(ShellResult::Builtin(crate::BuiltinOutput {
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    status: output.status,
-                })));
+                let result = self.run_shell_result_call(call)?;
+                return self.finish_submission(Ok(result));
+            }
+            // A plain function runs for its effects; echoing what it returns
+            // would print values (and secrets) the caller never asked to see.
+            // Use `println` to show something. `_` still holds the value.
+            if crate::function_pipeline::split_top_level_pipeline(call).len() == 1
+                && self.spar.function_return_type(name).is_some_and(|ty| {
+                    !matches!(ty, spar::ast::SparType::Shell)
+                })
+            {
+                let result = match self.submit_spar(input.trim())? {
+                    ShellResult::Value(_) | ShellResult::Structured(_) => ShellResult::Empty,
+                    other => other,
+                };
+                return self.finish_submission(Ok(result));
             }
         }
         if let Some(composed) = crate::function_pipeline::compose_function_pipeline(
@@ -585,7 +689,12 @@ impl ShellSession {
         input: &str,
         sink: &mut dyn FnMut(&StatementOutcome),
     ) -> Result<ShellResult, ShellError> {
-        self.submit_inner(input, sink, false)
+        let before = self.services.directories.current().to_path_buf();
+        let result = self.submit_inner(input, sink, false);
+        if self.services.directories.current() != before {
+            self.record_current_dir();
+        }
+        result
     }
 
     fn submit_inner(
@@ -734,6 +843,7 @@ impl ShellSession {
                     ShellResult::Empty
                     | ShellResult::Value(_)
                     | ShellResult::Structured(_)
+                    | ShellResult::Help(_)
                     | ShellResult::EditorMode(_)
                     | ShellResult::ReloadConfig
                     | ShellResult::ReloadConfigWith(_)
@@ -778,6 +888,14 @@ impl ShellSession {
         history: std::sync::Arc<dyn crate::history::HistoryAccess>,
     ) {
         self.services.set_history_access(history);
+        self.record_current_dir();
+    }
+
+    fn record_current_dir(&self) {
+        if let Some(history) = &self.services.history {
+            // History is best effort; a failed write must not break the prompt.
+            let _ = history.record_dir(self.services.directories.current());
+        }
     }
 
     fn replace_with_command(
@@ -1075,6 +1193,83 @@ impl ShellSession {
     }
 
     pub fn reload_config(&mut self) -> Result<(), ShellError> {
+        let interactive = self.interactive_source.clone();
+        self.rebuild_spar(&interactive, true)
+    }
+
+    /// The declarations typed or sourced in this session (imports, variables,
+    /// structs, functions), formatted, as `repo` shows them.
+    /// The first compile problems in a `repl` buffer, checked as a whole file.
+    pub fn repo_diagnostics(&self, source: &str) -> Vec<spar::SparError> {
+        if source.trim().is_empty() {
+            return Vec::new();
+        }
+        // Against the config-only base, the buffer's own declarations cannot
+        // collide with themselves; without it, drop the redeclaration messages.
+        let checker = self.repo_base.as_ref().unwrap_or(&self.spar);
+        let mut errors = checker.check_interactive_fragment(source, None).err().unwrap_or_default();
+        if self.repo_base.is_none() {
+            errors.retain(|error| !is_redeclaration(error));
+        }
+        errors
+    }
+
+    /// Turns private (stealth) history mode on or off.
+    pub fn set_stealth_mode(&self, enabled: bool) {
+        if let Some(history) = &self.services.history {
+            let _ = history.set_stealth_mode(enabled);
+        }
+    }
+
+    /// The declarations typed or sourced so far, exactly as stored; pass it to
+    /// `apply_repo_source` later to put the session back.
+    pub fn declarations_snapshot(&self) -> String {
+        self.interactive_source.clone()
+    }
+
+    pub fn set_repo_editing(&mut self, editing: bool) {
+        self.repo_editing = editing;
+        self.repo_base = if editing {
+            // A failure here only means diagnostics fall back to filtering.
+            self.base_session().ok().map(|(session, _)| session)
+        } else {
+            None
+        };
+    }
+
+    pub fn repo_source(&self) -> String {
+        let source = self.interactive_source.trim();
+        if source.is_empty() {
+            return String::new();
+        }
+        spar::formatter::format_source(source).unwrap_or_else(|_| format!("{source}\n"))
+    }
+
+    /// Replaces the session's declarations with `source` if the whole thing
+    /// compiles together with the config; otherwise nothing changes and the
+    /// compiler's diagnostics come back. Returns the names (added, removed).
+    pub fn apply_repo_source(&mut self, source: &str) -> Result<(Vec<String>, Vec<String>), ShellError> {
+        let names = |session: &Self| -> std::collections::BTreeSet<String> {
+            session
+                .spar
+                .identifiers()
+                .filter(|name| !name.starts_with("Sparsh") && !is_internal_name(name))
+                .map(str::to_string)
+                .collect()
+        };
+        let before = names(self);
+        self.rebuild_spar(source, false)?;
+        self.interactive_source = source.trim().to_string();
+        let after = names(self);
+        Ok((
+            after.difference(&before).cloned().collect(),
+            before.difference(&after).cloned().collect(),
+        ))
+    }
+
+    /// A fresh session with only the config evaluated: what the declarations in
+    /// `repl` are compiled against.
+    fn base_session(&mut self) -> Result<(spar::Session, crate::SparshConfig), ShellError> {
         self.config_notices.clear();
         let store = crate::config_home::store_for(&self.services.environment);
         let mut package_root: Option<PathBuf> = None;
@@ -1116,23 +1311,209 @@ impl ShellSession {
         let mut candidate = engine.session();
         let config = crate::config::evaluate_source_in_session(&mut candidate, &source)
             .map_err(ShellError::Config)?;
-        if !self.interactive_source.trim().is_empty() {
-            candidate
-                .eval(&self.interactive_source)
-                .map_err(ShellError::Spar)?;
+        Ok((candidate, config))
+    }
+
+    fn rebuild_spar(&mut self, interactive_source: &str, apply_config: bool) -> Result<(), ShellError> {
+        let (mut candidate, config) = self.base_session()?;
+        if !interactive_source.trim().is_empty() {
+            candidate.eval(interactive_source).map_err(ShellError::Spar)?;
         }
-        self.services
-            .apply_config(&config)
-            .map_err(|message| ShellError::Config(crate::ConfigLoadError::Invalid(message)))?;
+        if apply_config {
+            self.services
+                .apply_config(&config)
+                .map_err(|message| ShellError::Config(crate::ConfigLoadError::Invalid(message)))?;
+        }
         // The replacement session must keep the terminal features, or a
         // config reload at startup silently turns them off.
         if self.mode == SessionMode::InteractiveTty {
             configure_terminal_session(&mut candidate);
         }
         self.spar = candidate;
-        self.config = config;
-        self.config_generation = self.config_generation.wrapping_add(1);
+        if apply_config {
+            self.config = config;
+            self.config_generation = self.config_generation.wrapping_add(1);
+        }
         Ok(())
+    }
+
+    /// Calls a `ShellResult` function through the compiled runtime. The runtime
+    /// keeps `err` exit codes and `ok(quiet:)`, and runs structured mixed
+    /// pipelines (`cmd | from fmt`) the tree evaluator cannot. A pipeline that
+    /// ends the body on a structured terminal is shown as a table.
+    fn run_shell_result_call(&mut self, call: &str) -> Result<ShellResult, ShellError> {
+        let cwd = self.services.directories.current().to_path_buf();
+        let environment = self.services.environment.snapshot();
+        let (value, capture) = self
+            .spar
+            .eval_call_runtime_with_context(call, &cwd, &environment)
+            .map_err(|errors| ShellError::from_spar(errors, call))?;
+        // `ok(pretty: true)`: show the value as a table you can query with `_`.
+        if let spar::Value::Result(Ok(ok)) = &value {
+            if ok.pretty && !ok.quiet {
+                return Ok(ShellResult::Structured(spar::InteractiveRuntimeValue {
+                    value: (*ok.value).clone(),
+                    stream_preview: false,
+                    truncated: false,
+                    presentation: spar::InteractivePresentation::Pipeline,
+                }));
+            }
+        }
+        let output = crate::function_pipeline::shell_result_runtime_output(value)?;
+        if !output.stderr.is_empty() {
+            use std::io::Write;
+            std::io::stderr().lock().write_all(&output.stderr).map_err(|error| ShellError::Process { message: error.to_string(), status: 1 })?;
+        }
+        if let (Some(capture), 0) = (capture, output.status) {
+            return Ok(ShellResult::Structured(capture));
+        }
+        Ok(ShellResult::Builtin(crate::BuiltinOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            status: output.status,
+        }))
+    }
+
+    /// The table for a plain `dirs`, `alias`, `jobs`, `history`, `path`, `hash`,
+    /// `export` or `help` typed at a terminal; `None` for anything else (an
+    /// argument that changes state, pipes, redirects, or a user alias that
+    /// shadows the name), which runs the ordinary text builtin.
+    fn builtin_table(&mut self, input: &str) -> Option<Result<spar::Value, String>> {
+        use crate::builtin_tables::{number, optional_text, table, text, when, Row};
+        let line = input.trim().trim_end_matches(';').trim();
+        if line.split_whitespace().any(crate::listing::word_has_shell_syntax) {
+            return None;
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let (name, args) = words.split_first()?;
+        if self.services.aliases.get(name).is_some() {
+            return None;
+        }
+        let rows: (Vec<Row>, &[&str]) = match (*name, args) {
+            ("dirs", []) => (
+                self.services
+                    .directories
+                    .all()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, path)| {
+                        vec![
+                            ("path", text(path.to_string_lossy())),
+                            ("role", text(if index == 0 { "current" } else { "stack" })),
+                        ]
+                    })
+                    .collect(),
+                &["path", "role"],
+            ),
+            ("alias", []) => (
+                self.services
+                    .aliases
+                    .iter()
+                    .map(|(alias, words)| vec![("name", text(alias)), ("command", text(words.join(" ")))])
+                    .collect(),
+                &["name", "command"],
+            ),
+            ("jobs", []) => {
+                self.services.jobs.poll().ok()?;
+                (
+                    self.services
+                        .jobs
+                        .snapshots()
+                        .into_iter()
+                        .map(|job| {
+                            let state = match job.state {
+                                crate::job::JobState::Running => "Running".to_string(),
+                                crate::job::JobState::Stopped => "Stopped".to_string(),
+                                crate::job::JobState::Done(code) => format!("Done({code})"),
+                            };
+                            vec![("id", number(job.id.0 as usize)), ("state", text(state)), ("command", text(job.command_text))]
+                        })
+                        .collect(),
+                    &["id", "state", "command"],
+                )
+            }
+            ("history", rest) => {
+                let history = self.services.history.clone()?;
+                let records = match rest {
+                    [] => history.records(None),
+                    [count] => history.records(Some(count.parse::<usize>().ok()?)),
+                    ["--search", query] => history
+                        .records(None)
+                        .map(|all| all.into_iter().filter(|record| record.command.contains(query)).collect()),
+                    _ => return None,
+                };
+                (
+                    match records {
+                        Ok(records) => records
+                            .into_iter()
+                            .map(|record| {
+                                vec![
+                                    ("line", number(record.line)),
+                                    ("when", when(record.time)),
+                                    ("command", text(record.command)),
+                                    ("directory", optional_text(&record.directory)),
+                                    ("kind", text(record.kind)),
+                                ]
+                            })
+                            .collect(),
+                        Err(message) => return Some(Err(message)),
+                    },
+                    &["line", "when", "command", "directory", "kind"],
+                )
+            }
+            ("path", []) => (
+                self.services
+                    .path
+                    .directories()
+                    .iter()
+                    .map(|directory| {
+                        vec![
+                            ("directory", text(directory.to_string_lossy())),
+                            ("exists", spar::Value::Bool(directory.is_dir())),
+                        ]
+                    })
+                    .collect(),
+                &["directory", "exists"],
+            ),
+            ("hash", []) => (
+                self.services
+                    .resolver
+                    .entries()
+                    .map(|(command, path)| vec![("command", text(command)), ("path", text(path.to_string_lossy()))])
+                    .collect(),
+                &["command", "path"],
+            ),
+            ("export", []) => {
+                let mut variables: Vec<_> = self
+                    .services
+                    .environment
+                    .snapshot()
+                    .into_iter()
+                    .map(|(name, value)| (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()))
+                    .collect();
+                variables.sort();
+                (
+                    variables.into_iter().map(|(name, value)| vec![("name", text(name)), ("value", text(value))]).collect(),
+                    &["name", "value"],
+                )
+            }
+            ("help", []) => (
+                self.builtins
+                    .metadata()
+                    .map(|metadata| {
+                        vec![
+                            ("category", text(metadata.category)),
+                            ("name", text(metadata.name)),
+                            ("description", text(metadata.description)),
+                            ("usage", text(metadata.usage)),
+                        ]
+                    })
+                    .collect(),
+                &["category", "name", "description", "usage"],
+            ),
+            _ => return None,
+        };
+        Some(table(rows.0, rows.1))
     }
 
     pub fn run_startup_hook(&mut self) -> Result<ShellResult, ShellError> {
@@ -1141,13 +1522,21 @@ impl ShellSession {
         }
         let cwd = self.services.directories.current().to_path_buf();
         let environment = self.services.environment.snapshot();
+        if matches!(self.spar.function_return_type("startup"),
+            Some(spar::ast::SparType::Applied { name, arguments }) if name == "ShellResult" && arguments.len() == 2)
+        {
+            return self.run_shell_result_call("startup()");
+        }
+        // A `__shell` startup returns a plan the session must run (e.g. `cd`).
         match self
             .spar
             .eval_transient_with_context("startup()", &cwd, &environment)
             .map_err(ShellError::Spar)?
         {
-            spar::InteractiveEvalResult::Empty => Ok(ShellResult::Empty),
-            spar::InteractiveEvalResult::Value(value) => self.handle_interactive_value(value),
+            spar::InteractiveEvalResult::Value(spar::ConfigValue::Shell(plan)) => {
+                self.handle_interactive_value(spar::ConfigValue::Shell(plan))
+            }
+            _ => Ok(ShellResult::Empty),
         }
     }
 
@@ -1211,13 +1600,13 @@ impl ShellSession {
         let spar_identifiers = self
             .spar
             .identifiers()
-            .filter(|name| !name.starts_with("Sparsh"))
+            .filter(|name| !name.starts_with("Sparsh") && !is_internal_name(name))
             .map(str::to_string)
             .collect();
         let spar_functions = self
             .spar
             .function_names()
-            .filter(|name| !name.starts_with("Sparsh"))
+            .filter(|name| !name.starts_with("Sparsh") && !is_internal_name(name))
             .map(|name| {
                 (
                     name.to_string(),
@@ -1228,7 +1617,32 @@ impl ShellSession {
                 )
             })
             .collect();
+        let async_functions: BTreeSet<String> = self
+            .spar
+            .function_names()
+            .filter(|name| {
+                self.spar.function_is_async(name)
+                    && !name.starts_with("Sparsh")
+                    && !is_internal_name(name)
+            })
+            .map(str::to_string)
+            .collect();
+        let dir_aliases = self
+            .services
+            .history
+            .as_ref()
+            .and_then(|history| history.dir_aliases().ok())
+            .unwrap_or_default();
+        let visited_dirs = self
+            .services
+            .history
+            .as_ref()
+            .and_then(|history| history.directories().ok())
+            .unwrap_or_default();
         crate::CompletionSnapshot {
+            visited_dirs,
+            dir_aliases,
+            async_functions,
             cwd,
             home: self.services.environment.get("HOME").map(PathBuf::from),
             builtins,
@@ -1285,6 +1699,22 @@ impl ShellSession {
                 .collect(),
         }
     }
+}
+
+/// Names the compiler invents when it isolates an imported module
+/// (`SparModule<hash>Name`); they are never the user's to see or pick.
+fn is_internal_name(name: &str) -> bool {
+    spar::naming::demangle(name) != name
+}
+
+/// A message about a name that is already declared. While `repl` is open the
+/// buffer redeclares the whole session, so these are expected until save.
+fn is_redeclaration(error: &spar::SparError) -> bool {
+    let text = error.to_string();
+    text.contains("duplicate declaration")
+        || text.contains("collides with a declaration")
+        || text.contains("is already defined")
+        || text.contains("already declared")
 }
 
 fn rebase_relative_imports(source: &str, base: &Path) -> String {
@@ -1520,6 +1950,8 @@ mod tests {
     struct MemoryHistory {
         entries: Mutex<Vec<String>>,
         stealth: AtomicBool,
+        dirs: Mutex<Vec<crate::DirVisit>>,
+        aliases: Mutex<Vec<crate::DirAlias>>,
     }
 
     impl crate::HistoryAccess for MemoryHistory {
@@ -1530,6 +1962,20 @@ mod tests {
         fn set_stealth_mode(&self, enabled: bool) -> Result<(), String> {
             self.stealth.store(enabled, Ordering::Relaxed);
             Ok(())
+        }
+
+        fn records(&self, limit: Option<usize>) -> Result<Vec<crate::HistoryRecord>, String> {
+            Ok(self
+                .list(limit)?
+                .into_iter()
+                .map(|(line, command)| crate::HistoryRecord {
+                    line,
+                    time: 0,
+                    command,
+                    directory: String::new(),
+                    kind: "command".into(),
+                })
+                .collect())
         }
 
         fn list(&self, limit: Option<usize>) -> Result<Vec<(usize, String)>, String> {
@@ -1573,6 +2019,37 @@ mod tests {
                 .map_err(|_| "history lock poisoned".to_string())?
                 .clear();
             Ok(())
+        }
+
+        fn record_dir(&self, path: &Path) -> Result<(), String> {
+            let mut dirs = self.dirs.lock().map_err(|_| "history lock poisoned")?;
+            match dirs.iter_mut().find(|visit| visit.path == path) {
+                Some(visit) => visit.count += 1,
+                None => dirs.push(crate::DirVisit { path: path.to_path_buf(), count: 1, last: 0 }),
+            }
+            Ok(())
+        }
+
+        fn directories(&self) -> Result<Vec<crate::DirVisit>, String> {
+            Ok(self.dirs.lock().map_err(|_| "history lock poisoned")?.clone())
+        }
+
+        fn dir_aliases(&self) -> Result<Vec<crate::DirAlias>, String> {
+            Ok(self.aliases.lock().map_err(|_| "history lock poisoned")?.clone())
+        }
+
+        fn set_dir_alias(&self, name: &str, path: &Path) -> Result<(), String> {
+            let mut aliases = self.aliases.lock().map_err(|_| "history lock poisoned")?;
+            aliases.retain(|(existing, _)| existing != name);
+            aliases.push((name.to_string(), path.to_path_buf()));
+            Ok(())
+        }
+
+        fn remove_dir_alias(&self, name: &str) -> Result<bool, String> {
+            let mut aliases = self.aliases.lock().map_err(|_| "history lock poisoned")?;
+            let before = aliases.len();
+            aliases.retain(|(existing, _)| existing != name);
+            Ok(aliases.len() != before)
         }
     }
 
@@ -2265,6 +2742,157 @@ mod tests {
     }
 
     #[test]
+    fn shell_result_quiet_ok_prints_nothing_and_err_keeps_exit_code() {
+        let mut session = ShellSession::new();
+        session.submit("fn loud() -> ShellResult<int, str> { return ok(value: 5); };").unwrap();
+        session.submit("fn quiet() -> ShellResult<int, str> { return ok(value: 5, quiet: true); };").unwrap();
+        session.submit("fn bad() -> ShellResult<int, str> { return err(error: \"boom\", exitCode: 7); };").unwrap();
+        assert_eq!(builtin_stdout(session.submit("loud()").unwrap()), "5\n");
+        assert_eq!(builtin_stdout(session.submit("quiet()").unwrap()), "");
+        session.submit("bad()").unwrap();
+        assert_eq!(session.last_status(), 7);
+    }
+
+    #[test]
+    fn z_jumps_to_a_visited_directory_by_name_and_rejects_unknown_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("projects").join("occ");
+        std::fs::create_dir_all(&target).unwrap();
+        let history = Arc::new(MemoryHistory::default());
+        let mut session = ShellSession::new();
+        session.set_history_access(history.clone());
+        session.submit(&format!("cd {}", target.display())).unwrap();
+        session.submit(&format!("cd {}", root.path().display())).unwrap();
+
+        session.submit("z occ").unwrap();
+        assert_eq!(session.ui_snapshot().cwd(), target.as_path());
+        assert!(session.submit("z never-visited").is_err() || session.last_status() != 0);
+        assert_eq!(session.ui_snapshot().cwd(), target.as_path());
+    }
+
+    #[test]
+    fn listing_builtins_return_tables_in_an_interactive_session_and_text_otherwise() {
+        let history = Arc::new(MemoryHistory::default());
+        history.entries.lock().unwrap().push("echo one".to_string());
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session.set_history_access(history.clone());
+        session.submit("alias zz = echo hi").unwrap();
+        for command in ["alias", "dirs", "jobs", "history", "history 1", "path", "hash", "export", "help", "z --list"] {
+            let result = session.submit(command).unwrap();
+            assert!(matches!(result, ShellResult::Structured(_)), "{command}");
+        }
+        // Arguments, pipes and redirects keep the text builtin.
+        assert!(matches!(session.submit("history --clear").unwrap(), ShellResult::Builtin(_)));
+        let mut plain = ShellSession::new();
+        plain.submit("alias zz = echo hi").unwrap();
+        assert!(builtin_stdout(plain.submit("alias").unwrap()).contains("zz"));
+    }
+
+    #[test]
+    fn repo_applies_a_compiling_source_and_rejects_a_broken_one_without_changes() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        let mut session = session_with_home(home.path());
+        session.submit_spar("var a: int = 1;").unwrap();
+        assert!(session.repo_source().contains("var a"));
+
+        let (added, removed) = session
+            .apply_repo_source("var a: int = 1;\nvar b: int = 2;\n")
+            .unwrap();
+        assert_eq!((added, removed), (vec!["b".to_string()], Vec::<String>::new()));
+        assert!(session.repo_source().contains("var b"));
+
+        // `missing` does not exist: nothing may change.
+        assert!(session.apply_repo_source("var c: int = missing;").is_err());
+        assert!(session.repo_source().contains("var b"));
+        assert!(!session.repo_source().contains("var c"));
+
+        let (_, removed) = session.apply_repo_source("var a: int = 1;").unwrap();
+        assert_eq!(removed, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn repl_buffer_reopened_with_an_import_has_no_duplicate_errors_and_no_internal_names() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        let mut session = session_with_home(home.path());
+        session.submit_spar("import pkg { get as gFetch } from \"std/http\";").unwrap();
+        let source = session.repo_source();
+        assert!(session.repo_diagnostics(&source).is_empty(), "{:?}", session.repo_diagnostics(&source));
+        let (added, removed) = session.apply_repo_source(&source).unwrap();
+        assert!(added.iter().chain(removed.iter()).all(|name| !name.contains("arModule")), "{added:?} {removed:?}");
+        let snapshot = session.completion_snapshot();
+        assert!(!format!("{snapshot:?}").contains("arModule"));
+    }
+
+    #[test]
+    fn repl_checks_its_buffer_against_the_config_not_the_live_session() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        let mut session = session_with_home(home.path());
+        session.submit_spar("struct DadJoke { id: str = \"\"; };").unwrap();
+        let source = session.repo_source();
+        session.set_repo_editing(true);
+        assert!(session.repo_diagnostics(&source).is_empty(), "{:?}", session.repo_diagnostics(&source));
+        // A real mistake in the buffer is still reported.
+        assert!(!session.repo_diagnostics("var x: int = missing;").is_empty());
+        session.set_repo_editing(false);
+    }
+
+    #[test]
+    fn result_values_show_their_content_and_ok_pretty_is_a_table() {
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session.submit_spar("fn wrapped() -> Result<int, str> { return ok(value: 7); };").unwrap();
+        let shown = session.submit("wrapped()").unwrap();
+        // No `Ok(7)` wrapper: the value itself.
+        assert!(!format!("{shown:?}").contains("Ok("), "{shown:?}");
+        session
+            .submit_spar("struct Row { id: int = 1; };")
+            .unwrap();
+        session
+            .submit_spar("fn rows() -> ShellResult<List<Row>, str> { return ok(value: [Row(), Row(id: 2)], pretty: true); };")
+            .unwrap();
+        assert!(matches!(session.submit("rows()").unwrap(), ShellResult::Structured(_)));
+    }
+
+    #[test]
+    fn repl_keeps_async_functions_and_their_imports() {
+        let _lock = PROCESS_STATE.lock().unwrap();
+        let _cwd = CwdGuard::capture();
+        let home = tempfile::tempdir().unwrap();
+        let mut session = session_with_home(home.path());
+        let source = "import pkg { get } from \"std/http\";\nstruct J { id: str = \"\"; };\nasync fn jokes(term: str = \"\") -> List<J> {\n    var response = await get(url: \"http://x.invalid/\");\n    return [];\n};\n";
+        session.apply_repo_source(source).unwrap();
+        assert!(session.repo_source().contains("async fn jokes"), "{}", session.repo_source());
+        assert!(session.ui_snapshot().has_function("jokes"));
+    }
+
+    #[test]
+    fn echo_prints_any_value_the_way_print_does() {
+        let mut session = ShellSession::new();
+        session.submit_spar("struct P { name: str = \"a\"; age: int = 3; };").unwrap();
+        session.submit_spar("var l: List<int> = [1, 2];").unwrap();
+        session.submit_spar("var p: P = P();").unwrap();
+        session.submit_spar("var o: Option<int> = some(value: 4);").unwrap();
+        assert_eq!(builtin_stdout(session.submit("echo ${l}").unwrap()), "[1, 2]\n");
+        assert_eq!(builtin_stdout(session.submit("echo ${p}").unwrap()), "{name: \"a\", age: 3}\n");
+        assert_eq!(builtin_stdout(session.submit("echo list=${l} done").unwrap()), "list=[1, 2] done\n");
+        assert!(!builtin_stdout(session.submit("echo ${o}").unwrap()).is_empty());
+        // Other commands still insist on text: no silent stringification.
+        assert!(session.submit("printf %s ${l}").is_err());
+    }
+
+    #[test]
+    fn plain_function_call_does_not_echo_its_return_value() {
+        let mut session = ShellSession::new();
+        session.submit("fn plus(a: int, b: int) -> int { return a + b; };").unwrap();
+        assert!(matches!(session.submit("plus(a: 1, b: 2)").unwrap(), ShellResult::Empty));
+    }
+
+    #[test]
     fn shell_result_error_goes_to_stderr_and_sets_status() {
         let mut session = ShellSession::new();
         session.submit("fn fail() -> ShellResult<str, str> { return err(error: \"no profile\"); };").unwrap();
@@ -2933,10 +3561,13 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
             .submit(&format!("source {}", sourced.display()))
             .unwrap();
 
-        let ShellResult::Value(ConfigValue::Str(value)) =
-            session.submit(r#"greet(name: "OCC")"#).unwrap()
-        else {
-            panic!("expected sourced function result");
+        // A plain function call runs silently; `_` keeps the returned value.
+        assert!(matches!(
+            session.submit(r#"greet(name: "OCC")"#).unwrap(),
+            ShellResult::Empty
+        ));
+        let ShellResult::Value(ConfigValue::Str(value)) = session.submit("_").unwrap() else {
+            panic!("expected `_` to hold the sourced function result");
         };
         assert_eq!(value, "OCC-ok");
     }
@@ -3794,10 +4425,10 @@ function greet(name: str) -> str { return helper::suffix(value: name); };"#,
     }
 
     #[test]
-    fn repl_builtin_requests_repl_editor_mode() {
+    fn srepl_builtin_requests_repl_editor_mode() {
         let mut session = ShellSession::new();
         assert!(matches!(
-            session.submit("repl").unwrap(),
+            session.submit("srepl").unwrap(),
             ShellResult::EditorMode(super::EditorMode::Repl)
         ));
     }

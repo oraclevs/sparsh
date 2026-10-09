@@ -88,10 +88,11 @@ fn should_review_multiline_submission(
 }
 
 const VIEW_COMMAND: &str = "view";
+const REPO_COMMAND: &str = "repl";
 
 /// Commands the run loop handles itself instead of the shell session. They
 /// are valid commands, so the prompt must color them like builtins.
-pub(crate) const HOST_COMMANDS: &[&str] = &[VIEW_COMMAND];
+pub(crate) const HOST_COMMANDS: &[&str] = &[VIEW_COMMAND, REPO_COMMAND];
 
 fn sparsh_emacs_keybindings(overrides: &[KeybindingConfig]) -> Keybindings {
     let mut keybindings = default_emacs_keybindings();
@@ -282,13 +283,11 @@ fn build_editor(
         std::fs::create_dir_all(parent)?;
     }
     secure_history_file(&history_settings.path)?;
-    let history =
-        FileBackedHistory::with_file(history_settings.max_entries, history_settings.path.clone())
-            .map_err(|error| io::Error::other(error.to_string()))?;
-    let history = SharedHistory::new(
-        SparshHistory::new(history, history_settings.ignore_consecutive_duplicates)
-            .with_file_path(history_settings.path.clone(), history_settings.max_entries),
-    );
+    let history = SharedHistory::new(SparshHistory::open(
+        history_settings.path.clone(),
+        history_settings.max_entries,
+        history_settings.ignore_consecutive_duplicates,
+    )?);
     sparsh_core::HistoryAccess::set_stealth_mode(&history, was_stealth)
         .map_err(io::Error::other)?;
     session.set_history_access(Arc::new(history.clone()));
@@ -410,6 +409,8 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
     let mut previous_duration = None;
     // The last structured result, so `view` can page through all of it.
     let mut last_view: Option<spar::InteractiveRuntimeValue> = None;
+    // Stealth state and declarations to restore when the private REPL ends.
+    let mut srepl_saved: Option<(bool, String)> = None;
 
     // Initialize the interactive editor/terminal first, then invoke the single
     // canonical Spar startup() hook before the first prompt. Terminal-aware
@@ -515,6 +516,16 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                 let started = Instant::now();
                 let mut editor_mode_changed = false;
                 for submission in submissions {
+                    if mode == EditorMode::Normal {
+                        let words: Vec<&str> =
+                            submission.trim().trim_end_matches(';').split_whitespace().collect();
+                        if words.first() == Some(&REPO_COMMAND)
+                            && (words.len() == 1 || words[1..] == ["--editor"])
+                        {
+                            crate::repo_view::run_repo(session, &theme, words.len() == 2)?;
+                            continue;
+                        }
+                    }
                     if mode == EditorMode::Normal && submission.trim() == VIEW_COMMAND {
                         open_pager(last_view.as_ref(), session, &theme)?;
                         continue;
@@ -553,9 +564,16 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                                     *mode = *requested;
                                 }
                                 if *requested == EditorMode::Repl {
+                                    // Private: nothing typed here reaches history, and
+                                    // every declaration is dropped when you leave.
+                                    srepl_saved = Some((
+                                        session.stealth_mode(),
+                                        session.declarations_snapshot(),
+                                    ));
+                                    session.set_stealth_mode(true);
                                     writeln!(
                                         io::stderr().lock(),
-                                        "Spar REPL mode: use an empty line to submit a block; Ctrl-D returns to command mode."
+                                        "Private Spar REPL: nothing is saved to history and everything declared here is discarded when you leave. Empty line submits a block; Ctrl-D leaves."
                                     )?;
                                 }
                                 editor_mode_changed = true;
@@ -621,7 +639,14 @@ pub fn run_interactive(session: &mut ShellSession, color: ColorPolicy) -> io::Re
                     if let Ok(mut mode) = editor_mode.write() {
                         *mode = EditorMode::Normal;
                     }
-                    writeln!(io::stderr().lock(), "returned to Sparsh command mode")?;
+                    if let Some((was_stealth, declarations)) = srepl_saved.take() {
+                        let _ = session.apply_repo_source(&declarations);
+                        session.set_stealth_mode(was_stealth);
+                    }
+                    writeln!(
+                        io::stderr().lock(),
+                        "left the private REPL: session and history are as they were"
+                    )?;
                     continue;
                 }
                 return Ok(session.last_status());
@@ -679,10 +704,10 @@ mod tests {
 
     #[test]
     fn stealth_blocks_disk_backed_editor_without_changing_normal_binding() {
-        let history = SharedHistory::new(SparshHistory::new(
-            reedline::FileBackedHistory::new(10).unwrap(),
-            false,
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let history = SharedHistory::new(
+            SparshHistory::open(directory.path().join("history"), 10, false).unwrap(),
+        );
         let mut editor = PasteTrackingEmacs::new(
             sparsh_emacs_keybindings(&[]),
             Arc::new(AtomicBool::new(false)),

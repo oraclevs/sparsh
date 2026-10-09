@@ -38,6 +38,31 @@ pub(crate) fn shell_result_output(value: spar::InteractiveEvalResult) -> Result<
     }
 }
 
+pub(crate) fn shell_result_runtime_output(value: spar::Value) -> Result<FunctionOutput, ShellError> {
+    let spar::Value::Result(result) = value else {
+        return Err(ShellError::Process { message: "ShellResult function did not return ok or err".into(), status: 2 });
+    };
+    match result {
+        Ok(value) if value.quiet => Ok(FunctionOutput { stdout: Vec::new(), stderr: Vec::new(), status: 0 }),
+        Ok(value) => {
+            let stdout = match *value.value {
+                spar::Value::String(text) => line_bytes(text),
+                other => {
+                    let bytes = spar::StructuredFormatRegistry::builtin().encode_values("json", &[other])
+                        .map_err(|error| ShellError::Process { message: format!("cannot encode ShellResult value: {error}"), status: 2 })?;
+                    line_bytes(String::from_utf8(bytes).map_err(|error| ShellError::Process { message: error.to_string(), status: 2 })?)
+                }
+            };
+            Ok(FunctionOutput { stdout, stderr: Vec::new(), status: 0 })
+        }
+        Err(error) => Ok(FunctionOutput {
+            stdout: Vec::new(),
+            stderr: line_bytes(error.value.render_display()),
+            status: error.exit_code,
+        }),
+    }
+}
+
 fn line_bytes(mut value: String) -> Vec<u8> {
     if !value.ends_with('\n') { value.push('\n'); }
     value.into_bytes()
@@ -89,7 +114,7 @@ pub(crate) fn compose_function_pipeline(
     last_status: i32,
 ) -> Result<Option<ComposedFunctionPipeline>, ShellError> {
     let stages = split_top_level_pipeline(source);
-    if stages.len() < 2 || !stages.iter().any(|stage| is_explicit_call(stage.trim())) {
+    if stages.len() < 2 || !stages.iter().any(|stage| is_explicit_call(strip_await(stage.trim()))) {
         return Ok(None);
     }
 
@@ -97,8 +122,25 @@ pub(crate) fn compose_function_pipeline(
     let mut captured_outputs = Vec::new();
     for stage in stages {
         let stage = stage.trim();
-        if is_explicit_call(stage) {
-            let name = stage.split_once('(').map_or(stage, |(name, _)| name).trim();
+        if is_explicit_call(strip_await(stage)) {
+            let call = strip_await(stage);
+            let name = call.split_once('(').map_or(call, |(name, _)| name).trim();
+            // A function that returns data (not a shell plan or ShellResult): its value,
+            // as JSON, is what flows down the pipe, so `f() | from json` gives a table.
+            let returns_data = !matches!(
+                spar.function_return_type(name),
+                None | Some(spar::ast::SparType::Shell)
+            ) && !matches!(spar.function_return_type(name),
+                Some(spar::ast::SparType::Applied { name, arguments }) if name == "ShellResult" && arguments.len() == 2);
+            if returns_data {
+                let (value, _) = spar
+                    .eval_call_runtime_with_context(stage, cwd, environment)
+                    .map_err(|errors| ShellError::from_spar(errors, stage))?;
+                captured_outputs.push(data_value_output(value)?);
+                commands.push(virtual_command(CAPTURED_OUTPUT_PROGRAM, Vec::new()));
+                continue;
+            }
+            let stage = call;
             let shell_result = matches!(spar.function_return_type(name),
                 Some(spar::ast::SparType::Applied { name, arguments }) if name == "ShellResult" && arguments.len() == 2);
             if shell_result {
@@ -149,6 +191,35 @@ pub(crate) fn compose_function_pipeline(
     }))
 }
 
+fn strip_await(stage: &str) -> &str {
+    stage.strip_prefix("await ").map_or(stage, str::trim_start)
+}
+
+/// What a data-returning function sends down a pipe: text as lines, anything
+/// else as JSON; `Ok(x)` carries `x`, `Err(e)` fails the stage.
+fn data_value_output(value: spar::Value) -> Result<FunctionOutput, ShellError> {
+    let value = match value {
+        spar::Value::Result(Ok(ok)) => *ok.value,
+        spar::Value::Result(Err(error)) => {
+            return Err(ShellError::Process {
+                message: error.value.render_display(),
+                status: error.exit_code,
+            })
+        }
+        other => other,
+    };
+    let stdout = match value {
+        spar::Value::String(text) => line_bytes(text),
+        other => {
+            let bytes = spar::StructuredFormatRegistry::builtin()
+                .encode_values("json", &[other])
+                .map_err(|error| ShellError::Process { message: format!("cannot encode value: {error}"), status: 2 })?;
+            line_bytes(String::from_utf8(bytes).map_err(|error| ShellError::Process { message: error.to_string(), status: 2 })?)
+        }
+    };
+    Ok(FunctionOutput { stdout, stderr: Vec::new(), status: 0 })
+}
+
 fn virtual_command(program: &str, args: Vec<String>) -> CommandPlan {
     CommandPlan {
         program: program.to_string(),
@@ -191,7 +262,7 @@ fn flatten_single_pipeline(plan: ShellPlan) -> Result<Vec<spar_command::CommandP
     Ok(commands)
 }
 
-fn split_top_level_pipeline(source: &str) -> Vec<&str> {
+pub(crate) fn split_top_level_pipeline(source: &str) -> Vec<&str> {
     let bytes = source.as_bytes();
     let mut result = Vec::new();
     let mut start = 0usize;
@@ -232,7 +303,9 @@ fn split_top_level_pipeline(source: &str) -> Vec<&str> {
             b'|' if paren == 0 && bracket == 0 && brace == 0 => {
                 let previous_pipe = index > 0 && bytes[index - 1] == b'|';
                 let next_pipe = bytes.get(index + 1) == Some(&b'|');
-                if !previous_pipe && !next_pipe {
+                // `|>` is Spar's value pipeline, not a byte pipe.
+                let spar_pipe = bytes.get(index + 1) == Some(&b'>');
+                if !previous_pipe && !next_pipe && !spar_pipe {
                     result.push(&source[start..index]);
                     start = index + 1;
                 }
@@ -252,6 +325,14 @@ mod tests {
     use spar_command::Step;
 
     use super::{compose_function_pipeline, split_top_level_pipeline};
+
+    #[test]
+    fn the_value_pipeline_operator_is_not_a_byte_pipe() {
+        assert_eq!(
+            split_top_level_pipeline("f(a: 1) |> select(fields: [\"x\"]) | grep y"),
+            ["f(a: 1) |> select(fields: [\"x\"]) ", " grep y"]
+        );
+    }
 
     #[test]
     fn splits_only_top_level_single_pipes() {
@@ -294,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn non_shell_function_is_rejected_as_a_pipeline_stage() {
+    fn data_function_output_flows_down_a_pipeline() {
         let engine = spar::Engine::default();
         let mut session = engine.session();
         session
@@ -302,19 +383,18 @@ mod tests {
             .unwrap();
         let environment: Vec<(OsString, OsString)> = Vec::new();
 
-        let error = compose_function_pipeline(
+        // A function that returns data feeds its value down the pipe.
+        let composed = compose_function_pipeline(
             r#"value(name: "alpha") | grep alpha"#,
             &session,
             Path::new("/"),
             &environment,
             0,
         )
-        .unwrap_err();
+        .unwrap()
+        .unwrap();
 
-        assert_eq!(error.status(), 2);
-        assert!(error
-            .to_string()
-            .contains("pipeline stage must evaluate to shell"));
+        assert_eq!(composed.captured_outputs[0].stdout, b"alpha\n");
     }
 
     #[test]

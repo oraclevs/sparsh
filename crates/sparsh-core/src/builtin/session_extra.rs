@@ -27,13 +27,9 @@ pub(super) fn help(
             Ok(success(Some(out)))
         }
         [name] => {
-            let entry = registry
-                .find(name)
+            let page = crate::help_page(name, registry)
                 .ok_or_else(|| error(format!("help: no such builtin: {name}")))?;
-            Ok(success(Some(format!(
-                "{} — {}\nusage: {}\n",
-                entry.name, entry.description, entry.usage
-            ))))
+            Ok(success(Some(crate::help_pages::render_text(&page))))
         }
         _ => Err(usage_error("help [builtin]")),
     }
