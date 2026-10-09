@@ -1387,6 +1387,7 @@ dependencies = [
  "indexmap",
  "libc",
  "rayon",
+ "serde_json",
  "spar",
  "spar-command",
  "spar-process",

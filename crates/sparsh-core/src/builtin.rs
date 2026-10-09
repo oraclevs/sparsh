@@ -49,6 +49,7 @@ pub(crate) struct BuiltinContext<'a> {
     pub requested_reload_config: bool,
     pub requested_exec: Option<Vec<String>>,
     pub requested_source: Option<SourceRequest>,
+    pub requested_theme: Option<Vec<String>>,
     pub stdin: Vec<u8>,
     pub stdin_available: bool,
     pub login_shell: bool,
@@ -446,6 +447,15 @@ impl BuiltinRegistry {
                     true,
                     true,
                     pkg::pkg
+                ),
+                builtin!(
+                    "theme",
+                    "Show and manage colors",
+                    "theme [list | set NAME | set default | set --accent #rrggbb | import pywal|FILE | export FILE]",
+                    "session",
+                    true,
+                    true,
+                    theme
                 ),
                 builtin!(
                     "reload",
@@ -1024,6 +1034,11 @@ fn srepl(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry)
     Ok(success(None))
 }
 
+fn theme(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
+    context.requested_theme = Some(args.to_vec());
+    Ok(success(None))
+}
+
 fn reload(args: &[String], context: &mut BuiltinContext<'_>, _: &BuiltinRegistry) -> BuiltinResult {
     require_empty(args, "reload")?;
     context.requested_reload_config = true;
@@ -1142,6 +1157,7 @@ mod tests {
             "source",
             "deactivate",
             "reload",
+            "theme",
             "srepl",
             "pkg",
             "exit",

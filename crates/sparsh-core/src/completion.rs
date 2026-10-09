@@ -77,6 +77,8 @@ pub struct CompletionSnapshot {
     pub(crate) dir_aliases: Vec<crate::DirAlias>,
     /// Everything the Spar session has committed so far, as source text.
     pub(crate) session_source: String,
+    /// Registered theme names (and descriptions), for `theme set`.
+    pub(crate) theme_names: Vec<(String, Option<String>)>,
 }
 
 impl CompletionSnapshot {
@@ -111,6 +113,7 @@ impl CompletionSnapshot {
             visited_dirs: Vec::new(),
             dir_aliases: Vec::new(),
             async_functions: BTreeSet::new(),
+            theme_names: Vec::new(),
         }
     }
 }
@@ -124,6 +127,9 @@ pub fn complete(
         return Vec::new();
     }
     if let Some(items) = complete_import_names(snapshot, request.line, cursor) {
+        return items;
+    }
+    if let Some(items) = complete_theme_arguments(snapshot, request.line, cursor) {
         return items;
     }
     if let Some(items) = complete_pipeline_position(snapshot, request.line, cursor) {
@@ -1323,6 +1329,74 @@ fn complete_import_names(
     Some(items)
 }
 
+fn complete_theme_arguments(
+    snapshot: &CompletionSnapshot,
+    line: &str,
+    cursor: usize,
+) -> Option<Vec<CompletionItem>> {
+    let prefix = &line[..cursor];
+    let words: Vec<&str> = prefix.split_whitespace().collect();
+    if words.first() != Some(&"theme") {
+        return None;
+    }
+    let trailing_space = prefix.ends_with(char::is_whitespace);
+    if !trailing_space && words.len() == 1 {
+        return None; // still typing the command name itself
+    }
+    let (position, typed) = if trailing_space {
+        (words.len(), "")
+    } else {
+        (words.len() - 1, *words.last()?)
+    };
+    let start = cursor - typed.len();
+    let make = |replacement: &str, description: Option<String>| CompletionItem {
+        span: start..cursor,
+        replacement: replacement.to_string(),
+        description,
+        kind: Some(ItemKind::Keyword),
+    };
+    let choices: Vec<CompletionItem> = match (position, words.get(1).copied()) {
+        (1, _) => ["list", "set", "import", "export"]
+            .iter()
+            .map(|name| make(name, None))
+            .collect(),
+        (2, Some("set")) => {
+            let mut items = vec![
+                make("--accent", Some("generate from #rrggbb".into())),
+                make("default", Some("built-in colors".into())),
+            ];
+            items.extend(snapshot.theme_names.iter().map(|(n, d)| make(n, d.clone())));
+            items
+        }
+        (2, Some("import")) => {
+            let mut items = vec![make("pywal", Some("read ~/.cache/wal/colors.json".into()))];
+            items.retain(|item| item.replacement.starts_with(typed));
+            items.extend(complete_paths(
+                snapshot,
+                typed,
+                start..cursor,
+                PathCompletionMode::FilesOnly,
+            ));
+            return Some(items);
+        }
+        (2, Some("export")) => {
+            return Some(complete_paths(
+                snapshot,
+                typed,
+                start..cursor,
+                PathCompletionMode::FilesAndDirectories,
+            ))
+        }
+        _ => return Some(Vec::new()),
+    };
+    let mut items: Vec<_> = choices
+        .into_iter()
+        .filter(|item| item.replacement.starts_with(typed))
+        .collect();
+    items.sort_by(|a, b| a.replacement.cmp(&b.replacement));
+    Some(items)
+}
+
 fn import_item_kind(kind: spar::intel::ExportKind) -> ItemKind {
     use spar::intel::ExportKind;
     match kind {
@@ -1729,6 +1803,44 @@ mod tests {
         );
 
         assert!(items.iter().any(|item| item.replacement == "Projects/"));
+    }
+
+    fn theme_snapshot() -> CompletionSnapshot {
+        CompletionSnapshot {
+            theme_names: vec![("gruvbox".into(), Some("warm".into())), ("royal".into(), None)],
+            ..CompletionSnapshot::default()
+        }
+    }
+
+    fn at_end(snapshot: &CompletionSnapshot, line: &str) -> Vec<String> {
+        complete(snapshot, CompletionRequest { line, cursor: line.len() })
+            .into_iter()
+            .map(|item| item.replacement)
+            .collect()
+    }
+
+    #[test]
+    fn theme_offers_subcommands() {
+        let names = at_end(&theme_snapshot(), "theme ");
+        for want in ["list", "set", "import", "export"] {
+            assert!(names.contains(&want.to_string()), "{names:?}");
+        }
+    }
+
+    #[test]
+    fn theme_set_offers_registered_names_default_and_accent() {
+        assert_eq!(
+            at_end(&theme_snapshot(), "theme set "),
+            vec!["--accent", "default", "gruvbox", "royal"]
+        );
+        assert_eq!(at_end(&theme_snapshot(), "theme set gr"), vec!["gruvbox"]);
+    }
+
+    #[test]
+    fn theme_import_offers_pywal_and_nothing_after_the_name() {
+        let names = at_end(&theme_snapshot(), "theme import ");
+        assert!(names.contains(&"pywal".to_string()), "{names:?}");
+        assert!(at_end(&theme_snapshot(), "theme set gruvbox ").is_empty());
     }
 
     fn complete_in_fixture_dir(line: &str) -> Vec<CompletionItem> {

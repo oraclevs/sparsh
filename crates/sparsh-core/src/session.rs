@@ -130,6 +130,8 @@ pub enum ShellResult {
     },
     #[doc(hidden)]
     SourceRequest(crate::builtin::SourceRequest),
+    #[doc(hidden)]
+    ThemeRequest(Vec<String>),
     Builtin(BuiltinOutput),
     /// `help NAME` at a terminal: the UI draws it with colors and tables.
     Help(Box<crate::HelpPage>),
@@ -260,6 +262,7 @@ pub struct ShellSession {
     last_status: i32,
     config: crate::SparshConfig,
     config_generation: u64,
+    theme_state: crate::ThemeFileState,
     interactive_source: String,
     /// `repo` is open: the buffer redeclares the session, so the editor must not
     /// flag those names as duplicates.
@@ -270,12 +273,31 @@ pub struct ShellSession {
     config_notices: Vec<String>,
 }
 
+/// Builtins that change shell state are not programs on PATH, so a Spar
+/// function body that calls one cannot spawn it. They are queued for the
+/// session to run once the function returns. `cd` is handled by Spar itself;
+/// the rest are left out because deferring them would change their meaning.
+fn register_deferred_builtins() {
+    const NOT_DEFERRED: &[&str] = &[
+        "cd", "exit", "logout", "source", ".", "exec", "srepl", "reload", "pkg",
+    ];
+    spar_process::add_deferred_programs(
+        BuiltinRegistry::new()
+            .metadata()
+            .filter(|metadata| metadata.mutates_shell_state)
+            .map(|metadata| metadata.name)
+            .filter(|name| !NOT_DEFERRED.contains(name))
+            .map(str::to_string),
+    );
+}
+
 impl ShellSession {
     pub fn new() -> Self {
         Self::try_new().expect("failed to initialize Sparsh session services")
     }
 
     pub fn try_new() -> Result<Self, ShellError> {
+        register_deferred_builtins();
         Ok(Self {
             spar: spar::Engine::default().session(),
             builtins: BuiltinRegistry::new(),
@@ -286,6 +308,7 @@ impl ShellSession {
             last_status: 0,
             config: crate::SparshConfig::default(),
             config_generation: 0,
+            theme_state: crate::ThemeFileState::default(),
             interactive_source: String::new(),
             repo_editing: false,
             repo_base: None,
@@ -827,6 +850,11 @@ impl ShellSession {
                 self.replace_with_command(words, *template)
             }
             Ok(ShellResult::SourceRequest(request)) => self.source_request(request),
+            Ok(ShellResult::ThemeRequest(args)) => {
+                let output = self.run_theme_command(&args)?;
+                self.last_status = output.status;
+                Ok(ShellResult::Builtin(output))
+            },
             Ok(ShellResult::ReloadConfig) => {
                 self.reload_config()?;
                 self.last_status = 0;
@@ -848,7 +876,8 @@ impl ShellSession {
                     | ShellResult::ReloadConfig
                     | ShellResult::ReloadConfigWith(_)
                     | ShellResult::ExecRequest { .. }
-                    | ShellResult::SourceRequest(_) => 0,
+                    | ShellResult::SourceRequest(_)
+                    | ShellResult::ThemeRequest(_) => 0,
                     ShellResult::Builtin(output) => output.status,
                     ShellResult::Process(outcome) => outcome.exit_code,
                     ShellResult::BackgroundJob { .. } => 0,
@@ -1194,7 +1223,11 @@ impl ShellSession {
 
     pub fn reload_config(&mut self) -> Result<(), ShellError> {
         let interactive = self.interactive_source.clone();
-        self.rebuild_spar(&interactive, true)
+        self.rebuild_spar(&interactive, true)?;
+        if let Some(notice) = self.refresh_theme(true).notice {
+            return Err(ShellError::Config(crate::ConfigLoadError::Invalid(format!("theme: {notice}"))));
+        }
+        Ok(())
     }
 
     /// The declarations typed or sourced in this session (imports, variables,
@@ -1341,13 +1374,33 @@ impl ShellSession {
     /// keeps `err` exit codes and `ok(quiet:)`, and runs structured mixed
     /// pipelines (`cmd | from fmt`) the tree evaluator cannot. A pipeline that
     /// ends the body on a structured terminal is shown as a table.
+    /// Runs, in order, the sparsh builtins that a Spar function body called
+    /// while it was evaluating. Spar cannot reach this session's state, so
+    /// `spar-process` queues them instead of spawning a program.
+    fn run_deferred_builtins(&mut self) -> Result<(), ShellError> {
+        for command in spar_process::take_deferred_commands() {
+            let line = std::iter::once(command.program.as_str())
+                .chain(command.args.iter().map(String::as_str))
+                .map(crate::execute::shell_quote)
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.submit(&line)?;
+        }
+        Ok(())
+    }
+
     fn run_shell_result_call(&mut self, call: &str) -> Result<ShellResult, ShellError> {
         let cwd = self.services.directories.current().to_path_buf();
         let environment = self.services.environment.snapshot();
-        let (value, capture) = self
+        let evaluated = self
             .spar
             .eval_call_runtime_with_context(call, &cwd, &environment)
-            .map_err(|errors| ShellError::from_spar(errors, call))?;
+            .map_err(|errors| ShellError::from_spar(errors, call));
+        // Builtins the function called (`path append`, `export`, ...) ran as
+        // no-ops inside Spar; apply them now, in order, in this session.
+        let deferred = self.run_deferred_builtins();
+        let (value, capture) = evaluated?;
+        deferred?;
         // `ok(pretty: true)`: show the value as a table you can query with `_`.
         if let spar::Value::Result(Ok(ok)) = &value {
             if ok.pretty && !ok.quiet {
@@ -1475,6 +1528,32 @@ impl ShellSession {
                     .collect(),
                 &["directory", "exists"],
             ),
+            ("theme", []) => {
+                self.refresh_theme(false);
+                (
+                    crate::theme_command::status_rows(&self.theme_state, &self.config)
+                        .into_iter()
+                        .map(|(property, value)| vec![("property", text(property)), ("value", text(value))])
+                        .collect(),
+                    &["property", "value"],
+                )
+            }
+            ("theme", ["list"]) => {
+                self.refresh_theme(false);
+                (
+                    crate::theme_command::list_rows(&self.theme_state, &self.config)
+                        .into_iter()
+                        .map(|(name, description, active)| {
+                            vec![
+                                ("name", text(name)),
+                                ("description", description.map_or(spar::Value::Void, text)),
+                                ("active", spar::Value::Bool(active)),
+                            ]
+                        })
+                        .collect(),
+                    &["name", "description", "active"],
+                )
+            }
             ("hash", []) => (
                 self.services
                     .resolver
@@ -1580,6 +1659,30 @@ impl ShellSession {
         self.config_generation
     }
 
+    pub fn refresh_theme(&mut self, force: bool) -> crate::ThemeRefresh {
+        let Some(home) = self.services.environment.get("HOME").map(std::path::PathBuf::from) else {
+            return crate::ThemeRefresh::default();
+        };
+        self.theme_state.refresh(&home, force)
+    }
+
+    pub fn run_theme_command(&mut self, args: &[String]) -> Result<BuiltinOutput, ShellError> {
+        let home = self.services.environment.get("HOME").map(PathBuf::from);
+        crate::theme_command::run(args, &mut self.theme_state, &self.config, home.as_deref())
+    }
+
+    pub fn theme_generation(&self) -> u64 {
+        self.theme_state.generation()
+    }
+
+    pub fn theme_file_layer(&self) -> &crate::ThemeLayer {
+        self.theme_state.layer()
+    }
+
+    pub fn config_theme_layer(&self) -> &crate::ThemeLayer {
+        &self.config.theme
+    }
+
     pub fn completion_snapshot(&self) -> crate::CompletionSnapshot {
         if !self.config.completion.enabled {
             return crate::CompletionSnapshot::default();
@@ -1651,6 +1754,12 @@ impl ShellSession {
             spar_identifiers,
             spar_functions,
             session_source: self.spar.committed_source().to_string(),
+            theme_names: self
+                .config
+                .themes
+                .iter()
+                .map(|theme| (theme.name.clone(), theme.description.clone()))
+                .collect(),
         }
     }
 
@@ -1946,6 +2055,42 @@ mod tests {
     use crate::alias::AliasService;
     use crate::PROCESS_STATE;
 
+    #[test]
+    fn session_refreshes_theme_without_touching_config_generation() {
+        let home = tempfile::tempdir().unwrap();
+        let source_dir = home.path().join(".sparsh/src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("sparsh-types.spar"), include_str!("../../../examples/sparsh-types.spar")).unwrap();
+        std::fs::write(source_dir.join("theme.generated.spar"), r##"var themeState: Record = { source: { kind: "external"; }; theme: { palette: { accent: "#112233"; }; }; };"##).unwrap();
+        let mut session = ShellSession::new();
+        session.services.environment = crate::environment::EnvironmentService::from_pairs([
+            ("HOME".to_string(), home.path().display().to_string()),
+        ]);
+        let config_generation = session.config_generation();
+        assert!(session.refresh_theme(false).changed);
+        assert_eq!(session.theme_generation(), 1);
+        assert_eq!(session.config_generation(), config_generation);
+        assert_eq!(session.theme_file_layer().palette[&crate::PaletteKey::Accent], crate::ColorSpec::Rgb(0x11, 0x22, 0x33));
+        assert!(session.config_theme_layer().palette.is_empty());
+    }
+
+    #[test]
+    fn reload_forces_an_invalid_theme_notice() {
+        let home = tempfile::tempdir().unwrap();
+        let source_dir = home.path().join(".sparsh/src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("sparsh-types.spar"), include_str!("../../../examples/sparsh-types.spar")).unwrap();
+        std::fs::write(source_dir.join("theme.generated.spar"), "struct Theme {").unwrap();
+        let mut session = ShellSession::new();
+        session.services.environment = crate::environment::EnvironmentService::from_pairs([
+            ("HOME".to_string(), home.path().display().to_string()),
+        ]);
+        assert!(session.refresh_theme(false).notice.is_some());
+        assert!(session.refresh_theme(false).notice.is_none());
+        let error = session.reload_config().unwrap_err().to_string();
+        assert!(error.contains("theme.generated.spar"), "{error}");
+    }
+
     #[derive(Default)]
     struct MemoryHistory {
         entries: Mutex<Vec<String>>,
@@ -2080,6 +2225,48 @@ mod tests {
         session.run_startup_hook().unwrap();
 
         assert_eq!(session.ui_snapshot().cwd(), directory.path());
+    }
+
+    #[test]
+    fn startup_runs_state_changing_builtins_after_the_function_returns() {
+        let mut session = ShellSession::new();
+        session
+            .submit_spar(
+                r#"function startup() -> ShellResult<int, int> {
+    path append "/tmp/sparsh-deferred-test-dir";
+    export SPARSH_DEFERRED_TEST=yes;
+    return ok(value: 0, quiet: true);
+};"#,
+            )
+            .unwrap();
+        session.run_startup_hook().unwrap();
+        let ShellResult::Builtin(path) = session.submit("path").unwrap() else {
+            panic!("expected path output");
+        };
+        assert!(
+            String::from_utf8_lossy(&path.stdout).contains("/tmp/sparsh-deferred-test-dir"),
+            "{}",
+            String::from_utf8_lossy(&path.stdout)
+        );
+        assert_eq!(
+            session.services.environment.get("SPARSH_DEFERRED_TEST"),
+            Some(std::ffi::OsStr::new("yes"))
+        );
+    }
+
+    #[test]
+    fn a_failing_deferred_builtin_reports_its_error() {
+        let mut session = ShellSession::new();
+        session
+            .submit_spar(
+                r#"function startup() -> ShellResult<int, int> {
+    path frobnicate;
+    return ok(value: 0, quiet: true);
+};"#,
+            )
+            .unwrap();
+        let error = session.run_startup_hook().unwrap_err().to_string();
+        assert!(error.contains("path"), "{error}");
     }
 
     #[test]
@@ -2786,6 +2973,42 @@ mod tests {
         let mut plain = ShellSession::new();
         plain.submit("alias zz = echo hi").unwrap();
         assert!(builtin_stdout(plain.submit("alias").unwrap()).contains("zz"));
+    }
+
+    #[test]
+    fn theme_list_and_status_are_tables_in_an_interactive_session() {
+        // Never read the developer's real theme state.
+        let home = tempfile::tempdir().unwrap();
+        let mut session = ShellSession::try_new_interactive().unwrap();
+        session
+            .services
+            .environment
+            .set_os("HOME", home.path().as_os_str());
+        session.config.themes.push(crate::ThemeKindConfig {
+            name: "gruvbox".into(),
+            description: Some("warm".into()),
+            layer: crate::ThemeLayer::default(),
+        });
+        let ShellResult::Structured(list) = session.submit("theme list").unwrap() else {
+            panic!("theme list should be a table");
+        };
+        let spar::Value::Table(table) = &list.value else {
+            panic!("expected a table, got {:?}", list.value);
+        };
+        let rows = table.rows();
+        assert_eq!(rows.len(), 2);
+        let spar::Value::Object(first) = &rows[0] else { panic!("row") };
+        assert_eq!(first.get("name"), Some(&spar::Value::String("default".into())));
+        assert_eq!(first.get("description"), Some(&spar::Value::String("built-in colors".into())));
+        assert_eq!(first.get("active"), Some(&spar::Value::Bool(true)));
+        let spar::Value::Object(second) = &rows[1] else { panic!("row") };
+        assert_eq!(second.get("description"), Some(&spar::Value::String("warm".into())));
+        assert_eq!(second.get("active"), Some(&spar::Value::Bool(false)));
+        assert!(matches!(session.submit("theme").unwrap(), ShellResult::Structured(_)));
+        // Arguments that change state keep the text builtin.
+        assert!(matches!(session.submit("theme set nope"), Err(_) | Ok(ShellResult::Builtin(_))));
+        let mut plain = ShellSession::new();
+        assert!(builtin_stdout(plain.submit("theme list").unwrap()).contains("default"));
     }
 
     #[test]

@@ -96,6 +96,164 @@ export struct SparshConfig {
     prompt: Option<SparshPrompt> = none();
     history: Option<SparshHistory> = none();
     completion: Option<SparshCompletion> = none();
+    themes: Option<List<SparshThemeKind>> = none();
+    theme: Option<SparshTheme> = none();
     keybindings: Option<List<SparshKeybinding>> = none();
     pagerKeybindings: Option<List<SparshPagerKeybinding>> = none();
+};
+
+export struct SparshThemeStyle {
+    foreground: Option<str> = none();
+    background: Option<str> = none();
+    bold: Option<bool> = none();
+    dim: Option<bool> = none();
+    italic: Option<bool> = none();
+    underline: Option<bool> = none();
+};
+
+export struct SparshThemePalette {
+    accent: Option<str> = none();
+    text: Option<str> = none();
+    muted: Option<str> = none();
+    success: Option<str> = none();
+    warning: Option<str> = none();
+    error: Option<str> = none();
+    info: Option<str> = none();
+    selectionFg: Option<str> = none();
+    selectionBg: Option<str> = none();
+};
+
+export struct SparshThemePrompt {
+    cwd: Option<SparshThemeStyle> = none();
+    success: Option<SparshThemeStyle> = none();
+    time: Option<SparshThemeStyle> = none();
+    failure: Option<SparshThemeStyle> = none();
+    duration: Option<SparshThemeStyle> = none();
+    promptMarker: Option<SparshThemeStyle> = none();
+    secondary: Option<SparshThemeStyle> = none();
+    virtualEnvironment: Option<SparshThemeStyle> = none();
+    projectPython: Option<SparshThemeStyle> = none();
+    projectRust: Option<SparshThemeStyle> = none();
+    projectFlutter: Option<SparshThemeStyle> = none();
+    projectDart: Option<SparshThemeStyle> = none();
+    projectNode: Option<SparshThemeStyle> = none();
+    projectGo: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemeSyntax {
+    warning: Option<SparshThemeStyle> = none();
+    error: Option<SparshThemeStyle> = none();
+    builtin: Option<SparshThemeStyle> = none();
+    alias: Option<SparshThemeStyle> = none();
+    externalCommand: Option<SparshThemeStyle> = none();
+    unknownCommand: Option<SparshThemeStyle> = none();
+    argument: Option<SparshThemeStyle> = none();
+    path: Option<SparshThemeStyle> = none();
+    functionName: Option<SparshThemeStyle> = none();
+    parameter: Option<SparshThemeStyle> = none();
+    option: Option<SparshThemeStyle> = none();
+    quotedString: Option<SparshThemeStyle> = none();
+    operator: Option<SparshThemeStyle> = none();
+    sparSyntax: Option<SparshThemeStyle> = none();
+    comment: Option<SparshThemeStyle> = none();
+    typeName: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemeCompletion {
+    completionFunction: Option<SparshThemeStyle> = none();
+    completionVariable: Option<SparshThemeStyle> = none();
+    completionType: Option<SparshThemeStyle> = none();
+    completionKeyword: Option<SparshThemeStyle> = none();
+    completionPath: Option<SparshThemeStyle> = none();
+    completionDirectory: Option<SparshThemeStyle> = none();
+    completionCommand: Option<SparshThemeStyle> = none();
+    menuBorder: Option<SparshThemeStyle> = none();
+    menuText: Option<SparshThemeStyle> = none();
+    menuSelected: Option<SparshThemeStyle> = none();
+    menuDetail: Option<SparshThemeStyle> = none();
+    menuFooter: Option<SparshThemeStyle> = none();
+    menuCount: Option<SparshThemeStyle> = none();
+    menuMatch: Option<SparshThemeStyle> = none();
+    hintHistory: Option<SparshThemeStyle> = none();
+    hintSignature: Option<SparshThemeStyle> = none();
+    hintActive: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemeData {
+    dataKey: Option<SparshThemeStyle> = none();
+    dataString: Option<SparshThemeStyle> = none();
+    dataNumber: Option<SparshThemeStyle> = none();
+    dataBool: Option<SparshThemeStyle> = none();
+    dataNull: Option<SparshThemeStyle> = none();
+    dataPunct: Option<SparshThemeStyle> = none();
+    tableHeader: Option<SparshThemeStyle> = none();
+    tableIndex: Option<SparshThemeStyle> = none();
+    tableBorder: Option<SparshThemeStyle> = none();
+    fileDirectory: Option<SparshThemeStyle> = none();
+    fileExecutable: Option<SparshThemeStyle> = none();
+    fileSymlink: Option<SparshThemeStyle> = none();
+    fileSpecial: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemeGit {
+    gitBranch: Option<SparshThemeStyle> = none();
+    gitDirty: Option<SparshThemeStyle> = none();
+    gitClean: Option<SparshThemeStyle> = none();
+    gitStaged: Option<SparshThemeStyle> = none();
+    gitModified: Option<SparshThemeStyle> = none();
+    gitUntracked: Option<SparshThemeStyle> = none();
+    gitConflict: Option<SparshThemeStyle> = none();
+    gitAhead: Option<SparshThemeStyle> = none();
+    gitBehind: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemeHelp {
+    title: Option<SparshThemeStyle> = none();
+    heading: Option<SparshThemeStyle> = none();
+    body: Option<SparshThemeStyle> = none();
+    option: Option<SparshThemeStyle> = none();
+    example: Option<SparshThemeStyle> = none();
+    crossReference: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemeEditor {
+    header: Option<SparshThemeStyle> = none();
+    position: Option<SparshThemeStyle> = none();
+    status: Option<SparshThemeStyle> = none();
+    selection: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshThemePager {
+    status: Option<SparshThemeStyle> = none();
+    search: Option<SparshThemeStyle> = none();
+    selected: Option<SparshThemeStyle> = none();
+};
+
+export struct SparshTheme {
+    palette: Option<SparshThemePalette> = none();
+    prompt: Option<SparshThemePrompt> = none();
+    syntax: Option<SparshThemeSyntax> = none();
+    completion: Option<SparshThemeCompletion> = none();
+    data: Option<SparshThemeData> = none();
+    git: Option<SparshThemeGit> = none();
+    help: Option<SparshThemeHelp> = none();
+    editor: Option<SparshThemeEditor> = none();
+    pager: Option<SparshThemePager> = none();
+};
+
+export struct SparshThemeKind {
+    name: str = "";
+    description: Option<str> = none();
+    theme: SparshTheme = SparshTheme();
+};
+
+export struct SparshThemeSource {
+    kind: str = "registered";
+    name: Option<str> = none();
+    origin: Option<str> = none();
+};
+
+export struct SparshThemeState {
+    source: SparshThemeSource = SparshThemeSource();
+    theme: SparshTheme = SparshTheme();
 };

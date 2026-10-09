@@ -142,6 +142,14 @@ impl EnvironmentVariableConfig {
     }
 }
 
+/// One entry of `configuration.themes`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeKindConfig {
+    pub name: String,
+    pub description: Option<String>,
+    pub layer: crate::ThemeLayer,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SparshConfig {
     pub aliases: Vec<(String, Vec<String>)>,
@@ -149,6 +157,9 @@ pub struct SparshConfig {
     pub prompt: PromptConfig,
     pub history: HistoryConfig,
     pub completion: CompletionConfig,
+    pub theme: crate::ThemeLayer,
+    /// Named themes registered in `configuration.themes`.
+    pub themes: Vec<ThemeKindConfig>,
     pub keybindings: Vec<crate::KeybindingConfig>,
     pub pager_keybindings: Vec<crate::PagerKeybindingConfig>,
     /// Problems found in the `prompt` section. They never fail the load: bad
@@ -158,6 +169,29 @@ pub struct SparshConfig {
 
 impl SparshConfig {
     pub fn validate(&self) -> Result<(), String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, theme) in self.themes.iter().enumerate() {
+            let valid = !theme.name.is_empty()
+                && theme.name.len() <= 64
+                && theme
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+            if !valid {
+                return Err(format!(
+                    "config.themes[{index}].name must be 1-64 letters, digits, `-` or `_`"
+                ));
+            }
+            if theme.name == "default" {
+                return Err(format!("config.themes[{index}].name `default` is reserved"));
+            }
+            if !seen.insert(theme.name.clone()) {
+                return Err(format!(
+                    "config.themes[{index}].name `{}` is a duplicate",
+                    theme.name
+                ));
+            }
+        }
         let mut aliases = AliasService::new();
         aliases.define_many(&self.aliases)?;
 
@@ -249,9 +283,9 @@ pub(crate) fn read_source(path: &Path) -> Result<String, ConfigLoadError> {
 }
 
 /// Evaluates the single Sparsh rc file into `session`. The file is ordinary
-/// Spar source: it may declare variables/functions/imports and may optionally
-/// declare a typed `struct Config { ... };` for declarative shell UI/environment
-/// settings. Public config types can live in `~/.sparsh/src/sparsh-types.spar`; Sparsh
+/// Spar source: it may declare variables/functions/imports. The entry point is
+/// `var configuration: SparshConfig = SparshConfig(...)`; a typed
+/// `struct Config { ... };` is still accepted when `configuration` is absent. Public config types can live in `~/.sparsh/src/sparsh-types.spar`; Sparsh
 /// validates the resulting section independently. Absence of `Config` means defaults.
 pub(crate) fn evaluate_source_in_session(
     session: &mut spar::Session,
@@ -261,9 +295,13 @@ pub(crate) fn evaluate_source_in_session(
         session.eval(source).map_err(ConfigLoadError::Spar)?;
     }
 
-    let config = match session.construct_default("Config").map_err(ConfigLoadError::Spar)? {
-        Some(value) => config_from_value(&value).map_err(ConfigLoadError::Invalid)?,
-        None => SparshConfig::default(),
+    let config = if let Some(value) = session.value("configuration") {
+        config_from_value(value).map_err(ConfigLoadError::Invalid)?
+    } else {
+        match session.construct_default("Config").map_err(ConfigLoadError::Spar)? {
+            Some(value) => config_from_value(&value).map_err(ConfigLoadError::Invalid)?,
+            None => SparshConfig::default(),
+        }
     };
     config.validate().map_err(ConfigLoadError::Invalid)?;
     Ok(config)
@@ -295,6 +333,8 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
             "prompt",
             "history",
             "completion",
+            "theme",
+            "themes",
             "keybindings",
             "pagerKeybindings",
         ],
@@ -388,6 +428,32 @@ fn config_from_value(value: &ConfigValue) -> Result<SparshConfig, String> {
         if let Some(value) = completion.get("enabled") {
             config.completion.enabled = expect_bool(value, "config.completion.enabled")?;
         }
+    }
+
+    if let Some(value) = root.get("themes") {
+        config.themes = expect_list(value, "config.themes")?
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let path = format!("config.themes[{index}]");
+                let entry = expect_section(value, &path)?;
+                ensure_allowed_fields(entry, &path, &["name", "description", "theme"])?;
+                let name = expect_string(required(entry, "name", &path)?, &format!("{path}.name"))?;
+                let description = entry
+                    .get("description")
+                    .map(|value| expect_string(value, &format!("{path}.description")))
+                    .transpose()?;
+                let layer = crate::ThemeLayer::parse(
+                    required(entry, "theme", &path)?,
+                    &format!("{path}.theme"),
+                )?;
+                Ok(ThemeKindConfig { name, description, layer })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+    }
+
+    if let Some(value) = root.get("theme") {
+        config.theme = crate::ThemeLayer::parse(value, "config.theme")?;
     }
 
     if let Some(value) = root.get("keybindings") {
@@ -582,6 +648,114 @@ mod tests {
     }
 
     #[test]
+    fn themes_registry_loads_names_and_layers() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config.spar");
+        fs::write(
+            &file,
+            configuration_source(
+                r##"    themes: some(value: [
+        SparshThemeKind(name: "gruvbox", description: some(value: "warm"), theme: SparshTheme(palette: some(value: SparshThemePalette(accent: some(value: "#fabd2f"))))),
+        SparshThemeKind(name: "plain", theme: SparshTheme()),
+    ]),"##,
+            ),
+        )
+        .unwrap();
+        let config = load_candidate(&file).unwrap();
+        assert_eq!(config.themes.len(), 2);
+        assert_eq!(config.themes[0].name, "gruvbox");
+        assert_eq!(config.themes[0].description.as_deref(), Some("warm"));
+        assert_eq!(
+            config.themes[0].layer.palette[&crate::PaletteKey::Accent],
+            crate::ColorSpec::Rgb(0xfa, 0xbd, 0x2f)
+        );
+        assert!(config.themes[1].layer.palette.is_empty());
+    }
+
+    #[test]
+    fn themes_registry_rejects_bad_names() {
+        for (names, needle) in [
+            (r#"SparshThemeKind(name: "a", theme: SparshTheme()), SparshThemeKind(name: "a", theme: SparshTheme())"#, "duplicate"),
+            (r#"SparshThemeKind(name: "", theme: SparshTheme())"#, "config.themes[0].name"),
+            (r#"SparshThemeKind(name: "two words", theme: SparshTheme())"#, "config.themes[0].name"),
+            (r#"SparshThemeKind(name: "default", theme: SparshTheme())"#, "reserved"),
+        ] {
+            let dir = tempdir().unwrap();
+            let file = dir.path().join("config.spar");
+            fs::write(
+                &file,
+                configuration_source(&format!("    themes: some(value: [{names}]),")),
+            )
+            .unwrap();
+            let error = load_candidate(&file).unwrap_err().to_string();
+            assert!(error.contains(needle), "{needle}: {error}");
+        }
+    }
+
+    #[test]
+    fn types_fixture_matches_the_sparlibs_package_when_present() {
+        let package = std::path::Path::new("/home/occ/Projects/Spar/SparLibs/sparsh/src/lib.spar");
+        let Ok(published) = fs::read_to_string(package) else {
+            return;
+        };
+        assert_eq!(
+            published,
+            include_str!("../../../examples/sparsh-types.spar"),
+            "copy examples/sparsh-types.spar to SparLibs/sparsh/src/lib.spar (or the reverse)"
+        );
+    }
+
+    fn configuration_source(body: &str) -> String {
+        format!(
+            "{}\nvar configuration: SparshConfig = SparshConfig(\n{body}\n);\n",
+            include_str!("../../../examples/sparsh-types.spar")
+        )
+    }
+
+    #[test]
+    fn configuration_variable_is_the_entry_point() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config.spar");
+        fs::write(
+            &file,
+            configuration_source(
+                r##"    history: some(value: SparshHistory(maxEntries: some(value: 77))),
+    theme: some(value: SparshTheme(palette: some(value: SparshThemePalette(accent: some(value: "#8ab4f8"))))),"##,
+            ),
+        )
+        .unwrap();
+        let config = load_candidate(&file).unwrap();
+        assert_eq!(config.history.max_entries, 77);
+        assert_eq!(
+            config.theme.palette[&crate::PaletteKey::Accent],
+            crate::ColorSpec::Rgb(138, 180, 248)
+        );
+    }
+
+    #[test]
+    fn configuration_wins_over_legacy_struct_config() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config.spar");
+        let mut source = configuration_source(
+            "    history: some(value: SparshHistory(maxEntries: some(value: 11))),",
+        );
+        source.push_str(
+            "struct Config {\n    history: Option<SparshHistory> = some(value: SparshHistory(maxEntries: some(value: 22)));\n};\n",
+        );
+        fs::write(&file, source).unwrap();
+        assert_eq!(load_candidate(&file).unwrap().history.max_entries, 11);
+    }
+
+    #[test]
+    fn neither_configuration_nor_config_yields_defaults() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config.spar");
+        fs::write(&file, include_str!("../../../examples/sparsh-types.spar")).unwrap();
+        let config = load_candidate(&file).unwrap();
+        assert_eq!(config.history.max_entries, HistoryConfig::default().max_entries);
+    }
+
+    #[test]
     fn invalid_prompt_settings_do_not_discard_the_rest_of_the_config() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("sparsh.spar");
@@ -611,6 +785,27 @@ mod tests {
             .prompt_issues
             .iter()
             .any(|i| i.path == "config.prompt.path.parentLength"));
+    }
+
+    #[test]
+    fn typed_theme_section_loads_from_a_temp_config() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config.spar");
+        fs::write(
+            &file,
+            example_typed_config(r##"    theme: Option<SparshTheme> = some(value: SparshTheme(
+                palette: some(value: SparshThemePalette(accent: some(value: "#8ab4f8"))),
+                completion: some(value: SparshThemeCompletion(menuSelected: some(value: SparshThemeStyle(
+                    foreground: some(value: "$accent"),
+                    background: some(value: "black")
+                ))))
+            ));"##),
+        ).unwrap();
+        let config = load_candidate(&file).unwrap();
+        assert_eq!(config.theme.palette[&crate::PaletteKey::Accent], crate::ColorSpec::Rgb(138, 180, 248));
+        let selected = &config.theme.roles[&crate::ThemeRole::MenuSelected];
+        assert_eq!(selected.foreground, Some(crate::ThemeColor::Palette(crate::PaletteKey::Accent)));
+        assert_eq!(selected.background, Some(crate::ThemeColor::Literal(crate::ColorSpec::Indexed(0))));
     }
 
     #[test]

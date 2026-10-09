@@ -77,6 +77,7 @@ pub(crate) fn execute_plan_with_captured(
         requested_reload_config: false,
         requested_exec: None,
         requested_source: None,
+        requested_theme: None,
         last_result: None,
         deferred_error: None,
     };
@@ -109,6 +110,9 @@ pub(crate) fn execute_plan_with_captured(
     if let Some(request) = executor.requested_source {
         return Ok(ShellResult::SourceRequest(request));
     }
+    if let Some(args) = executor.requested_theme {
+        return Ok(ShellResult::ThemeRequest(args));
+    }
     Ok(executor.last_result.unwrap_or({
         ShellResult::Process(spar::ShellPlanOutcome {
             success: outcome.success,
@@ -132,6 +136,7 @@ struct SparshExecutor<'a> {
     requested_reload_config: bool,
     requested_exec: Option<(Vec<String>, CommandPlan)>,
     requested_source: Option<crate::builtin::SourceRequest>,
+    requested_theme: Option<Vec<String>>,
     last_result: Option<ShellResult>,
     /// A builtin failed but later steps of the chain (`||`, `;`) may still
     /// run. Reported before the next command, or returned if none follows.
@@ -291,6 +296,7 @@ impl spar_process::StepExecutor for SparshExecutor<'_> {
         self.requested_exit.is_some()
             || self.requested_exec.is_some()
             || self.requested_source.is_some()
+            || self.requested_theme.is_some()
             || self.requested_reload_config
     }
 }
@@ -703,6 +709,7 @@ impl SparshExecutor<'_> {
             requested_reload_config: false,
             requested_exec: None,
             requested_source: None,
+        requested_theme: None,
             stdin,
             stdin_available,
             login_shell,
@@ -738,6 +745,7 @@ impl SparshExecutor<'_> {
         self.requested_reload_config = context.requested_reload_config;
         self.requested_exec = context.requested_exec.map(|words| (words, plan.clone()));
         self.requested_source = context.requested_source;
+        self.requested_theme = context.requested_theme;
         self.last_status = visible.status;
         let status = spar_process::ExitStatus {
             success: visible.status == 0,
@@ -1101,6 +1109,7 @@ fn run_isolated_builtin_stage(
         requested_reload_config: false,
         requested_exec: None,
         requested_source: None,
+        requested_theme: None,
         stdin,
         stdin_available: true,
         login_shell,
@@ -1320,7 +1329,7 @@ fn render_pipeline_for_job(pipeline: &PipelinePlan) -> String {
         .join(" | ")
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if !value.is_empty()
         && value
             .chars()
